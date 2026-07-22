@@ -1,0 +1,41 @@
+{
+  "collision_boxes": [
+    {
+      "frame": "scene",
+      "friction": 0.8,
+      "name": "scene_collision_box",
+      "position": [
+        0.58,
+        0.04,
+        -0.5
+      ],
+      "rpy_deg": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "size": [
+        0.4212000072002411,
+        0.44369998574256897,
+        0.12
+      ],
+      "type": "box",
+      "visible": false
+    }
+  ],
+  "format": "newton_scene_collision_boxes_v1",
+  "scene": {
+    "position": [
+      0.0,
+      -0.0184,
+      0.129
+    ],
+    "rpy_deg": [
+      0.0,
+      180.0,
+      0.0
+    ],
+    "scale": 1.0
+  },
+  "scene_glb": "../scene/scene.glb"
+}

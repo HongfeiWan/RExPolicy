@@ -1,0 +1,1 @@
+"""Dynamic-object scene helpers."""

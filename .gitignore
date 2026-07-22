@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.cache/
+.venv/
+.pytest_cache/
+
+checkpoints/*
+!checkpoints/README.md
+external/*
+!external/README.md
+local_data/
+logs/
+outputs/
+scene/*.glb
+
