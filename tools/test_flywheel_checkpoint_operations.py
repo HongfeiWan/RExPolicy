@@ -58,7 +58,12 @@ class TestCheckpointManager(unittest.TestCase):
             manifest = {
                 "git_commit": "abc123",
                 "world_size": 1,
-                "task": "reach_green_cap/v1",
+                "task": {
+                    "task_id": "reach_green_cap/v1",
+                    "action_dimension_masks": {
+                        "eef_9d": (True, True, True, False),
+                    },
+                },
                 "config": {"max_generations": 10, "learning_rate": 1.0e-3},
             }
 
@@ -243,6 +248,37 @@ class TestCheckpointManager(unittest.TestCase):
                     },
                 },
             )
+
+    def test_manifest_validation_uses_persisted_json_container_semantics(
+        self,
+    ) -> None:
+        saved = {
+            "task": {
+                "action_dimension_masks": {
+                    "eef_9d": [True, True, True, False],
+                    "nested": [[False, True], {"arm": [False, False]}],
+                }
+            }
+        }
+        current = {
+            "task": {
+                "action_dimension_masks": {
+                    "eef_9d": (True, True, True, False),
+                    "nested": ((False, True), {"arm": (False, False)}),
+                }
+            }
+        }
+
+        validate_manifest_compatible(saved, current)
+
+        current["task"]["action_dimension_masks"]["eef_9d"] = (
+            True,
+            True,
+            False,
+            False,
+        )
+        with self.assertRaisesRegex(ManifestMismatchError, "eef_9d"):
+            validate_manifest_compatible(saved, current)
 
     def test_rejected_candidate_does_not_replace_latest(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

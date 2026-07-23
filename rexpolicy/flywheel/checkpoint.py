@@ -191,8 +191,11 @@ def validate_manifest_compatible(
     allowed_differences: Sequence[str] = tuple(DEFAULT_MUTABLE_MANIFEST_PATHS),
 ) -> None:
     """Require exact manifest equality except for explicit operational fields."""
-    saved_flat = _flatten_manifest(saved)
-    current_flat = _flatten_manifest(current)
+    # Manifests are persisted as JSON, which converts tuples to lists and NumPy
+    # scalars to Python scalars. Compare the same representation that is stored
+    # on disk so an otherwise identical in-memory task contract can resume.
+    saved_flat = _flatten_manifest(json.loads(_canonical_json(saved)))
+    current_flat = _flatten_manifest(json.loads(_canonical_json(current)))
     allowed = set(allowed_differences)
     differences: list[str] = []
     for path in sorted(set(saved_flat) | set(current_flat)):
