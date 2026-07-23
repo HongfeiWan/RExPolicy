@@ -29,18 +29,27 @@ def main() -> None:
     import torch.distributed as dist
     from torch.nn.parallel import DistributedDataParallel
 
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if visible:
+        tokens = [token.strip() for token in visible.split(",") if token.strip()]
+        if local_rank >= len(tokens):
+            raise RuntimeError("LOCAL_RANK exceeds CUDA_VISIBLE_DEVICES")
+        physical_gpu = tokens[local_rank]
+    else:
+        physical_gpu = local_rank
+    preflight_selected_gpus(
+        [physical_gpu],
+        minimum_free_mib=2048,
+        allowed_pids=[os.getpid()],
+    )
+
     context = DistributedContext.initialize(timeout_minutes=1)
     try:
         if context.world_size < 2:
             raise RuntimeError("NCCL preflight requires at least two ranks")
         if torch.cuda.current_device() != context.local_rank:
             raise RuntimeError("Rank is mapped to the wrong CUDA device")
-        visible = os.environ.get("CUDA_VISIBLE_DEVICES")
-        if visible:
-            tokens = [token.strip() for token in visible.split(",") if token.strip()]
-            physical_gpu = tokens[context.local_rank]
-        else:
-            physical_gpu = context.local_rank
         preflight_error = None
         try:
             preflight_selected_gpus(

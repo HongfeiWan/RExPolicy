@@ -21,6 +21,7 @@ from rexpolicy.flywheel.experience import (
 )
 from tools.run_flywheel_ddp import (
     _directory_descriptors,
+    _early_gpu_preflight,
     _git_source_descriptor,
     _normalized_action_diversity,
     _validate_run_directory_mode,
@@ -262,6 +263,27 @@ class TestRunnerConfiguration(unittest.TestCase):
         self.assertEqual(args.isaac_groot_root, Path("/runtime/Isaac-GR00T"))
         self.assertEqual(args.policy_checkpoint, Path("/weights/policy"))
         self.assertEqual(args.vlm_model, Path("/weights/vlm"))
+
+    def test_early_preflight_checks_physical_gpu_before_distributed_init(
+        self,
+    ) -> None:
+        args = create_parser().parse_args(["--validate-only"])
+        with (
+            mock.patch.dict(
+                os.environ,
+                {"CUDA_VISIBLE_DEVICES": "2,4", "LOCAL_RANK": "1"},
+                clear=False,
+            ),
+            mock.patch(
+                "tools.run_flywheel_ddp.preflight_selected_gpus"
+            ) as preflight,
+        ):
+            _early_gpu_preflight(args)
+        preflight.assert_called_once_with(
+            ["4"],
+            minimum_free_mib=args.minimum_free_gpu_mib,
+            allowed_pids=[os.getpid()],
+        )
 
     def test_new_run_rejects_existing_flywheel_artifacts(self) -> None:
         context = DistributedContext(

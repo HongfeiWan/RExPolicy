@@ -1396,6 +1396,18 @@ def _coordinated_gpu_preflight(
         raise RuntimeError("GPU preflight failed: " + "; ".join(errors))
 
 
+def _early_gpu_preflight(args: argparse.Namespace) -> None:
+    """Reject occupied GPUs before creating a CUDA or NCCL context."""
+    if not args.strict_gpu_preflight:
+        return
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    preflight_selected_gpus(
+        [_physical_gpu_token(local_rank)],
+        minimum_free_mib=args.minimum_free_gpu_mib,
+        allowed_pids=[os.getpid()],
+    )
+
+
 def _generation_metrics(
     *,
     context: DistributedContext,
@@ -1659,6 +1671,7 @@ def main() -> None:
     args = create_parser().parse_args()
     task = get_task_spec(args.task_id)
     _validate_args(args, task)
+    _early_gpu_preflight(args)
     context = DistributedContext.initialize()
     operations: RunOperations | None = None
     env: GrootNewtonEnv | None = None
