@@ -7,6 +7,7 @@ import json
 import os
 import random
 import socket
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -30,6 +31,7 @@ from rexpolicy.flywheel.operations import (
     RunOperations,
     collect_runtime_provenance,
     preflight_selected_gpus,
+    query_gpu_processes,
     sanitize_for_logging,
 )
 
@@ -503,7 +505,6 @@ class TestRunOperations(unittest.TestCase):
             [0, "GPU-b"],
             command_runner=self._nvidia_smi,
             user_lookup=lambda _pid: "test",
-            allow_current_process_group=False,
         )
         self.assertEqual([device.index for device in result.devices], [0, 1])
 
@@ -518,8 +519,43 @@ class TestRunOperations(unittest.TestCase):
                 [0],
                 command_runner=busy_nvidia_smi,
                 user_lookup=lambda _pid: "other-user",
-                allow_current_process_group=False,
             )
+
+    def test_gpu_preflight_rejects_unlisted_same_process_group_pid(self) -> None:
+        child = subprocess.Popen(["sleep", "30"])
+        try:
+            self.assertEqual(os.getpgid(child.pid), os.getpgrp())
+
+            def busy_nvidia_smi(
+                command: list[str] | tuple[str, ...],
+            ) -> str:
+                if "--query-compute-apps" in " ".join(command):
+                    return f"GPU-a, {child.pid}, python, 512\n"
+                return self._nvidia_smi(command)
+
+            with self.assertRaisesRegex(GpuPreflightError, f"pid={child.pid}"):
+                preflight_selected_gpus(
+                    [0],
+                    command_runner=busy_nvidia_smi,
+                    user_lookup=lambda _pid: "same-group",
+                )
+        finally:
+            child.terminate()
+            child.wait(timeout=5)
+
+    def test_gpu_process_query_fails_closed_when_nvidia_smi_fails(self) -> None:
+        def failed_nvidia_smi(_command: list[str] | tuple[str, ...]) -> str:
+            raise subprocess.CalledProcessError(
+                returncode=1,
+                cmd="nvidia-smi",
+                output="",
+            )
+
+        with self.assertRaisesRegex(
+            OperationsError,
+            "Failed to query active NVIDIA compute processes",
+        ):
+            query_gpu_processes(failed_nvidia_smi)
 
     def test_recursive_sanitizer_handles_keys_urls_and_cli_pairs(self) -> None:
         sanitized = sanitize_for_logging(

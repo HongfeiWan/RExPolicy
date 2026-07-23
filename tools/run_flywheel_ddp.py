@@ -1131,9 +1131,9 @@ def _git_source_descriptor(path: Path) -> dict[str, Any]:
     """Fingerprint committed and dirty source without copying the repository."""
     path = path.expanduser().resolve()
 
-    def run(*arguments: str) -> bytes:
+    def run_at(base: Path, *arguments: str) -> bytes:
         return subprocess.run(
-            ["git", "-C", str(path), *arguments],
+            ["git", "-C", str(base), *arguments],
             check=True,
             capture_output=True,
         ).stdout
@@ -1165,18 +1165,42 @@ def _git_source_descriptor(path: Path) -> dict[str, Any]:
         }
 
     root = Path(root_probe.stdout.decode("utf-8").strip()).resolve()
-    commit = run("rev-parse", "HEAD").decode("ascii").strip()
-    diff = run("diff", "--binary", "--no-ext-diff", "HEAD", "--")
-    untracked_output = run(
+    try:
+        source_scope = path.relative_to(root)
+    except ValueError as error:
+        raise RuntimeError(
+            f"Source path {path} is outside its Git root {root}"
+        ) from error
+    scope_argument = source_scope.as_posix() or "."
+    commit = run_at(root, "rev-parse", "HEAD").decode("ascii").strip()
+    diff = run_at(
+        root,
+        "diff",
+        "--binary",
+        "--no-ext-diff",
+        "HEAD",
+        "--",
+        scope_argument,
+    )
+    untracked_output = run_at(
+        root,
         "ls-files",
         "--others",
         "--exclude-standard",
         "-z",
+        "--",
+        scope_argument,
     )
     untracked = []
     for encoded in sorted(item for item in untracked_output.split(b"\0") if item):
         relative = encoded.decode("utf-8", errors="surrogateescape")
         candidate = root / relative
+        relative_path = Path(relative)
+        if any(
+            part in _EPHEMERAL_SOURCE_DIRECTORIES
+            for part in relative_path.parts
+        ) or relative_path.suffix in _EPHEMERAL_SOURCE_SUFFIXES:
+            continue
         if candidate.is_file():
             untracked.append(
                 {
@@ -1185,13 +1209,18 @@ def _git_source_descriptor(path: Path) -> dict[str, Any]:
                     "sha256": file_sha256(candidate),
                 }
             )
-    submodules = run("submodule", "status", "--recursive").decode(
-        "utf-8",
-        errors="replace",
-    )
+    submodules = run_at(
+        root,
+        "submodule",
+        "status",
+        "--recursive",
+        "--",
+        scope_argument,
+    ).decode("utf-8", errors="replace")
     return {
         "path": str(path),
         "repository_root": str(root),
+        "source_scope": scope_argument,
         "git_available": True,
         "commit": commit,
         "tracked_diff_sha256": hashlib.sha256(diff).hexdigest(),
@@ -1248,7 +1277,9 @@ def _artifact_descriptor(args: argparse.Namespace) -> dict[str, Any]:
         "sources": {
             "rexpolicy": _git_source_descriptor(REPO_ROOT),
             "isaac_groot": _git_source_descriptor(args.isaac_groot_root),
-            "newton": _git_source_descriptor(_newton_source_root()),
+            "newton": _git_source_descriptor(
+                _newton_source_root() / "newton"
+            ),
         },
         "simulator_assets": _asset_descriptors(args),
     }
@@ -1380,12 +1411,15 @@ def _coordinated_gpu_preflight(
 ) -> None:
     if not args.strict_gpu_preflight:
         return
+    worker_pids = [
+        int(pid) for pid in context.all_gather_objects(os.getpid())
+    ]
     error = None
     try:
         preflight_selected_gpus(
             [_physical_gpu_token(context.local_rank)],
             minimum_free_mib=args.minimum_free_gpu_mib,
-            allowed_pids=[os.getpid()],
+            allowed_pids=worker_pids,
         )
     except Exception as caught:
         error = f"{type(caught).__name__}: {caught}"

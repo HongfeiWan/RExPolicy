@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -248,6 +249,54 @@ class TestRunnerConfiguration(unittest.TestCase):
                 _git_source_descriptor(root)["source_tree_sha256"],
                 first_hash,
             )
+
+    def test_git_source_descriptor_scopes_dirty_state_to_runtime_tree(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runtime = root / "runtime"
+            runtime.mkdir()
+            source = runtime / "module.py"
+            source.write_text("VALUE = 1\n", encoding="utf-8")
+            log = root / "volatile.log"
+            log.write_text("initial\n", encoding="utf-8")
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            subprocess.run(["git", "-C", str(root), "add", "."], check=True)
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(root),
+                    "-c",
+                    "user.name=RExPolicy Test",
+                    "-c",
+                    "user.email=rexpolicy@example.invalid",
+                    "commit",
+                    "-qm",
+                    "initial",
+                ],
+                check=True,
+            )
+            cache = runtime / "__pycache__"
+            cache.mkdir()
+            (cache / "module.cpython-311.pyc").write_bytes(b"generated")
+
+            clean = _git_source_descriptor(runtime)
+            log.write_text("changed\n", encoding="utf-8")
+            unrelated_dirty = _git_source_descriptor(runtime)
+            source.write_text("VALUE = 2\n", encoding="utf-8")
+            runtime_dirty = _git_source_descriptor(runtime)
+
+            self.assertEqual(clean["source_scope"], "runtime")
+            self.assertTrue(clean["clean"])
+            self.assertEqual(clean["untracked"], [])
+            self.assertEqual(
+                unrelated_dirty["tracked_diff_sha256"],
+                clean["tracked_diff_sha256"],
+            )
+            self.assertTrue(unrelated_dirty["clean"])
+            self.assertFalse(runtime_dirty["clean"])
 
     def test_artifact_environment_variables_feed_parser_defaults(self) -> None:
         with mock.patch.dict(

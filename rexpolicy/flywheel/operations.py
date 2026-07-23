@@ -344,10 +344,10 @@ def query_gpu_processes(
                 "--format=csv,noheader,nounits",
             ]
         )
-    except subprocess.CalledProcessError as error:
-        if not (error.stdout or "").strip():
-            return ()
-        raise
+    except (OSError, subprocess.SubprocessError) as error:
+        raise OperationsError(
+            "Failed to query active NVIDIA compute processes"
+        ) from error
     processes = []
     for row in _parse_csv(output):
         if len(row) != 4:
@@ -365,29 +365,11 @@ def query_gpu_processes(
     return tuple(processes)
 
 
-def _same_process_group_pids() -> set[int]:
-    process_group = os.getpgrp()
-    members: set[int] = set()
-    proc = Path("/proc")
-    if not proc.is_dir():
-        return {os.getpid()}
-    for entry in proc.iterdir():
-        if not entry.name.isdigit():
-            continue
-        try:
-            if os.getpgid(int(entry.name)) == process_group:
-                members.add(int(entry.name))
-        except (OSError, ProcessLookupError):
-            continue
-    return members
-
-
 def preflight_selected_gpus(
     selected_devices: Sequence[str | int],
     *,
     minimum_free_mib: int = 2048,
     allowed_pids: Sequence[int] = (),
-    allow_current_process_group: bool = True,
     command_runner: Callable[[Sequence[str]], str] = _run_command,
     user_lookup: Callable[[int], str] = _process_user,
 ) -> GpuPreflightResult:
@@ -426,8 +408,6 @@ def preflight_selected_gpus(
     processes = query_gpu_processes(command_runner, user_lookup=user_lookup)
     allowed = set(int(pid) for pid in allowed_pids)
     allowed.add(os.getpid())
-    if allow_current_process_group:
-        allowed.update(_same_process_group_pids())
     selected_uuids = {device.uuid for device in selected}
     foreign = [
         process

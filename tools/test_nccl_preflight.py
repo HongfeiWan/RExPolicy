@@ -50,12 +50,15 @@ def main() -> None:
             raise RuntimeError("NCCL preflight requires at least two ranks")
         if torch.cuda.current_device() != context.local_rank:
             raise RuntimeError("Rank is mapped to the wrong CUDA device")
+        worker_pids = [
+            int(pid) for pid in context.all_gather_objects(os.getpid())
+        ]
         preflight_error = None
         try:
             preflight_selected_gpus(
                 [physical_gpu],
                 minimum_free_mib=2048,
-                allowed_pids=[os.getpid()],
+                allowed_pids=worker_pids,
             )
         except Exception as error:
             preflight_error = f"{type(error).__name__}: {error}"
