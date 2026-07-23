@@ -1,54 +1,82 @@
 # RExPolicy Roadmap
 
-The roadmap intentionally separates the next runnable experiment from the final
-robot-experience system. Features do not move into an earlier phase merely
-because they are useful in the final design.
+The roadmap separates the runnable minimum flywheel from the intended
+multi-task, multi-reward system. The current implementation deliberately proves
+the smallest useful self-improvement loop before adding automatic task
+authoring.
 
 ## Phase 0 — migrated baseline
 
-Status: **present in this repository**.
+Status: **complete**.
 
-- Newton batched simulator and task metrics.
-- Frozen-capable GR00T VLM + current Flow-DiT inference path.
-- 19D EEF + Linker L10 execution contract.
-- Runtime tests and compact scene assets.
+- Newton batched simulator, GPU observations, action chunks, and deterministic
+  reset.
+- Frozen-capable GR00T VLM plus the original Flow-DiT inference path.
+- Validated 19D EEF + Linker L10 action representation.
+- Required compact assets and focused runtime tests.
 
-No flywheel collector or trainer has been implemented yet.
+## Phase 1 — minimum Reach flywheel
 
-## Phase 1 — minimum flywheel
+Status: **implemented; node3 two-GPU and soak acceptance remain runtime gates**.
 
-Status: **next implementation; not started**.
+The fixed `reach_green_cap/v1` task establishes whether the existing Flow-DiT
+can improve using its own Newton-scored chunks. Its instruction asks the open
+right hand to approach a safe pre-grasp point beside the green bottle cap
+without touching or moving the bottle. Only EEF XYZ is effective; orientation,
+hand, and arm targets remain fixed.
 
-Prove one hypothesis on one Reach task: policy rollouts filtered by Newton reward
-can improve K=1 held-out Flow-DiT performance without a PPO teacher or new human
-demonstrations. The exact scope is in
-[minimum_flywheel.md](minimum_flywheel.md).
+The implementation provides:
+
+- same-state K-way action sampling, within-state advantages, and success-first
+  continuation;
+- all-success retention and successful-path back-indexing;
+- FP32 DiT/AdamW updates with BF16 autocast and DDP-global weight
+  normalization;
+- guaranteed once-per-generation coverage of every newly selected sample;
+- metadata-only Success Archive shards and deterministic historical
+  round-robin replay;
+- atomic full-state checkpoint/resume, run logs, heartbeat, GPU monitoring, and
+  stop-at-generation-boundary control;
+- sealed K=1 held-out evaluation and non-regression gating.
+
+No PPO, GAE, critic, full-action teacher, compact replacement policy, or human
+pretraining dataset is required. See [minimum_flywheel.md](minimum_flywheel.md)
+for the learning contract and [bootstrap_ddp.md](bootstrap_ddp.md) for the
+node3 validation protocol.
 
 ## Phase 2 — visual-language grounding
 
-- Two visually distinguishable targets in the same scene.
-- Instructions choose the target.
-- A small set of equivalent paraphrases.
-- Counterfactual evaluation: changing only the instruction changes behavior.
+- Add two visually distinguishable targets in the same scene.
+- Make the instruction, not simulator metadata exposed to the policy, select
+  the target.
+- Add equivalent paraphrases and counterfactual target instructions.
+- Test whether the frozen VLM preserves identity and pose before introducing an
+  adapter or limited unfreezing.
 
 ## Phase 3 — task and behavior expansion
 
-- Reach to pregrasp, grasp, lift, transport, and place curricula.
-- A small number of deliberately different reward profiles.
-- Simple per-task and per-behavior replay balancing.
-- Physics, camera, object, and scene randomization.
+- Extend the curriculum from Reach to pre-grasp, grasp, lift, transport, and
+  place.
+- Add a deliberately diverse set of reward profiles for the same canonical
+  success predicate.
+- Balance replay by behavior cell, reward profile, and initial-state group
+  while keeping every valid success eligible.
+- Add physics, camera, object, and scene randomization only after fixed-task
+  replay remains deterministic.
 
 ## Phase 4 — autonomous task authoring
 
-- GPT-generated versioned task specifications and instruction batches.
-- Diverse reward-profile generation rather than one global shaping reward.
-- Deterministic success and safety predicates.
-- Declarative reward compilation and automated validation.
-- Quality-diversity archive and reward-gap discovery.
+- Ask GPT to generate versioned task specifications, reward-profile
+  populations, and instruction batches.
+- Compile generated rewards into deterministic simulator metrics and validate
+  reachability, visibility, reward direction, success, and safety.
+- Separate collection/training instructions from held-out promotion and sealed
+  audit instructions.
+- Add quality-diversity indexing and reward-gap discovery without deleting the
+  underlying Success Archive.
 
 ## Final system
 
-The intended long-term design, including reward diversity, instruction
-generation, replayable experience storage, evaluation gates, and model
-promotion, is preserved in [final_flywheel.md](final_flywheel.md).
-
+The stable end-state decisions—unified success semantics, intentionally
+non-uniform rewards, replay instead of stored video, and held-out model
+promotion—are preserved in [final_flywheel.md](final_flywheel.md).

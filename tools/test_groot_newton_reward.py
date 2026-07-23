@@ -713,7 +713,11 @@ class TestGrootNewtonReward(unittest.TestCase):
 
         identity = wp.transform_identity()
         bottle = wp.transform(wp.vec3(*expected_tcp), wp.quat_identity())
-        body_q = wp.array([bottle, identity, identity, identity, identity, identity, identity], dtype=wp.transform)
+        body_q = wp.array(
+            [bottle, identity, identity, identity, identity, identity, identity],
+            dtype=wp.transform,
+            device=self.device,
+        )
         body_qd = wp.zeros(7, dtype=wp.spatial_vector, device=self.device)
         goal = np.asarray([[*expected_tcp[:2], expected_tcp[2] + 0.1]], dtype=np.float32)
         initial_pose = np.asarray([[*expected_tcp, 0.0, 0.0, 0.0, 1.0]], dtype=np.float32)

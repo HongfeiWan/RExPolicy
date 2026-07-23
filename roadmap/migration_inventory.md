@@ -19,17 +19,21 @@ place. Imports were renamed from `teleop_stack` to the `rexpolicy` package.
 - The generated robot URDF, Nero meshes, Linker L10 URDF/meshes, bottle visual,
   camera configurations, collision boxes, and scene physics configuration.
 
-## Intentionally excluded
+## Initially excluded
 
 - `.venv`, Conda files, package caches, and Python bytecode.
-- GR00T and Cosmos model weights (approximately several GB).
+- GR00T and Cosmos model weights (approximately several GB). These were copied
+  into Git-ignored local checkpoint directories when Phase 1 work began.
 - old compact-DP checkpoints, Residual PPO checkpoints, and training outputs.
 - LeRobot/smooth datasets, rollout data, debug logs, and images.
 - the optional 168 MB `scene/scene.glb` room visual.
 - compact Diffusion Policy and Residual PPO training code, because the current
   architecture retains the existing GR00T Flow-DiT.
-- the data-flywheel collector, replay store, trainer, and promotion service;
-  these are specified but intentionally not implemented yet.
+- the data-flywheel collector, replay store, trainer, and promotion service.
+  These were not migrated from Newton: RExPolicy now implements its own
+  same-state collector, episode and Success Archive JSONL shards, FP32/DDP DiT
+  trainer, atomic checkpoint/resume, operations logging, and K=1 evaluation
+  gate.
 
 ## External runtime locations
 
@@ -42,9 +46,9 @@ GROOT_VLM_MODEL
 GROOT_SMOOTH_DATASET
 ```
 
-RExPolicy-local paths are preferred. The current machine's sibling
-`Isaac-GR00T` repository and `../newton/checkpoints` are transitional fallbacks
-so the migrated runtime can be checked without duplicating model artifacts.
+RExPolicy-local checkpoint paths are preferred and now populated on this
+machine. The sibling `Isaac-GR00T` repository supplies the Python source without
+copying its `.venv`, datasets, outputs, or other large development artifacts.
 
 ## Migration verification
 
@@ -59,3 +63,9 @@ so the migrated runtime can be checked without duplicating model artifacts.
   during interpreter teardown. The same behavior is reproducible in the source
   Newton repository, so it is tracked as an environment/runtime issue rather
   than a migration regression.
+- `reach_green_cap/v1` has a dedicated instruction/reward/success contract,
+  effective-action projection, replay fingerprint, and opt-in
+  production-physics GPU reachability oracle.
+- Flywheel unit suites cover globally weighted sample scheduling, successful
+  reference replay, held-out gate logic, FP32 optimizer state, atomic
+  checkpoint integrity, GPU monitoring, and launch preflight.

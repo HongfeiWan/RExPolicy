@@ -1,0 +1,416 @@
+# DDP Flywheel Operations
+
+This is the execution contract for the minimum `reach_green_cap/v1` flywheel.
+It covers local validation, safe deployment to node3, a disposable two-
+generation engineering run, and a staged 10→20 generation soak.
+
+## Runtime data flow
+
+```text
+same-state K-way collection
+          │
+          ├── all episode records ──> immutable per-rank JSONL
+          │
+          ├── new direct/path success ──> Success Archive references
+          │
+          └── selected current samples
+                         │
+historical success replay ───────────┤
+                         ▼
+coverage-first globally weighted FP32 DiT update
+                         │
+           parameter/update/sync health checks
+                         │
+                         ▼
+         generation archive + atomic checkpoint
+                         │
+             fixed K=1 held-out evaluation
+                  ┌──────┴──────┐
+                accept         reject
+                  │              │
+             last-good       stop the run
+```
+
+One process owns one CUDA device and one K-world Newton environment. Branch
+advantages remain decision-local and rank-local; only weighted gradients and
+health statistics are reduced across ranks. DDP-global normalization prevents a
+rank with fewer samples from receiving disproportionate influence.
+
+Flow-DiT parameters and AdamW moments are FP32. Sampling and training forward
+passes use BF16 autocast. During collection, Adam state may be offloaded to CPU;
+during the update, the frozen VLM may be offloaded so both 32GiB GPUs retain
+headroom. `gradient_norm`, `update_rms`, `update_max_abs`,
+`changed_fraction`, and `parameter_sync_max_abs` are generation acceptance
+metrics, not optional diagnostics.
+
+## Run directory
+
+Every launch uses a unique `--run-dir` outside the source worktree:
+
+```text
+<run-dir>/
+  run_manifest.json
+  launches/
+    launch-<timestamp>-<pid>-<id>.json
+  RUNNING.lock
+  STOP
+  metrics.jsonl
+  logs/
+    rank-00000.log
+    rank-00001.log
+  pids/
+    rank-00000.json
+    rank-00001.json
+  gpu_metrics.csv
+  gpu_processes.csv
+  heartbeats/
+    rank-00000.json
+    rank-00001.json
+  exit-rank-00000.json
+  exit-rank-00001.json
+  archive/
+    generation-NNNNNN/
+    attempts/
+  checkpoints/
+    latest.json
+    generation-NNNNNN/
+```
+
+The current manifest and immutable launch records preserve every initial and
+resume command, environment, git SHA, GPU UUID and topology, task/config
+fingerprints, and base artifact hashes. Each rank writes a timestamped log and
+heartbeat; rank zero writes aggregate metrics and samples GPU utilization,
+memory, power, temperature, clocks, and processes every five seconds.
+
+Create `<run-dir>/STOP` to request a clean stop at the next generation
+boundary. The workers finish the synchronized update, write a checkpoint even
+when that generation is not on the normal checkpoint interval, and then write
+their exit records. Wait for both `exit-rank-*.json` files before relaunching.
+Resume with `--resume-latest` or with `--resume-from` pointing to a complete
+checkpoint inside that run's `checkpoints/` directory. An explicit resume
+clears the old `STOP` marker; a plain launch into the existing run directory is
+refused. Do not send credentials through command-line arguments or environment
+variables that are captured by the run manifest.
+
+## Local validation
+
+Activate the existing environment:
+
+```bash
+conda activate newton
+cd /home/whf/Project/RExPolicy
+python -m unittest \
+  tools.test_flywheel_bootstrap \
+  tools.test_flywheel_trainer \
+  tools.test_flywheel_archive_evaluation \
+  tools.test_flywheel_checkpoint_operations \
+  tools.test_groot_newton_reach
+```
+
+Run the CUDA production-physics oracle separately:
+
+```bash
+REXPOLICY_RUN_GPU_ORACLE=1 \
+  python -m unittest tools.test_groot_newton_reach
+```
+
+Validate model artifacts, task contract, launch configuration, and selected GPU
+availability without loading the policy:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 REXPOLICY_NPROC=2 \
+  tools/launch_flywheel_ddp.sh --validate-only
+```
+
+Launch preflight refuses a selected GPU containing a foreign compute process or
+less than the configured free-memory margin. It reports the process and exits;
+it never kills or preempts another user's job.
+
+## Git and node3 deployment
+
+Development is committed on `whf/flywheel-readiness` and pushed through the SSH
+remote. Deployment uses the resulting immutable commit SHA; do not copy a dirty
+working tree.
+
+On node3:
+
+1. Fetch the branch in the existing repository.
+2. Create a clean detached worktree at
+   `/home/user/project/deploy/RExPolicy/<commit-sha>`.
+3. Use `/home/user/project/newton/conda_envs/newton`; do not copy `.venv`,
+   Conda files, or package caches.
+4. Point `ISAAC_GROOT_ROOT`, `GROOT_POLICY_CHECKPOINT`, and `GROOT_VLM_MODEL`
+   at the existing node3 source and weights.
+5. Write all run data to `/home/user/runs/rexpolicy/<run-id>`.
+
+The deployed source worktree must remain clean. A run manifest must contain the
+same commit SHA as the detached worktree before collection starts.
+
+## NCCL preflight
+
+Start with the least restrictive node3 setting:
+
+```bash
+cd /home/user/project/deploy/RExPolicy/<commit-sha>
+export PATH=/home/user/project/newton/conda_envs/newton/bin:$PATH
+export CUDA_VISIBLE_DEVICES=0,1
+export REXPOLICY_NPROC=2
+export NCCL_CUMEM_HOST_ENABLE=0
+
+python -m torch.distributed.run \
+  --standalone --nnodes=1 --nproc-per-node=2 \
+  -m tools.test_nccl_preflight
+```
+
+The preflight performs repeated barriers, small and 256MiB all-reduces, and a
+tiny DDP optimizer update. Run it three consecutive times. If it hangs or
+fails, add settings in this order and restart the three-pass count:
+
+1. `NCCL_IB_DISABLE=1` and `NCCL_SOCKET_IFNAME=lo`;
+2. `NCCL_P2P_DISABLE=1`.
+
+Use and record the least restrictive combination that passes three times.
+Do not disable shared memory.
+
+## Disposable two-generation run
+
+The engineering run starts from the original base weights and uses:
+
+- 2 ranks, K=2 per rank, 1 episode per rank and generation;
+- 8 control steps and execution horizon 1;
+- batch 1, accumulation 1, one requested optimizer step;
+- learning rate `3e-6`, weight decay `1e-4`, clip norm `1.0`;
+- optimizer-state offload, a 65,536-element parameter probe, and a checkpoint
+  every generation;
+- no held-out evaluation, because this disposable run validates engineering
+  continuity rather than model quality.
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 REXPOLICY_NPROC=2 \
+  tools/launch_flywheel_ddp.sh \
+  --run-dir /home/user/runs/rexpolicy/reach-smoke-<commit-sha> \
+  --task-id reach_green_cap/v1 \
+  --max-generations 2 \
+  --candidates-per-state 2 \
+  --episodes-per-generation 1 \
+  --episode-control-steps 8 \
+  --execution-horizon 1 \
+  --chunk-elite-fraction 0.5 \
+  --advantage-temperature 0.1 \
+  --same-state-tolerance 1e-5 \
+  --train-steps-per-generation 1 \
+  --train-batch-size 1 \
+  --gradient-accumulation 1 \
+  --learning-rate 3e-6 \
+  --weight-decay 1e-4 \
+  --gradient-clip-norm 1.0 \
+  --parameter-probe-size 65536 \
+  --parameter-sync-tolerance 0 \
+  --success-replay-per-rank 4 \
+  --seed 20260722 \
+  --checkpoint-every 1 \
+  --save \
+  --eval-every 0 \
+  --no-eval-at-start \
+  --eval-at-end \
+  --eval-reset-recipes 8 \
+  --eval-diffusion-seeds 4 \
+  --optimizer-state-offload \
+  --offload-vlm-during-update \
+  --camera-textures \
+  --no-scene-visuals \
+  --no-capture-graph \
+  --no-hydroelastic \
+  --bottle-settle-frames 60 \
+  --substeps-per-frame 16
+```
+
+After generation 2, start a fresh process and load the checkpoint without
+collecting an additional generation. Resume validates the saved manifest but
+does not import omitted CLI values, so repeat every semantic argument:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 REXPOLICY_NPROC=2 \
+  tools/launch_flywheel_ddp.sh \
+  --run-dir /home/user/runs/rexpolicy/reach-smoke-<commit-sha> \
+  --resume-latest \
+  --task-id reach_green_cap/v1 \
+  --max-generations 2 \
+  --candidates-per-state 2 \
+  --episodes-per-generation 1 \
+  --episode-control-steps 8 \
+  --execution-horizon 1 \
+  --chunk-elite-fraction 0.5 \
+  --advantage-temperature 0.1 \
+  --same-state-tolerance 1e-5 \
+  --train-steps-per-generation 1 \
+  --train-batch-size 1 \
+  --gradient-accumulation 1 \
+  --learning-rate 3e-6 \
+  --weight-decay 1e-4 \
+  --gradient-clip-norm 1.0 \
+  --parameter-probe-size 65536 \
+  --parameter-sync-tolerance 0 \
+  --success-replay-per-rank 4 \
+  --seed 20260722 \
+  --checkpoint-every 1 \
+  --save \
+  --eval-every 0 \
+  --no-eval-at-start \
+  --eval-at-end \
+  --eval-reset-recipes 8 \
+  --eval-diffusion-seeds 4 \
+  --optimizer-state-offload \
+  --offload-vlm-during-update \
+  --camera-textures \
+  --no-scene-visuals \
+  --no-capture-graph \
+  --no-hydroelastic \
+  --bottle-settle-frames 60 \
+  --substeps-per-frame 16
+```
+
+The smoke passes only when:
+
+- both generations have a finite, nonzero update and exact sampled-parameter
+  synchronization;
+- current-generation coverage is 100%;
+- the second-generation VLM/optimizer offload cycle does not OOM;
+- the fresh process verifies checksums and restores generation, optimizer step,
+  RNG, archive, and replay cursor exactly;
+- both GPU logs and run-status files close normally.
+
+This run is disposable and is not a learning baseline.
+
+## Staged 10→20 generation soak
+
+Create a new run from the original base checkpoint. Keep K and all semantic
+settings fixed throughout the soak:
+
+- 2 ranks, K=4 per rank, 2 episodes per rank and generation;
+- 8 control steps and execution horizon 2;
+- elite fraction `0.5`, advantage temperature `0.1`;
+- batch 1, accumulation 2, four requested optimizer steps; coverage may
+  increase the effective count;
+- four historical successes per rank and generation;
+- learning rate `3e-6`, weight decay `1e-4`, clip norm `1.0`;
+- checkpoint and held-out evaluation every five generations.
+
+Stage A:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 REXPOLICY_NPROC=2 \
+  tools/launch_flywheel_ddp.sh \
+  --run-dir /home/user/runs/rexpolicy/reach-soak-<commit-sha> \
+  --task-id reach_green_cap/v1 \
+  --max-generations 10 \
+  --candidates-per-state 4 \
+  --episodes-per-generation 2 \
+  --episode-control-steps 8 \
+  --execution-horizon 2 \
+  --chunk-elite-fraction 0.5 \
+  --advantage-temperature 0.1 \
+  --same-state-tolerance 1e-5 \
+  --train-steps-per-generation 4 \
+  --train-batch-size 1 \
+  --gradient-accumulation 2 \
+  --learning-rate 3e-6 \
+  --weight-decay 1e-4 \
+  --gradient-clip-norm 1.0 \
+  --parameter-probe-size 65536 \
+  --parameter-sync-tolerance 0 \
+  --success-replay-per-rank 4 \
+  --seed 20260722 \
+  --checkpoint-every 5 \
+  --save \
+  --eval-every 5 \
+  --eval-at-start \
+  --eval-at-end \
+  --eval-reset-recipes 8 \
+  --eval-diffusion-seeds 4 \
+  --optimizer-state-offload \
+  --offload-vlm-during-update \
+  --camera-textures \
+  --no-scene-visuals \
+  --no-capture-graph \
+  --no-hydroelastic \
+  --bottle-settle-frames 60 \
+  --substeps-per-frame 16
+```
+
+Proceed only if generation 0/5/10 held-out gates, checkpoints, archive
+monotonicity, resource limits, and health metrics pass. Then extend the same
+run:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 REXPOLICY_NPROC=2 \
+  tools/launch_flywheel_ddp.sh \
+  --run-dir /home/user/runs/rexpolicy/reach-soak-<commit-sha> \
+  --resume-latest \
+  --task-id reach_green_cap/v1 \
+  --max-generations 20 \
+  --candidates-per-state 4 \
+  --episodes-per-generation 2 \
+  --episode-control-steps 8 \
+  --execution-horizon 2 \
+  --chunk-elite-fraction 0.5 \
+  --advantage-temperature 0.1 \
+  --same-state-tolerance 1e-5 \
+  --train-steps-per-generation 4 \
+  --train-batch-size 1 \
+  --gradient-accumulation 2 \
+  --learning-rate 3e-6 \
+  --weight-decay 1e-4 \
+  --gradient-clip-norm 1.0 \
+  --parameter-probe-size 65536 \
+  --parameter-sync-tolerance 0 \
+  --success-replay-per-rank 4 \
+  --seed 20260722 \
+  --checkpoint-every 5 \
+  --save \
+  --eval-every 5 \
+  --eval-at-start \
+  --eval-at-end \
+  --eval-reset-recipes 8 \
+  --eval-diffusion-seeds 4 \
+  --optimizer-state-offload \
+  --offload-vlm-during-update \
+  --camera-textures \
+  --no-scene-visuals \
+  --no-capture-graph \
+  --no-hydroelastic \
+  --bottle-settle-frames 60 \
+  --substeps-per-frame 16
+```
+
+The resume command reconstructs and strictly checks the semantic configuration;
+only `max_generations` increases from 10 to 20. The monitoring intervals may
+also change, but checkpoint/evaluation cadence and all training, task, physics,
+precision, replay, and evaluation-suite settings must remain identical.
+Held-out gates run at generations 15 and 20.
+
+## Soak acceptance
+
+The 20-generation run passes when:
+
+- no NCCL timeout, Xid, OOM, NaN, or Inf occurs;
+- every update is finite and nonzero, and sampled parameters are identical
+  across ranks;
+- current-generation sample exposure is 100%;
+- the Success Archive grows monotonically when success occurs and historical
+  replay becomes nonzero;
+- generation 10→20 resume has continuous checksums, optimizer step, RNG state,
+  archive shards, and replay cursor;
+- all K=1 gates accept;
+- per-GPU peak memory remains below approximately 30.5GiB and the last three
+  generations do not grow by more than 1GiB relative to the first three;
+- comparable-stage latency does not degrade persistently by more than 20%, and
+  median utilization during compute phases is at least 70%;
+- checkpoints, per-rank logs, JSONL metrics, GPU CSV, heartbeat, and final
+  status are complete;
+- generation 20 exits normally instead of becoming an unbounded job.
+
+“Keep all successes” means no valid success is hard-deleted, every new selected
+sample trains in its generation, and the archive cursor eventually revisits
+every retained success. It does not mean replaying the entire historical
+archive in every generation.

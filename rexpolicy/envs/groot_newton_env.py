@@ -68,6 +68,16 @@ _REWARD_MODE_IDS = {
     "normalized_dense": _REWARD_MODE_NORMALIZED_DENSE,
 }
 
+_TASK_MODE_BOTTLE_TRANSFER = "bottle_transfer"
+_TASK_MODE_REACH_GREEN_CAP = "reach_green_cap"
+_TASK_MODES = {_TASK_MODE_BOTTLE_TRANSFER, _TASK_MODE_REACH_GREEN_CAP}
+REACH_GREEN_CAP_TASK_ID = "reach_green_cap/v1"
+REACH_GREEN_CAP_INSTRUCTION = (
+    "move the open right hand to the safe pre-grasp position beside the green bottle cap "
+    "without moving the bottle"
+)
+_UINT64_MASK = (1 << 64) - 1
+
 _TASK_PHASE_APPROACH = 0
 _TASK_PHASE_CARRYING = 1
 _TASK_PHASE_RELEASED = 2
@@ -149,6 +159,25 @@ _NERO_MDH = (
 )
 
 
+def _splitmix64(value: int) -> int:
+    """Return one deterministic SplitMix64 output."""
+    value = (value + 0x9E3779B97F4A7C15) & _UINT64_MASK
+    value = ((value ^ (value >> 30)) * 0xBF58476D1CE4E5B9) & _UINT64_MASK
+    value = ((value ^ (value >> 27)) * 0x94D049BB133111EB) & _UINT64_MASK
+    return (value ^ (value >> 31)) & _UINT64_MASK
+
+
+def _reach_reset_xy_offset(seed: int, jitter_m: float) -> tuple[float, float]:
+    """Map an integer recipe seed to a stable XY offset."""
+    seed_bits = int(seed) & _UINT64_MASK
+    x_bits = _splitmix64(seed_bits)
+    y_bits = _splitmix64(x_bits)
+    scale = 1.0 / float(1 << 53)
+    x_unit = float(x_bits >> 11) * scale * 2.0 - 1.0
+    y_unit = float(y_bits >> 11) * scale * 2.0 - 1.0
+    return x_unit * jitter_m, y_unit * jitter_m
+
+
 @dataclass(frozen=True)
 class GrootNewtonEnvConfig:
     """Configuration for :class:`GrootNewtonEnv`.
@@ -166,6 +195,7 @@ class GrootNewtonEnvConfig:
     obs_mode: str = "state_dict+rgb"
     control_mode: str = "pd_eef_pose_abs"
     reward_mode: str = "normalized_dense"
+    task_mode: str = _TASK_MODE_BOTTLE_TRANSFER
     arm_action_delta: float = 0.1
     hand_action_delta: float = 0.1
     ik_iterations: int = 4
@@ -178,6 +208,12 @@ class GrootNewtonEnvConfig:
     hand_max_joint_step_rad: float = 0.08
     initial_hand_q: tuple[float, ...] = _GROOT_INITIAL_HAND_Q
     bottle_settle_frames: int = 60
+    reach_goal_offset_world: tuple[float, float, float] = (0.180, 0.080, 0.050)
+    reach_success_threshold: float = 0.040
+    reach_success_hold_steps: int = 2
+    reach_bottle_displacement_limit: float = 0.010
+    reach_reward_distance_scale: float = 0.030
+    reach_reset_xy_jitter_m: float = 0.010
     bottle_lift_height: float = 0.1
     bottle_min_xy_displacement: float = 0.1
     transport_start_distance: float = 0.01
@@ -233,6 +269,10 @@ class GrootNewtonEnvConfig:
             raise ValueError(
                 f"Unsupported reward_mode {self.reward_mode!r}; expected one of {sorted(_REWARD_MODE_IDS)}"
             )
+        if self.task_mode not in _TASK_MODES:
+            raise ValueError(f"Unsupported task_mode {self.task_mode!r}; expected one of {sorted(_TASK_MODES)}")
+        if self.task_mode == _TASK_MODE_REACH_GREEN_CAP and self.control_mode != "pd_eef_pose_abs":
+            raise ValueError("reach_green_cap requires control_mode='pd_eef_pose_abs'")
         if self.arm_action_delta <= 0.0 or self.hand_action_delta <= 0.0:
             raise ValueError("action deltas must be positive")
         if self.ik_iterations < 1:
@@ -253,6 +293,20 @@ class GrootNewtonEnvConfig:
             raise ValueError("bottle_settle_frames cannot be negative")
         if self.bottle_settle_frames > 0 and self.substeps_per_frame % 2 != 0:
             raise ValueError("bottle settling requires an even substeps_per_frame so state buffers do not alias")
+        if len(self.reach_goal_offset_world) != 3 or not all(
+            math.isfinite(value) for value in self.reach_goal_offset_world
+        ):
+            raise ValueError("reach_goal_offset_world must contain three finite values")
+        if not math.isfinite(self.reach_reset_xy_jitter_m) or self.reach_reset_xy_jitter_m < 0.0:
+            raise ValueError("reach_reset_xy_jitter_m must be finite and nonnegative")
+        if min(
+            self.reach_success_threshold,
+            self.reach_bottle_displacement_limit,
+            self.reach_reward_distance_scale,
+        ) <= 0.0:
+            raise ValueError("reach thresholds and reward scale must be positive")
+        if self.reach_success_hold_steps < 1:
+            raise ValueError("reach_success_hold_steps must be positive")
         if (
             min(
                 self.bottle_lift_height,
@@ -555,6 +609,39 @@ def _initialize_task_goal(
 
 
 @wp.kernel(enable_backward=False)
+def _initialize_reach_task_goal(
+    body_q: wp.array[wp.transform],
+    body_world_start: wp.array[wp.int32],
+    bottle_local_body: wp.int32,
+    right_world_local_body: wp.int32,
+    goal_offset_world: wp.vec3,
+    world_mask: wp.array[wp.bool],
+    goal_pos_world: wp.array2d[wp.float32],
+    goal_pos_base: wp.array2d[wp.float32],
+    initial_obj_pose: wp.array2d[wp.float32],
+    max_bottle_z: wp.array[wp.float32],
+):
+    world = wp.tid()
+    if not world_mask or world_mask[world]:
+        body_start = body_world_start[world]
+        bottle_transform = body_q[body_start + bottle_local_body]
+        bottle_position = wp.transform_get_translation(bottle_transform)
+        bottle_rotation = wp.transform_get_rotation(bottle_transform)
+        goal_world = bottle_position + goal_offset_world
+        right_world_inverse = wp.transform_inverse(body_q[body_start + right_world_local_body])
+        goal_base = wp.transform_point(right_world_inverse, goal_world)
+        for axis in range(3):
+            goal_pos_world[world, axis] = goal_world[axis]
+            goal_pos_base[world, axis] = goal_base[axis]
+            initial_obj_pose[world, axis] = bottle_position[axis]
+        initial_obj_pose[world, 3] = bottle_rotation[0]
+        initial_obj_pose[world, 4] = bottle_rotation[1]
+        initial_obj_pose[world, 5] = bottle_rotation[2]
+        initial_obj_pose[world, 6] = bottle_rotation[3]
+        max_bottle_z[world] = bottle_position[2]
+
+
+@wp.kernel(enable_backward=False)
 def _accumulate_hand_bottle_contacts(
     contact_count: wp.array[wp.int32],
     contact_shape0: wp.array[wp.int32],
@@ -607,6 +694,56 @@ def _accumulate_hand_bottle_contacts(
     separation = wp.dot(contact_normal[contact], point1 - point0) - contact_margin0[contact] - contact_margin1[contact]
     if separation <= max_separation:
         wp.atomic_add(finger_contacts, world, finger, 1)
+
+
+@wp.kernel(enable_backward=False)
+def _accumulate_any_hand_bottle_contact(
+    contact_count: wp.array[wp.int32],
+    contact_shape0: wp.array[wp.int32],
+    contact_shape1: wp.array[wp.int32],
+    contact_point0: wp.array[wp.vec3],
+    contact_point1: wp.array[wp.vec3],
+    contact_normal: wp.array[wp.vec3],
+    contact_margin0: wp.array[wp.float32],
+    contact_margin1: wp.array[wp.float32],
+    body_q: wp.array[wp.transform],
+    shape_body: wp.array[wp.int32],
+    shape_world: wp.array[wp.int32],
+    shape_is_hand: wp.array[wp.int32],
+    shape_is_bottle: wp.array[wp.int32],
+    max_separation: wp.float32,
+    hand_contact_count: wp.array[wp.int32],
+):
+    contact = wp.tid()
+    if contact >= contact_count[0]:
+        return
+    shape0 = contact_shape0[contact]
+    shape1 = contact_shape1[contact]
+    if shape0 < 0 or shape1 < 0:
+        return
+
+    hand_shape = int(-1)
+    world = int(-1)
+    if shape_is_bottle[shape0] != 0 and shape_is_hand[shape1] != 0:
+        hand_shape = shape1
+        world = shape_world[shape0]
+    elif shape_is_bottle[shape1] != 0 and shape_is_hand[shape0] != 0:
+        hand_shape = shape0
+        world = shape_world[shape1]
+    if world < 0 or hand_shape < 0 or shape_world[hand_shape] != world:
+        return
+
+    body0 = shape_body[shape0]
+    body1 = shape_body[shape1]
+    point0 = contact_point0[contact]
+    point1 = contact_point1[contact]
+    if body0 >= 0:
+        point0 = wp.transform_point(body_q[body0], point0)
+    if body1 >= 0:
+        point1 = wp.transform_point(body_q[body1], point1)
+    separation = wp.dot(contact_normal[contact], point1 - point0) - contact_margin0[contact] - contact_margin1[contact]
+    if separation <= max_separation:
+        wp.atomic_add(hand_contact_count, world, 1)
 
 
 @wp.kernel(enable_backward=False)
@@ -1042,6 +1179,89 @@ def _evaluate_transfer_bottle(
 
 
 @wp.kernel(enable_backward=False)
+def _evaluate_reach_green_cap(
+    body_q: wp.array[wp.transform],
+    body_world_start: wp.array[wp.int32],
+    bottle_local_body: wp.int32,
+    right_world_local_body: wp.int32,
+    joint_q: wp.array[wp.float32],
+    joint_coord_world_start: wp.array[wp.int32],
+    arm_local_q_indices: wp.array[wp.int32],
+    mdh: wp.array2d[wp.float32],
+    initial_obj_pose: wp.array2d[wp.float32],
+    goal_pos_world: wp.array2d[wp.float32],
+    hand_contact_count: wp.array[wp.int32],
+    displacement_limit: wp.float32,
+    eef_pos_world: wp.array2d[wp.float32],
+    eef_pos_base: wp.array2d[wp.float32],
+    distance: wp.array[wp.float32],
+    bottle_displacement: wp.array[wp.float32],
+    max_bottle_displacement: wp.array[wp.float32],
+    has_hand_contact: wp.array[wp.bool],
+    contact_violation: wp.array[wp.bool],
+    displacement_violation: wp.array[wp.bool],
+):
+    world = wp.tid()
+    q_start = joint_coord_world_start[world]
+    rotation = wp.mat33(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
+    position_base = wp.vec3(0.0)
+    for joint in range(7):
+        q = joint_q[q_start + arm_local_q_indices[joint]]
+        d_i = mdh[joint, 0]
+        a_i = mdh[joint, 1]
+        alpha_i = mdh[joint, 2]
+        theta = q + mdh[joint, 3]
+        ca = wp.cos(alpha_i)
+        sa = wp.sin(alpha_i)
+        ct = wp.cos(theta)
+        st = wp.sin(theta)
+        link_rotation = wp.mat33(ct, -st, 0.0, ca * st, ca * ct, -sa, sa * st, sa * ct, ca)
+        link_position = wp.vec3(a_i, -sa * d_i, ca * d_i)
+        position_base = position_base + rotation * link_position
+        rotation = rotation * link_rotation
+
+    body_start = body_world_start[world]
+    position_world = wp.transform_point(body_q[body_start + right_world_local_body], position_base)
+    bottle_position = wp.transform_get_translation(body_q[body_start + bottle_local_body])
+    goal_world = wp.vec3(
+        goal_pos_world[world, 0],
+        goal_pos_world[world, 1],
+        goal_pos_world[world, 2],
+    )
+    initial_position = wp.vec3(
+        initial_obj_pose[world, 0],
+        initial_obj_pose[world, 1],
+        initial_obj_pose[world, 2],
+    )
+    current_distance = wp.length(goal_world - position_world)
+    current_displacement = wp.length(bottle_position - initial_position)
+    for axis in range(3):
+        eef_pos_world[world, axis] = position_world[axis]
+        eef_pos_base[world, axis] = position_base[axis]
+    distance[world] = current_distance
+    bottle_displacement[world] = current_displacement
+    max_bottle_displacement[world] = wp.max(max_bottle_displacement[world], current_displacement)
+    contact = hand_contact_count[world] > 0
+    has_hand_contact[world] = contact
+    contact_violation[world] = contact
+    displacement_violation[world] = current_displacement > displacement_limit
+
+
+@wp.kernel(enable_backward=False)
+def _advance_reach_physics(
+    contact_violation: wp.array[wp.bool],
+    displacement_violation: wp.array[wp.bool],
+    task_phase: wp.array[wp.int32],
+    success: wp.array[wp.bool],
+    fail: wp.array[wp.bool],
+):
+    world = wp.tid()
+    if not success[world] and not fail[world] and (contact_violation[world] or displacement_violation[world]):
+        fail[world] = True
+        task_phase[world] = wp.static(_TASK_PHASE_FAIL)
+
+
+@wp.kernel(enable_backward=False)
 def _advance_transfer_phase(
     obj_pose: wp.array2d[wp.float32],
     initial_obj_pose: wp.array2d[wp.float32],
@@ -1369,6 +1589,67 @@ def _advance_episode(
 
 
 @wp.kernel(enable_backward=False)
+def _advance_reach_episode(
+    episode_step: wp.array[wp.int32],
+    episode_return: wp.array[wp.float32],
+    success_once: wp.array[wp.bool],
+    distance: wp.array[wp.float32],
+    previous_distance: wp.array[wp.float32],
+    success_hold_count: wp.array[wp.int32],
+    success_threshold: wp.float32,
+    success_hold_steps: wp.int32,
+    reward_distance_scale: wp.float32,
+    task_phase: wp.array[wp.int32],
+    success: wp.array[wp.bool],
+    fail: wp.array[wp.bool],
+    delta_reward: wp.array[wp.float32],
+    dense_reward: wp.array[wp.float32],
+    reward: wp.array[wp.float32],
+    terminated: wp.array[wp.bool],
+    truncated: wp.array[wp.bool],
+    max_episode_steps: wp.int32,
+    reward_mode: wp.int32,
+    terminate_on_success: wp.bool,
+    terminate_on_fail: wp.bool,
+):
+    world = wp.tid()
+    episode_step[world] = episode_step[world] + 1
+    current_distance = distance[world]
+    dense = wp.clamp((previous_distance[world] - current_distance) / reward_distance_scale, -1.0, 1.0)
+
+    if not fail[world] and not success[world]:
+        if current_distance <= success_threshold:
+            success_hold_count[world] = success_hold_count[world] + 1
+        else:
+            success_hold_count[world] = 0
+        if success_hold_count[world] >= success_hold_steps:
+            success[world] = True
+            task_phase[world] = wp.static(_TASK_PHASE_SUCCESS)
+
+    if success[world]:
+        dense = 1.0
+    elif fail[world]:
+        dense = -1.0
+    previous_distance[world] = current_distance
+    delta_reward[world] = dense
+    dense_reward[world] = dense
+
+    value = float(0.0)
+    if reward_mode == wp.static(_REWARD_MODE_SPARSE):
+        if success[world]:
+            value = 1.0
+        elif fail[world]:
+            value = -1.0
+    elif reward_mode == wp.static(_REWARD_MODE_DENSE) or reward_mode == wp.static(_REWARD_MODE_NORMALIZED_DENSE):
+        value = dense
+    reward[world] = value
+    episode_return[world] = episode_return[world] + value
+    success_once[world] = success_once[world] or success[world]
+    terminated[world] = (terminate_on_success and success[world]) or (terminate_on_fail and fail[world])
+    truncated[world] = max_episode_steps > 0 and episode_step[world] >= max_episode_steps
+
+
+@wp.kernel(enable_backward=False)
 def _reset_episode_arrays(
     world_mask: wp.array[wp.bool],
     episode_step: wp.array[wp.int32],
@@ -1394,6 +1675,64 @@ def _reset_episode_arrays(
         reward[world] = 0.0
         terminated[world] = False
         truncated[world] = False
+
+
+@wp.kernel(enable_backward=False)
+def _reset_reach_task(
+    world_mask: wp.array[wp.bool],
+    previous_distance: wp.array[wp.float32],
+    distance: wp.array[wp.float32],
+    bottle_displacement: wp.array[wp.float32],
+    max_bottle_displacement: wp.array[wp.float32],
+    success_hold_count: wp.array[wp.int32],
+    hand_contact_count: wp.array[wp.int32],
+    has_hand_contact: wp.array[wp.bool],
+    contact_violation: wp.array[wp.bool],
+    displacement_violation: wp.array[wp.bool],
+    delta_reward: wp.array[wp.float32],
+):
+    world = wp.tid()
+    if not world_mask or world_mask[world]:
+        previous_distance[world] = 0.0
+        distance[world] = 0.0
+        bottle_displacement[world] = 0.0
+        max_bottle_displacement[world] = 0.0
+        success_hold_count[world] = 0
+        hand_contact_count[world] = 0
+        has_hand_contact[world] = False
+        contact_violation[world] = False
+        displacement_violation[world] = False
+        delta_reward[world] = 0.0
+
+
+@wp.kernel(enable_backward=False)
+def _initialize_reach_distance(
+    world_mask: wp.array[wp.bool],
+    distance: wp.array[wp.float32],
+    previous_distance: wp.array[wp.float32],
+):
+    world = wp.tid()
+    if not world_mask or world_mask[world]:
+        previous_distance[world] = distance[world]
+
+
+@wp.kernel(enable_backward=False)
+def _apply_reach_reset_recipe(
+    world_mask: wp.array[wp.bool],
+    joint_q: wp.array[wp.float32],
+    bottle_q_start: wp.array[wp.int32],
+    sampled_xy_offset: wp.array2d[wp.float32],
+    applied_xy_offset: wp.array2d[wp.float32],
+):
+    world = wp.tid()
+    if not world_mask or world_mask[world]:
+        x_offset = sampled_xy_offset[world, 0]
+        y_offset = sampled_xy_offset[world, 1]
+        q_start = bottle_q_start[world]
+        joint_q[q_start] = joint_q[q_start] + x_offset
+        joint_q[q_start + 1] = joint_q[q_start + 1] + y_offset
+        applied_xy_offset[world, 0] = x_offset
+        applied_xy_offset[world, 1] = y_offset
 
 
 @wp.kernel(enable_backward=False)
@@ -1461,6 +1800,7 @@ class GrootNewtonEnv:
         self.frames_per_action = self.config.simulation_hz // self.config.control_hz
         self.control_dt = 1.0 / float(self.config.control_hz)
         self.control_mode = self.config.control_mode
+        self.task_mode = self.config.task_mode
         self.action_size = ACTION_SIZE if self.control_mode == "pd_eef_pose_abs" else JOINT_ACTION_SIZE
         self.obs_mode = self.config.obs_mode
         self.reward_mode = self.config.reward_mode
@@ -1540,12 +1880,32 @@ class GrootNewtonEnv:
         self._setup_cameras(args)
         self._initialize_task_goal(None)
         self._refresh_observation()
+        self._initialize_reach_runtime(None)
         self._setup_spaces()
 
     @property
     def unwrapped(self) -> GrootNewtonEnv:
         """Return this environment, matching the Gymnasium convention."""
         return self
+
+    @property
+    def task_metadata(self) -> dict[str, Any]:
+        """Describe the selected task contract and action semantics."""
+        if self.task_mode == _TASK_MODE_REACH_GREEN_CAP:
+            return {
+                "task_id": REACH_GREEN_CAP_TASK_ID,
+                "instruction": REACH_GREEN_CAP_INSTRUCTION,
+                "goal_offset_world_m": tuple(float(value) for value in self.config.reach_goal_offset_world),
+                "success_distance_m": float(self.config.reach_success_threshold),
+                "success_hold_control_steps": int(self.config.reach_success_hold_steps),
+                "bottle_displacement_limit_m": float(self.config.reach_bottle_displacement_limit),
+                "reward": "clip((previous_distance-current_distance)/distance_scale,-1,1)",
+                "reward_distance_scale_m": float(self.config.reach_reward_distance_scale),
+                "reset_xy_jitter_m": float(self.config.reach_reset_xy_jitter_m),
+                "effective_action": "absolute_eef_xyz_only; reset_rotation_and_hand_held",
+                "effective_action_mask": (True, True, True) + (False,) * (ACTION_SIZE - 3),
+            }
+        return {"task_id": _TASK_MODE_BOTTLE_TRANSFER}
 
     @property
     def bottle_settle_metadata(self) -> dict[str, Any]:
@@ -1892,6 +2252,7 @@ class GrootNewtonEnv:
 
     def _setup_task_indices(self) -> None:
         self._bottle_body_local = self._find_local_body_index("dynamic_bottle")
+        self._right_world_body_local = self._find_local_body_index("/right_world")
         body_world_start = self.model.body_world_start.numpy()
         joint_world_start = self.model.joint_world_start.numpy()
         joint_child = self.model.joint_child.numpy()
@@ -1970,6 +2331,7 @@ class GrootNewtonEnv:
 
         shape_finger = np.full(self.model.shape_count, -1, dtype=np.int32)
         shape_is_bottle = np.zeros(self.model.shape_count, dtype=np.int32)
+        shape_is_hand = np.zeros(self.model.shape_count, dtype=np.int32)
         for shape_index, body_index in enumerate(shape_body):
             if body_index < 0:
                 continue
@@ -1978,12 +2340,14 @@ class GrootNewtonEnv:
                 shape_is_bottle[shape_index] = 1
             if "right_l10" not in body_label:
                 continue
+            shape_is_hand[shape_index] = 1
             for finger_index, finger in enumerate(_FINGER_NAMES):
                 if finger in body_label:
                     shape_finger[shape_index] = finger_index
                     break
         self._shape_world = wp.array(shape_world, dtype=wp.int32, device=self.device)
         self._shape_finger = wp.array(shape_finger, dtype=wp.int32, device=self.device)
+        self._shape_is_hand = wp.array(shape_is_hand, dtype=wp.int32, device=self.device)
         self._shape_is_bottle = wp.array(shape_is_bottle, dtype=wp.int32, device=self.device)
 
     def _settle_bottle_reset_defaults(self) -> None:
@@ -2029,6 +2393,11 @@ class GrootNewtonEnv:
 
     def _setup_observation_arrays(self) -> None:
         self._action = wp.zeros((self.num_envs, self.action_size), dtype=wp.float32, device=self.device)
+        self._reach_hold_action = wp.zeros((self.num_envs, self.action_size), dtype=wp.float32, device=self.device)
+        action_mask = np.ones(self.action_size, dtype=np.bool_)
+        if self.task_mode == _TASK_MODE_REACH_GREEN_CAP:
+            action_mask[3:] = False
+        self._effective_action_mask = wp.array(action_mask, dtype=wp.bool, device=self.device)
         self._eef_9d = wp.zeros((self.num_envs, 9), dtype=wp.float32, device=self.device)
         self._arm_joint_pos = wp.zeros((self.num_envs, 7), dtype=wp.float32, device=self.device)
         self._hand_joint_pos = wp.zeros((self.num_envs, 10), dtype=wp.float32, device=self.device)
@@ -2064,6 +2433,20 @@ class GrootNewtonEnv:
 
     def _setup_task_arrays(self) -> None:
         self._goal_pos = wp.zeros((self.num_envs, 3), dtype=wp.float32, device=self.device)
+        self._reach_goal_pos_base = wp.zeros((self.num_envs, 3), dtype=wp.float32, device=self.device)
+        self._reach_eef_pos_world = wp.zeros((self.num_envs, 3), dtype=wp.float32, device=self.device)
+        self._reach_eef_pos_base = wp.zeros((self.num_envs, 3), dtype=wp.float32, device=self.device)
+        self._reach_distance = wp.zeros(self.num_envs, dtype=wp.float32, device=self.device)
+        self._reach_previous_distance = wp.zeros(self.num_envs, dtype=wp.float32, device=self.device)
+        self._reach_bottle_displacement = wp.zeros(self.num_envs, dtype=wp.float32, device=self.device)
+        self._reach_max_bottle_displacement = wp.zeros(self.num_envs, dtype=wp.float32, device=self.device)
+        self._reach_success_hold_count = wp.zeros(self.num_envs, dtype=wp.int32, device=self.device)
+        self._reach_hand_contact_count = wp.zeros(self.num_envs, dtype=wp.int32, device=self.device)
+        self._reach_has_hand_contact = wp.zeros(self.num_envs, dtype=wp.bool, device=self.device)
+        self._reach_contact_violation = wp.zeros(self.num_envs, dtype=wp.bool, device=self.device)
+        self._reach_displacement_violation = wp.zeros(self.num_envs, dtype=wp.bool, device=self.device)
+        self._reach_delta_reward = wp.zeros(self.num_envs, dtype=wp.float32, device=self.device)
+        self._reach_reset_xy_offset = wp.zeros((self.num_envs, 2), dtype=wp.float32, device=self.device)
         self._initial_obj_pose = wp.zeros((self.num_envs, 7), dtype=wp.float32, device=self.device)
         self._obj_pose = wp.zeros((self.num_envs, 7), dtype=wp.float32, device=self.device)
         self._tcp_pose = wp.zeros((self.num_envs, 7), dtype=wp.float32, device=self.device)
@@ -2344,6 +2727,90 @@ class GrootNewtonEnv:
             return
         wp.copy(self._action, action_wp)
 
+    def _build_hold_action_torch(self) -> Any:
+        """Build absolute EEF and hand targets that hold the current state."""
+        import torch
+
+        if self.control_mode != "pd_eef_pose_abs":
+            raise RuntimeError("Absolute EEF hold actions require pd_eef_pose_abs control")
+        joint_q = wp.to_torch(self.state_0.joint_q)
+        position, rotation, _ = self._eef_fk_jacobian_torch(joint_q[self._arm_q_indices_torch])
+        action = torch.empty((self.num_envs, self.action_size), dtype=torch.float32, device=joint_q.device)
+        action[:, :3].copy_(position)
+        action[:, 3:6].copy_(rotation[:, 0, :])
+        action[:, 6:9].copy_(rotation[:, 1, :])
+        action[:, 9:19].copy_(wp.to_torch(self._hand_joint_pos))
+        return action
+
+    def _capture_reach_hold_action(self, world_mask: wp.array | None) -> None:
+        if self.task_mode != _TASK_MODE_REACH_GREEN_CAP:
+            return
+        hold = self._build_hold_action_torch()
+        destination = wp.to_torch(self._reach_hold_action)
+        effective_action = wp.to_torch(self._action)
+        if world_mask is None:
+            destination.copy_(hold)
+            effective_action.copy_(hold)
+        else:
+            mask = wp.to_torch(world_mask)
+            destination[mask] = hold[mask]
+            effective_action[mask] = hold[mask]
+
+    def effective_action_mask_torch(self, *, batched: bool = False) -> Any:
+        """Return the trainable action mask for the selected task.
+
+        Reach retains only absolute EEF XYZ. Rotation-6D and all hand targets
+        are reset-state holds and therefore must not contribute to training.
+        """
+        mask = wp.to_torch(self._effective_action_mask)
+        return mask[None, :].expand(self.num_envs, -1) if batched else mask
+
+    def project_effective_action_torch(self, action: Any, *, clone: bool = True) -> Any:
+        """Project a decoded action onto the controls that the task executes."""
+        import torch
+
+        if not isinstance(action, torch.Tensor):
+            raise TypeError("action must be a Torch tensor")
+        if tuple(action.shape) != (self.num_envs, self.action_size):
+            raise ValueError(
+                f"action must have shape ({self.num_envs}, {self.action_size}), got {tuple(action.shape)}"
+            )
+        if action.device != wp.to_torch(self._action).device:
+            raise ValueError(f"action must be on {self.device}, got {action.device}")
+        projected = action.clone() if clone else action
+        if self.task_mode == _TASK_MODE_REACH_GREEN_CAP:
+            hold = wp.to_torch(self._reach_hold_action)
+            projected[:, :3] = torch.where(torch.isfinite(projected[:, :3]), projected[:, :3], hold[:, :3])
+            projected[:, 3:].copy_(hold[:, 3:])
+        return projected
+
+    def project_effective_action(self, action: Any) -> Any:
+        """Return a projected action while preserving the input container type."""
+        if isinstance(action, wp.array):
+            if action.device != self.device or action.shape != self._action.shape or action.dtype != wp.float32:
+                raise ValueError(
+                    f"action must be float32 on {self.device} with shape {self._action.shape}, "
+                    f"got {action.dtype} on {action.device} with shape {action.shape}"
+                )
+            projected = wp.empty(self._action.shape, dtype=wp.float32, device=self.device)
+            wp.copy(projected, action)
+            self.project_effective_action_torch(wp.to_torch(projected), clone=False)
+            return projected
+        if isinstance(action, np.ndarray):
+            if action.shape != self._action.shape:
+                raise ValueError(f"action must have shape {self._action.shape}, got {action.shape}")
+            projected = np.asarray(action, dtype=np.float32).copy()
+            if self.task_mode == _TASK_MODE_REACH_GREEN_CAP:
+                hold = self._reach_hold_action.numpy()
+                projected[:, :3] = np.where(np.isfinite(projected[:, :3]), projected[:, :3], hold[:, :3])
+                projected[:, 3:] = hold[:, 3:]
+            return projected
+        return self.project_effective_action_torch(action)
+
+    def effective_action_torch(self) -> Any:
+        """Return the exact action most recently projected for execution."""
+        return wp.to_torch(self._action)
+
     def _apply_action(self) -> None:
         if self.control_mode == "pd_eef_pose_abs":
             self._apply_eef_pose_action_torch()
@@ -2446,6 +2913,25 @@ class GrootNewtonEnv:
         )
 
     def _initialize_task_goal(self, world_mask: wp.array | None) -> None:
+        if self.task_mode == _TASK_MODE_REACH_GREEN_CAP:
+            wp.launch(
+                _initialize_reach_task_goal,
+                dim=self.num_envs,
+                inputs=[
+                    self.state_0.body_q,
+                    self.model.body_world_start,
+                    self._bottle_body_local,
+                    self._right_world_body_local,
+                    wp.vec3(*self.config.reach_goal_offset_world),
+                    world_mask,
+                    self._goal_pos,
+                    self._reach_goal_pos_base,
+                    self._initial_obj_pose,
+                    self._max_bottle_z,
+                ],
+                device=self.device,
+            )
+            return
         wp.launch(
             _initialize_task_goal,
             dim=self.num_envs,
@@ -2503,10 +2989,15 @@ class GrootNewtonEnv:
         self._triangle_pair_overflow_excess_count.zero_()
 
     def _accumulate_control_step_diagnostics(self) -> None:
+        hand_contact = (
+            self._reach_has_hand_contact
+            if self.task_mode == _TASK_MODE_REACH_GREEN_CAP
+            else self._has_hand_contact
+        )
         wp.launch(
             _accumulate_control_step_contact,
             dim=self.num_envs,
-            inputs=[self._has_hand_contact, self._had_hand_contact_this_control_step],
+            inputs=[hand_contact, self._had_hand_contact_this_control_step],
             device=self.device,
         )
         wp.launch(
@@ -2579,6 +3070,31 @@ class GrootNewtonEnv:
                 self._shape_is_bottle,
                 self.config.contact_max_separation,
                 self._finger_contacts,
+            ],
+            device=self.device,
+        )
+        if self.task_mode != _TASK_MODE_REACH_GREEN_CAP:
+            return
+        self._reach_hand_contact_count.zero_()
+        wp.launch(
+            _accumulate_any_hand_bottle_contact,
+            dim=self.contacts.rigid_contact_max,
+            inputs=[
+                self.contacts.rigid_contact_count,
+                self.contacts.rigid_contact_shape0,
+                self.contacts.rigid_contact_shape1,
+                self.contacts.rigid_contact_point0,
+                self.contacts.rigid_contact_point1,
+                self.contacts.rigid_contact_normal,
+                self.contacts.rigid_contact_margin0,
+                self.contacts.rigid_contact_margin1,
+                self.state_0.body_q,
+                self.model.shape_body,
+                self._shape_world,
+                self._shape_is_hand,
+                self._shape_is_bottle,
+                self.config.contact_max_separation,
+                self._reach_hand_contact_count,
             ],
             device=self.device,
         )
@@ -2657,8 +3173,50 @@ class GrootNewtonEnv:
             ],
             device=self.device,
         )
+        if self.task_mode == _TASK_MODE_REACH_GREEN_CAP:
+            wp.launch(
+                _evaluate_reach_green_cap,
+                dim=self.num_envs,
+                inputs=[
+                    self.state_0.body_q,
+                    self.model.body_world_start,
+                    self._bottle_body_local,
+                    self._right_world_body_local,
+                    self.state_0.joint_q,
+                    self.model.joint_coord_world_start,
+                    self._arm_local_q,
+                    self._mdh,
+                    self._initial_obj_pose,
+                    self._goal_pos,
+                    self._reach_hand_contact_count,
+                    self.config.reach_bottle_displacement_limit,
+                    self._reach_eef_pos_world,
+                    self._reach_eef_pos_base,
+                    self._reach_distance,
+                    self._reach_bottle_displacement,
+                    self._reach_max_bottle_displacement,
+                    self._reach_has_hand_contact,
+                    self._reach_contact_violation,
+                    self._reach_displacement_violation,
+                ],
+                device=self.device,
+            )
 
     def _advance_task_phase(self) -> None:
+        if self.task_mode == _TASK_MODE_REACH_GREEN_CAP:
+            wp.launch(
+                _advance_reach_physics,
+                dim=self.num_envs,
+                inputs=[
+                    self._reach_contact_violation,
+                    self._reach_displacement_violation,
+                    self._task_phase,
+                    self._success,
+                    self._fail,
+                ],
+                device=self.device,
+            )
+            return
         wp.launch(
             _advance_transfer_phase,
             dim=self.num_envs,
@@ -2701,6 +3259,17 @@ class GrootNewtonEnv:
         elif reset_mask is not None:
             self._clear_finger_contacts(reset_mask)
         self._evaluate_task_state()
+
+    def _initialize_reach_runtime(self, world_mask: wp.array | None) -> None:
+        if self.task_mode != _TASK_MODE_REACH_GREEN_CAP:
+            return
+        wp.launch(
+            _initialize_reach_distance,
+            dim=self.num_envs,
+            inputs=[world_mask, self._reach_distance, self._reach_previous_distance],
+            device=self.device,
+        )
+        self._capture_reach_hold_action(world_mask)
 
     def _refresh_finger_root_load(self) -> None:
         if not self.config.request_finger_root_load:
@@ -2772,6 +3341,9 @@ class GrootNewtonEnv:
             "tcp_pose": self._tcp_pose,
             "obj_pose": self._obj_pose,
             "goal_pos": self._goal_pos,
+            "reach_goal_pos_base": self._reach_goal_pos_base,
+            "reach_eef_pos_world": self._reach_eef_pos_world,
+            "reach_eef_pos_base": self._reach_eef_pos_base,
             "tcp_to_obj_pos": self._tcp_to_obj,
             "obj_to_goal_pos": self._obj_to_goal,
             "is_grasped": self._is_grasped,
@@ -2836,7 +3408,11 @@ class GrootNewtonEnv:
             "success": self._success,
             "fail": self._fail,
             "task_phase": self._task_phase,
-            "has_hand_contact": self._has_hand_contact,
+            "has_hand_contact": (
+                self._reach_has_hand_contact
+                if self.task_mode == _TASK_MODE_REACH_GREEN_CAP
+                else self._has_hand_contact
+            ),
             "had_hand_contact_this_control_step": self._had_hand_contact_this_control_step,
             "touching_finger_count": self._touching_finger_count,
             "finger_contact_counts": self._finger_contacts,
@@ -2885,6 +3461,21 @@ class GrootNewtonEnv:
             "xy_displacement": self._xy_displacement,
             "final_z_error": self._final_z_error,
             "orientation_error": self._orientation_error,
+            "reach_goal_pos_world": self._goal_pos,
+            "reach_goal_pos_base": self._reach_goal_pos_base,
+            "reach_reset_xy_offset": self._reach_reset_xy_offset,
+            "reach_eef_pos_world": self._reach_eef_pos_world,
+            "reach_eef_pos_base": self._reach_eef_pos_base,
+            "reach_distance": self._reach_distance,
+            "reach_previous_distance": self._reach_previous_distance,
+            "reach_bottle_displacement": self._reach_bottle_displacement,
+            "reach_max_bottle_displacement": self._reach_max_bottle_displacement,
+            "reach_success_hold_steps": self._reach_success_hold_count,
+            "reach_hand_contact_count": self._reach_hand_contact_count,
+            "reach_has_hand_contact": self._reach_has_hand_contact,
+            "reach_contact_violation": self._reach_contact_violation,
+            "reach_displacement_violation": self._reach_displacement_violation,
+            "reach_delta_reward": self._reach_delta_reward,
         }
 
     def evaluate(self) -> dict[str, Any]:
@@ -2892,13 +3483,15 @@ class GrootNewtonEnv:
         return self._to_torch_tree(self.evaluate_warp())
 
     def compute_dense_reward(self, obs: Any = None, action: Any = None, info: Any = None) -> Any:
-        """Return the latest bottle-transfer dense reward as a CUDA Torch view."""
+        """Return the latest task dense reward as a CUDA Torch view."""
         del obs, action, info
         return wp.to_torch(self._dense_reward)
 
     def compute_normalized_dense_reward(self, obs: Any = None, action: Any = None, info: Any = None) -> Any:
         """Return the latest dense reward normalized to the scale used by PPO."""
         del obs, action, info
+        if self.task_mode == _TASK_MODE_REACH_GREEN_CAP:
+            return wp.to_torch(self._dense_reward)
         return wp.to_torch(self._dense_reward) / _STAGE_REWARD_MAX
 
     def _info_warp(self) -> dict[str, Any]:
@@ -2928,7 +3521,11 @@ class GrootNewtonEnv:
                 "release_armed": self._release_armed,
                 "released": self._released,
                 "early_release": self._early_release,
-                "has_hand_contact_at_end": self._has_hand_contact,
+                "has_hand_contact_at_end": (
+                    self._reach_has_hand_contact
+                    if self.task_mode == _TASK_MODE_REACH_GREEN_CAP
+                    else self._has_hand_contact
+                ),
                 "max_bottle_z": self._max_bottle_z,
                 "current_lift_height": self._current_lift_height,
                 "physical_max_lift_height": self._physical_max_lift_height,
@@ -2937,6 +3534,11 @@ class GrootNewtonEnv:
                 "xy_displacement": self._xy_displacement,
                 "final_z_error": self._final_z_error,
                 "orientation_error": self._orientation_error,
+                "reach_distance": self._reach_distance,
+                "reach_bottle_displacement": self._reach_bottle_displacement,
+                "reach_max_bottle_displacement": self._reach_max_bottle_displacement,
+                "reach_success_hold_steps": self._reach_success_hold_count,
+                "reach_has_hand_contact": self._reach_has_hand_contact,
             },
             "reward_components": {
                 "reaching": self._reaching_reward,
@@ -2950,19 +3552,214 @@ class GrootNewtonEnv:
                 "orientation": self._orientation_reward,
                 "static": self._static_reward,
                 "dense": self._dense_reward,
+                "reach_delta": self._reach_delta_reward,
             },
         }
+
+    def replay_fingerprint_torch(self) -> dict[str, Any]:
+        """Return all simulator state needed to verify deterministic replay.
+
+        Callers should compare this tree in memory and persist only a
+        quantized digest. The returned object and bottle tensors are not an
+        archive format.
+        """
+        def env_major(value: wp.array, values_per_world: int) -> Any:
+            tensor = wp.to_torch(value)
+            return tensor.reshape(self.num_envs, values_per_world, *tensor.shape[1:])
+
+        bodies_per_world = self.model.body_count // self.num_envs
+        if bodies_per_world * self.num_envs != self.model.body_count:
+            raise RuntimeError("Replay fingerprint requires an equal body count in every replicated world")
+        fingerprint: dict[str, Any] = {
+            "joint": {
+                "q": env_major(self.state_0.joint_q, self.coords_per_world),
+                "qd": env_major(self.state_0.joint_qd, self.dofs_per_world),
+            },
+            "body": {
+                "q": env_major(self.state_0.body_q, bodies_per_world),
+                "qd": env_major(self.state_0.body_qd, bodies_per_world),
+            },
+            "control": {
+                "effective_action": self._action,
+                "reset_hold_action": self._reach_hold_action,
+                "effective_action_mask": wp.to_torch(self._effective_action_mask)[None, :].expand(
+                    self.num_envs, -1
+                ),
+                "joint_target_q": env_major(self.control.joint_target_q, self.coords_per_world),
+                "joint_target_qd": env_major(self.control.joint_target_qd, self.dofs_per_world),
+            },
+            "task": {
+                "obj_pose": self._obj_pose,
+                "initial_obj_pose": self._initial_obj_pose,
+                "tcp_pose": self._tcp_pose,
+                "goal_pos_world": self._goal_pos,
+                "reach_goal_pos_base": self._reach_goal_pos_base,
+                "reach_reset_xy_offset": self._reach_reset_xy_offset,
+                "reach_eef_pos_world": self._reach_eef_pos_world,
+                "reach_eef_pos_base": self._reach_eef_pos_base,
+                "reach_distance": self._reach_distance,
+                "reach_previous_distance": self._reach_previous_distance,
+                "reach_bottle_displacement": self._reach_bottle_displacement,
+                "reach_max_bottle_displacement": self._reach_max_bottle_displacement,
+                "task_phase": self._task_phase,
+                "reach_success_hold_steps": self._reach_success_hold_count,
+                "grasp_contact_frames": self._grasp_contact_frames,
+                "grasp_support_gap_frames": self._grasp_support_gap_frames,
+                "contact_gap_frames": self._contact_gap_frames,
+                "settle_frames": self._settle_frames,
+                "grasp_confirmed": self._grasp_confirmed,
+                "transport_started": self._transport_started,
+                "reached_lift_height": self._reached_lift_height,
+                "release_armed": self._release_armed,
+                "released": self._released,
+                "early_release": self._early_release,
+                "success": self._success,
+                "fail": self._fail,
+                "episode_step": self.episode_step,
+                "episode_return": self.episode_return,
+                "success_once": self.success_once,
+                "reward": self.reward,
+                "terminated": self.terminated,
+                "truncated": self.truncated,
+            },
+            "contacts": {
+                "finger_contact_counts": self._finger_contacts,
+                "transfer_has_hand_contact": self._has_hand_contact,
+                "reach_hand_contact_count": self._reach_hand_contact_count,
+                "reach_has_hand_contact": self._reach_has_hand_contact,
+                "had_hand_contact_this_control_step": self._had_hand_contact_this_control_step,
+                "finger_contact_any_frame_this_control_step": self._finger_contact_any_frame_this_control_step,
+                "opposed_grasp_any_frame_this_control_step": self._opposed_grasp_any_frame_this_control_step,
+                "opposed_grasp_consecutive_frames": self._opposed_grasp_consecutive_frames,
+                "opposed_grasp_max_consecutive_frames_this_control_step": (
+                    self._opposed_grasp_max_consecutive_frames_this_control_step
+                ),
+                "non_thumb_anchor_contact_fraction_this_control_step": (
+                    self._non_thumb_anchor_contact_fraction_this_control_step
+                ),
+                "thumb_anchor_contact_fraction_this_control_step": (
+                    self._thumb_anchor_contact_fraction_this_control_step
+                ),
+                "reach_contact_violation": self._reach_contact_violation,
+                "reach_displacement_violation": self._reach_displacement_violation,
+            },
+        }
+        images = {}
+        if self._ego_rgb is not None:
+            images["ego_view"] = self._ego_rgb
+        if self._wrist_rgb is not None:
+            images["wrist_view"] = self._wrist_rgb
+        if images:
+            fingerprint["images"] = images
+        return self._to_torch_tree(fingerprint)
+
+    def canonicalize_branch_state_torch(self, source_world: int = 0) -> None:
+        """Make every branch start from one exact canonical simulator state.
+
+        Independent GPU worlds accumulate small solver-order differences even
+        while replaying the same controls. Branch selection must not compare
+        actions from those different roots, so this operation copies the
+        canonical world's physical, control, task, contact, and image state,
+        clears MuJoCo warm-start buffers, and refreshes all derived values.
+        """
+        if source_world < 0 or source_world >= self.num_envs:
+            raise IndexError(
+                f"source_world must be in [0, {self.num_envs}), got {source_world}"
+            )
+        if self.num_envs == 1:
+            return
+
+        import torch
+
+        def copy_replicated_array(array: wp.array) -> None:
+            tensor = wp.to_torch(array)
+            if tensor.shape[0] % self.num_envs != 0:
+                raise RuntimeError(
+                    "Dynamic simulator array cannot be split by world: "
+                    f"shape={tuple(tensor.shape)}"
+                )
+            rows = tensor.reshape(
+                self.num_envs,
+                tensor.shape[0] // self.num_envs,
+                *tensor.shape[1:],
+            )
+            source = rows[source_world : source_world + 1]
+            rows.copy_(source.expand_as(rows).clone())
+
+        def copy_dynamic_object(value: Any) -> None:
+            for child in value.__dict__.values():
+                if isinstance(child, wp.array):
+                    if child.shape[0] > 0:
+                        copy_replicated_array(child)
+                elif hasattr(child, "__dict__"):
+                    copy_dynamic_object(child)
+
+        def copy_tree(tree: Any) -> None:
+            if isinstance(tree, dict):
+                for child in tree.values():
+                    copy_tree(child)
+                return
+            if not isinstance(tree, torch.Tensor):
+                raise TypeError(
+                    "Replay fingerprint leaves must be Torch tensors, got "
+                    f"{type(tree).__name__}"
+                )
+            if tree.shape[0] != self.num_envs:
+                raise RuntimeError(
+                    "Replay fingerprint leaf is not environment-major: "
+                    f"{tuple(tree.shape)}"
+                )
+            if tree.stride(0) == 0:
+                return
+            source = tree[source_world : source_world + 1]
+            tree.copy_(source.expand_as(tree).clone())
+
+        with torch.no_grad():
+            copy_dynamic_object(self.state_0)
+            copy_dynamic_object(self.control)
+            mjw_data = getattr(self.solver, "mjw_data", None)
+            if mjw_data is not None:
+                for name in (
+                    "time",
+                    "qpos",
+                    "qvel",
+                    "act",
+                    "qacc_warmstart",
+                    "ctrl",
+                    "qfrc_applied",
+                    "xfrc_applied",
+                    "eq_active",
+                    "mocap_pos",
+                    "mocap_quat",
+                ):
+                    array = getattr(mjw_data, name, None)
+                    if isinstance(array, wp.array) and array.shape[0] == self.num_envs:
+                        tensor = wp.to_torch(array)
+                        source = tensor[source_world : source_world + 1]
+                        tensor.copy_(source.expand_as(tensor).clone())
+            copy_tree(self.replay_fingerprint_torch())
+            self.solver.reset(self.state_0, flags=0)
+            self.contacts.clear()
+            newton.eval_fk(
+                self.model,
+                self.state_0.joint_q,
+                self.state_0.joint_qd,
+                self.state_0,
+            )
+            self.state_1.assign(self.state_0)
+            self.state_0.clear_forces()
+            self.state_1.clear_forces()
+            self.model.bvh_refit_shapes(self.state_0)
+            self._refresh_observation()
+            copy_tree(self.replay_fingerprint_torch())
+            self.state_1.assign(self.state_0)
+            self.model.bvh_refit_shapes(self.state_0)
 
     def hold_action(self) -> wp.array:
         """Return a GPU action that holds the current absolute targets."""
         if self.control_mode == "pd_eef_pose_abs":
-            action = wp.to_torch(self._action)
-            joint_q = wp.to_torch(self.state_0.joint_q)
-            position, rotation, _ = self._eef_fk_jacobian_torch(joint_q[self._arm_q_indices_torch])
-            action[:, :3].copy_(position)
-            action[:, 3:6].copy_(rotation[:, 0, :])
-            action[:, 6:9].copy_(rotation[:, 1, :])
-            action[:, 9:19].copy_(wp.to_torch(self._hand_joint_pos))
+            wp.to_torch(self._action).copy_(self._build_hold_action_torch())
+            self.project_effective_action_torch(wp.to_torch(self._action), clone=False)
             return self._action
         wp.launch(
             _gather_joint_position_action,
@@ -2986,6 +3783,37 @@ class GrootNewtonEnv:
         """Return a zero-copy CUDA Torch view of :meth:`hold_action`."""
         return wp.to_torch(self.hold_action())
 
+    def _reach_reset_recipe_offsets(
+        self,
+        seed: int | list[int] | None,
+    ) -> np.ndarray:
+        offsets = np.zeros((self.num_envs, 2), dtype=np.float32)
+        if self.task_mode != _TASK_MODE_REACH_GREEN_CAP or seed is None:
+            return offsets
+        if isinstance(seed, (int, np.integer)) and not isinstance(seed, (bool, np.bool_)):
+            x_offset, y_offset = _reach_reset_xy_offset(
+                int(seed),
+                self.config.reach_reset_xy_jitter_m,
+            )
+            offsets[:, 0] = x_offset
+            offsets[:, 1] = y_offset
+            return offsets
+        if not isinstance(seed, list) or len(seed) != self.num_envs:
+            raise ValueError(
+                f"seed must be an integer or a list of {self.num_envs} integers"
+            )
+        for world, world_seed in enumerate(seed):
+            if not isinstance(world_seed, (int, np.integer)) or isinstance(
+                world_seed,
+                (bool, np.bool_),
+            ):
+                raise TypeError(f"seed[{world}] must be an integer")
+            offsets[world] = _reach_reset_xy_offset(
+                int(world_seed),
+                self.config.reach_reset_xy_jitter_m,
+            )
+        return offsets
+
     def reset_warp(
         self,
         world_mask: Any | None = None,
@@ -2996,10 +3824,9 @@ class GrootNewtonEnv:
         """Reset all or selected worlds and return Warp observations.
 
         ``options={"env_idx": indices}`` follows the ManiSkill partial-reset
-        convention. The fixed bottle setup currently has no randomization, so
-        ``seed`` is accepted for API compatibility but does not change state.
+        convention. Reach-task integer seeds deterministically translate the
+        settled bottle in XY; one integer gives every branch the same recipe.
         """
-        del seed
         if options is not None and options.get("reconfigure", False):
             raise ValueError("Runtime scene reconfiguration is not supported; construct a new GrootNewtonEnv")
         if world_mask is not None and options is not None and "env_idx" in options:
@@ -3008,6 +3835,23 @@ class GrootNewtonEnv:
             world_mask = self._world_mask_from_indices(options["env_idx"])
         mask_wp = self._as_world_mask(world_mask)
         self.solver.reset(self.state_0, world_mask=mask_wp)
+        recipe_offsets = wp.array(
+            self._reach_reset_recipe_offsets(seed),
+            dtype=wp.float32,
+            device=self.device,
+        )
+        wp.launch(
+            _apply_reach_reset_recipe,
+            dim=self.num_envs,
+            inputs=[
+                mask_wp,
+                self.state_0.joint_q,
+                self._bottle_q_start,
+                recipe_offsets,
+                self._reach_reset_xy_offset,
+            ],
+            device=self.device,
+        )
         newton.eval_fk(self.model, self.state_0.joint_q, self.state_0.joint_qd, self.state_0)
         self.state_1.assign(self.state_0)
         self.state_0.clear_forces()
@@ -3071,11 +3915,30 @@ class GrootNewtonEnv:
             ],
             device=self.device,
         )
+        wp.launch(
+            _reset_reach_task,
+            dim=self.num_envs,
+            inputs=[
+                mask_wp,
+                self._reach_previous_distance,
+                self._reach_distance,
+                self._reach_bottle_displacement,
+                self._reach_max_bottle_displacement,
+                self._reach_success_hold_count,
+                self._reach_hand_contact_count,
+                self._reach_has_hand_contact,
+                self._reach_contact_violation,
+                self._reach_displacement_violation,
+                self._reach_delta_reward,
+            ],
+            device=self.device,
+        )
         self._initialize_task_goal(mask_wp)
         self._clear_finger_contacts(mask_wp)
         self._clear_control_step_diagnostics(mask_wp)
         self.model.bvh_refit_shapes(self.state_0)
         self._refresh_observation()
+        self._initialize_reach_runtime(mask_wp)
         self._clear_finger_root_load(mask_wp)
         return self.observation_warp(), self._info_warp()
 
@@ -3151,6 +4014,8 @@ class GrootNewtonEnv:
     def step_warp(self, action: Any) -> tuple[Any, wp.array, wp.array, wp.array, dict[str, Any]]:
         """Apply one control interval and return device-resident Warp values."""
         self._copy_action(action)
+        if self.control_mode == "pd_eef_pose_abs":
+            self.project_effective_action_torch(wp.to_torch(self._action), clone=False)
         self._apply_action()
         self._clear_control_step_diagnostics(None)
         for _ in range(self.frames_per_action):
@@ -3163,48 +4028,78 @@ class GrootNewtonEnv:
             self._accumulate_control_step_diagnostics()
             self._advance_task_phase()
         self._refresh_observation()
-        wp.launch(
-            _advance_episode,
-            dim=self.num_envs,
-            inputs=[
-                self.episode_step,
-                self.episode_return,
-                self.success_once,
-                self._reaching_reward,
-                self._opposed_pregrasp_score,
-                self._max_lift_height,
-                self.config.bottle_lift_height,
-                self._place_reward,
-                self._static_reward,
-                self._finger_contacts,
-                self._is_grasped,
-                self._finger_contact_any_frame_this_control_step,
-                self._opposed_grasp_any_frame_this_control_step,
-                self._opposed_grasp_max_consecutive_frames_this_control_step,
-                self._non_thumb_anchor_contact_fraction_this_control_step,
-                self._non_thumb_missing_thumb_geometry_progress_this_control_step,
-                self._thumb_anchor_contact_fraction_this_control_step,
-                self._thumb_missing_non_thumb_geometry_progress_this_control_step,
-                self._task_phase,
-                self._reached_lift_height,
-                self._release_ready,
-                self._is_obj_placed,
-                self._success,
-                self._fail,
-                self._approach_base_reward,
-                self._unilateral_guidance_gain,
-                self._unilateral_contact_reward,
-                self._dense_reward,
-                self.reward,
-                self.terminated,
-                self.truncated,
-                self.config.max_episode_steps,
-                self._reward_mode_id,
-                self.config.terminate_on_success,
-                self.config.terminate_on_fail,
-            ],
-            device=self.device,
-        )
+        if self.task_mode == _TASK_MODE_REACH_GREEN_CAP:
+            wp.launch(
+                _advance_reach_episode,
+                dim=self.num_envs,
+                inputs=[
+                    self.episode_step,
+                    self.episode_return,
+                    self.success_once,
+                    self._reach_distance,
+                    self._reach_previous_distance,
+                    self._reach_success_hold_count,
+                    self.config.reach_success_threshold,
+                    self.config.reach_success_hold_steps,
+                    self.config.reach_reward_distance_scale,
+                    self._task_phase,
+                    self._success,
+                    self._fail,
+                    self._reach_delta_reward,
+                    self._dense_reward,
+                    self.reward,
+                    self.terminated,
+                    self.truncated,
+                    self.config.max_episode_steps,
+                    self._reward_mode_id,
+                    self.config.terminate_on_success,
+                    self.config.terminate_on_fail,
+                ],
+                device=self.device,
+            )
+        else:
+            wp.launch(
+                _advance_episode,
+                dim=self.num_envs,
+                inputs=[
+                    self.episode_step,
+                    self.episode_return,
+                    self.success_once,
+                    self._reaching_reward,
+                    self._opposed_pregrasp_score,
+                    self._max_lift_height,
+                    self.config.bottle_lift_height,
+                    self._place_reward,
+                    self._static_reward,
+                    self._finger_contacts,
+                    self._is_grasped,
+                    self._finger_contact_any_frame_this_control_step,
+                    self._opposed_grasp_any_frame_this_control_step,
+                    self._opposed_grasp_max_consecutive_frames_this_control_step,
+                    self._non_thumb_anchor_contact_fraction_this_control_step,
+                    self._non_thumb_missing_thumb_geometry_progress_this_control_step,
+                    self._thumb_anchor_contact_fraction_this_control_step,
+                    self._thumb_missing_non_thumb_geometry_progress_this_control_step,
+                    self._task_phase,
+                    self._reached_lift_height,
+                    self._release_ready,
+                    self._is_obj_placed,
+                    self._success,
+                    self._fail,
+                    self._approach_base_reward,
+                    self._unilateral_guidance_gain,
+                    self._unilateral_contact_reward,
+                    self._dense_reward,
+                    self.reward,
+                    self.terminated,
+                    self.truncated,
+                    self.config.max_episode_steps,
+                    self._reward_mode_id,
+                    self.config.terminate_on_success,
+                    self.config.terminate_on_fail,
+                ],
+                device=self.device,
+            )
         return (
             self.observation_warp(),
             self.reward,
