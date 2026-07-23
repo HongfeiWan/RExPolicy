@@ -1089,6 +1089,44 @@ def _directory_descriptors(path: Path) -> list[dict[str, Any]]:
     return descriptors
 
 
+_EPHEMERAL_SOURCE_DIRECTORIES = frozenset(
+    {
+        ".cache",
+        ".git",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        "__pycache__",
+    }
+)
+_EPHEMERAL_SOURCE_SUFFIXES = frozenset({".pyc", ".pyo"})
+
+
+def _source_tree_descriptors(path: Path) -> list[dict[str, Any]]:
+    """Hash a non-Git source copy while excluding generated interpreter state."""
+    path = path.expanduser().resolve()
+    if not path.is_dir():
+        raise FileNotFoundError(f"Source directory is missing: {path}")
+    descriptors = []
+    for candidate in sorted(path.rglob("*")):
+        relative = candidate.relative_to(path)
+        if any(
+            part in _EPHEMERAL_SOURCE_DIRECTORIES for part in relative.parts
+        ):
+            continue
+        if (
+            not candidate.is_file()
+            or candidate.suffix in _EPHEMERAL_SOURCE_SUFFIXES
+        ):
+            continue
+        descriptor = _file_descriptor(candidate)
+        descriptor["relative_path"] = str(relative)
+        descriptors.append(descriptor)
+    if not descriptors:
+        raise FileNotFoundError(f"Source directory is empty: {path}")
+    return descriptors
+
+
 def _git_source_descriptor(path: Path) -> dict[str, Any]:
     """Fingerprint committed and dirty source without copying the repository."""
     path = path.expanduser().resolve()
@@ -1100,9 +1138,33 @@ def _git_source_descriptor(path: Path) -> dict[str, Any]:
             capture_output=True,
         ).stdout
 
-    root = Path(
-        run("rev-parse", "--show-toplevel").decode("utf-8").strip()
-    ).resolve()
+    root_probe = subprocess.run(
+        ["git", "-C", str(path), "rev-parse", "--show-toplevel"],
+        check=False,
+        capture_output=True,
+    )
+    if root_probe.returncode != 0:
+        files = _source_tree_descriptors(path)
+        digest_payload = [
+            (item["relative_path"], item["size"], item["sha256"])
+            for item in files
+        ]
+        return {
+            "path": str(path),
+            "repository_root": str(path),
+            "git_available": False,
+            "commit": None,
+            "source_tree_sha256": hashlib.sha256(
+                json.dumps(
+                    digest_payload,
+                    separators=(",", ":"),
+                ).encode()
+            ).hexdigest(),
+            "files": files,
+            "clean": None,
+        }
+
+    root = Path(root_probe.stdout.decode("utf-8").strip()).resolve()
     commit = run("rev-parse", "HEAD").decode("ascii").strip()
     diff = run("diff", "--binary", "--no-ext-diff", "HEAD", "--")
     untracked_output = run(
@@ -1130,6 +1192,7 @@ def _git_source_descriptor(path: Path) -> dict[str, Any]:
     return {
         "path": str(path),
         "repository_root": str(root),
+        "git_available": True,
         "commit": commit,
         "tracked_diff_sha256": hashlib.sha256(diff).hexdigest(),
         "untracked": untracked,

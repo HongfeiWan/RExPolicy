@@ -21,6 +21,7 @@ from rexpolicy.flywheel.experience import (
 )
 from tools.run_flywheel_ddp import (
     _directory_descriptors,
+    _git_source_descriptor,
     _normalized_action_diversity,
     _validate_run_directory_mode,
     create_parser,
@@ -221,6 +222,31 @@ class TestRunnerConfiguration(unittest.TestCase):
             {"statistics.json", "tokenizer/tokenizer.json"},
         )
         self.assertTrue(all(len(item["sha256"]) == 64 for item in descriptors))
+
+    def test_non_git_source_descriptor_ignores_generated_bytecode(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "gr00t").mkdir()
+            (root / "gr00t/model.py").write_text("VALUE = 1\n", encoding="utf-8")
+            cache = root / "gr00t/__pycache__"
+            cache.mkdir()
+            bytecode = cache / "model.cpython-311.pyc"
+            bytecode.write_bytes(b"generated")
+
+            descriptor = _git_source_descriptor(root)
+
+            self.assertFalse(descriptor["git_available"])
+            self.assertIsNone(descriptor["commit"])
+            self.assertEqual(
+                [item["relative_path"] for item in descriptor["files"]],
+                ["gr00t/model.py"],
+            )
+            first_hash = descriptor["source_tree_sha256"]
+            bytecode.write_bytes(b"changed")
+            self.assertEqual(
+                _git_source_descriptor(root)["source_tree_sha256"],
+                first_hash,
+            )
 
     def test_artifact_environment_variables_feed_parser_defaults(self) -> None:
         with mock.patch.dict(
