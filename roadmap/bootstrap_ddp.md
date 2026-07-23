@@ -153,6 +153,9 @@ Start with the least restrictive node3 setting:
 ```bash
 cd /home/user/project/deploy/RExPolicy/<commit-sha>
 export PATH=/home/user/project/newton/conda_envs/newton/bin:$PATH
+export PYTHONPATH=/home/user/project/newton${PYTHONPATH:+:$PYTHONPATH}
+export WARP_CACHE_PATH=/home/user/runs/rexpolicy/.warp-cache/<commit-sha>
+mkdir -p "$WARP_CACHE_PATH"
 export CUDA_VISIBLE_DEVICES=0,1
 export REXPOLICY_NPROC=2
 export NCCL_CUMEM_HOST_ENABLE=0
@@ -161,6 +164,12 @@ python -m torch.distributed.run \
   --standalone --nnodes=1 --nproc-per-node=2 \
   -m tools.test_nccl_preflight
 ```
+
+`PYTHONPATH` reuses the existing Newton checkout because node3's Conda
+environment does not install that source tree as a package. The explicit,
+user-owned Warp cache avoids the root-owned default cache currently present
+under `/home/user/.cache/warp`; neither setting copies or mutates the Conda
+environment.
 
 The preflight performs repeated barriers, small and 256MiB all-reduces, and a
 tiny DDP optimizer update. Run it three consecutive times. If it hangs or
