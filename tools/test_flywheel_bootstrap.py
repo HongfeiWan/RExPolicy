@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import numpy as np
@@ -20,11 +21,18 @@ from rexpolicy.flywheel.experience import (
     collate_training_samples,
     select_advantage_chunks,
 )
+from rexpolicy.flywheel.groot_policy import (
+    CachedCondition,
+    GrootFlowDitPolicy,
+    PolicyBatch,
+    RawPolicyObservation,
+)
 from tools.run_flywheel_ddp import (
     _directory_descriptors,
     _early_gpu_preflight,
     _git_source_descriptor,
     _normalized_action_diversity,
+    _raw_observation,
     _validate_run_directory_mode,
     create_parser,
 )
@@ -172,6 +180,231 @@ class TestFlywheelExperience(unittest.TestCase):
         self.assertFalse(bool(backbone.backbone_attention_mask[0, 2]))
         self.assertEqual(tuple(action.state.shape), (2, 1, 5))
         self.assertEqual(tuple(action.action.shape), (2, 3, 7))
+
+
+class TestSharedConditionSampling(unittest.TestCase):
+    def test_same_state_encodes_reference_once_and_expands_for_dit(self) -> None:
+        policy = object.__new__(GrootFlowDitPolicy)
+        condition = CachedCondition(
+            backbone_features=torch.ones(2, 3),
+            backbone_attention_mask=torch.ones(2, dtype=torch.bool),
+            image_mask=None,
+            state=torch.zeros(1, 5),
+            embodiment_id=10,
+        )
+        observation = RawPolicyObservation(
+            images={"camera": np.zeros((1, 2, 2, 3), dtype=np.uint8)},
+            state={"eef": np.zeros((1, 3), dtype=np.float32)},
+            instruction="reach",
+        )
+        candidate_count = 8
+        expected = PolicyBatch(
+            decoded_action={"eef_9d": np.zeros((8, 1, 9), dtype=np.float32)},
+            conditions=[condition] * candidate_count,
+        )
+
+        with (
+            mock.patch.object(
+                policy,
+                "encode_conditions",
+                return_value=[condition],
+            ) as encode,
+            mock.patch.object(
+                policy,
+                "sample_from_conditions",
+                return_value=expected,
+            ) as sample,
+        ):
+            actual = policy.sample_same_state(
+                observation,
+                candidate_count=candidate_count,
+            )
+
+        self.assertIs(actual, expected)
+        encode.assert_called_once_with([observation])
+        sample.assert_called_once()
+        expanded = sample.call_args.kwargs["conditions"]
+        self.assertEqual(len(expanded), candidate_count)
+        self.assertTrue(all(item is condition for item in expanded))
+        decoded_observations = sample.call_args.kwargs["observations"]
+        self.assertEqual(len(decoded_observations), candidate_count)
+        self.assertTrue(all(item is observation for item in decoded_observations))
+
+    def test_same_state_rejects_non_positive_candidate_count(self) -> None:
+        policy = object.__new__(GrootFlowDitPolicy)
+        observation = RawPolicyObservation(images={}, state={}, instruction="reach")
+        with self.assertRaisesRegex(ValueError, "candidate_count"):
+            policy.sample_same_state(observation, candidate_count=0)
+
+    def test_same_state_keeps_dit_noise_independent_and_replayable(self) -> None:
+        class FakeActionHead:
+            @staticmethod
+            def get_action(backbone_output, action_input):
+                del backbone_output
+                batch_size = int(action_input["state"].shape[0])
+                return {
+                    "action_pred": torch.randn(
+                        batch_size,
+                        2,
+                        3,
+                        dtype=torch.float32,
+                    )
+                }
+
+        class FakeProcessor:
+            def __init__(self) -> None:
+                self.decoded_states = None
+
+            def decode_action(self, normalized, embodiment_tag, states):
+                del embodiment_tag
+                self.decoded_states = states
+                return {"eef_9d": normalized}
+
+        policy = object.__new__(GrootFlowDitPolicy)
+        policy.torch = torch
+        policy.device = torch.device("cpu")
+        policy.compute_dtype = torch.float32
+        policy.model = SimpleNamespace(action_head=FakeActionHead())
+        policy.processor = FakeProcessor()
+        policy.state_keys = ("eef",)
+        policy.embodiment_tag = "test"
+        condition = CachedCondition(
+            backbone_features=torch.ones(2, 3),
+            backbone_attention_mask=torch.ones(2, dtype=torch.bool),
+            image_mask=None,
+            state=torch.zeros(1, 3),
+            embodiment_id=10,
+        )
+        policy.encode_conditions = mock.Mock(return_value=[condition])
+        policy._collate_conditions = mock.Mock(
+            side_effect=lambda conditions: (
+                {"batch_size": len(conditions)},
+                {"state": torch.zeros(len(conditions), 1, 3)},
+            )
+        )
+        observation = RawPolicyObservation(
+            images={},
+            state={"eef": np.ones((1, 3), dtype=np.float32)},
+            instruction="reach",
+        )
+
+        torch.manual_seed(17)
+        first = policy.sample_same_state(observation, candidate_count=8)
+        torch.manual_seed(17)
+        second = policy.sample_same_state(observation, candidate_count=8)
+
+        self.assertEqual(first.decoded_action["eef_9d"].shape, (8, 2, 3))
+        np.testing.assert_array_equal(
+            first.decoded_action["eef_9d"],
+            second.decoded_action["eef_9d"],
+        )
+        self.assertFalse(
+            np.all(first.decoded_action["eef_9d"][0] == first.decoded_action["eef_9d"][1])
+        )
+        self.assertEqual(policy.processor.decoded_states["eef"].shape, (8, 1, 3))
+        self.assertTrue(
+            np.all(policy.processor.decoded_states["eef"] == 1.0)
+        )
+
+    def test_shared_condition_does_not_alias_sample_actions_or_identity(self) -> None:
+        class IdentityStateActionProcessor:
+            @staticmethod
+            def apply(*, state, action, embodiment_tag):
+                del embodiment_tag
+                return state, action
+
+        policy = object.__new__(GrootFlowDitPolicy)
+        policy.torch = torch
+        policy.processor_action_horizon = 2
+        policy.processor = SimpleNamespace(
+            state_action_processor=IdentityStateActionProcessor()
+        )
+        policy.embodiment_tag = SimpleNamespace(value="test")
+        policy.model = SimpleNamespace(
+            config=SimpleNamespace(max_action_dim=26, action_horizon=2)
+        )
+        policy.action_keys = (
+            "eef_9d",
+            "hand_joint_target",
+            "arm_joint_target",
+        )
+        condition = CachedCondition(
+            backbone_features=torch.ones(2, 3),
+            backbone_attention_mask=torch.ones(2, dtype=torch.bool),
+            image_mask=None,
+            state=torch.zeros(1, 3),
+            embodiment_id=10,
+        )
+        executed_action = {
+            "eef_9d": np.zeros((1, 9), dtype=np.float32),
+            "hand_joint_target": np.zeros((1, 10), dtype=np.float32),
+            "arm_joint_target": np.zeros((1, 7), dtype=np.float32),
+        }
+        samples = []
+        for world in range(2):
+            samples.append(
+                policy.make_training_sample(
+                    condition=condition,
+                    raw_state={"eef": np.zeros((1, 3), dtype=np.float32)},
+                    executed_action=executed_action,
+                    sample_metadata={
+                        "generation": 1,
+                        "rank": 0,
+                        "episode": 0,
+                        "decision": 0,
+                        "world": world,
+                        "task_id": "reach_green_cap/v1",
+                        "reward_profile_id": "reach_progress/v1",
+                        "source": "current",
+                    },
+                )
+            )
+
+        self.assertEqual(
+            samples[0].backbone_features.data_ptr(),
+            samples[1].backbone_features.data_ptr(),
+        )
+        self.assertNotEqual(samples[0].action.data_ptr(), samples[1].action.data_ptr())
+        self.assertNotEqual(
+            samples[0].action_mask.data_ptr(),
+            samples[1].action_mask.data_ptr(),
+        )
+        self.assertNotEqual(samples[0].sample_id, samples[1].sample_id)
+        samples[0].action[0, 0] = 1.0
+        self.assertEqual(float(samples[1].action[0, 0]), 0.0)
+
+    def test_raw_observation_copies_only_selected_world(self) -> None:
+        observation = {
+            "extra": {"eef_9d": torch.arange(27).reshape(3, 9)},
+            "agent": {
+                "hand_joint_pos": torch.arange(30).reshape(3, 10),
+                "arm_joint_pos": torch.arange(21).reshape(3, 7),
+            },
+            "sensor_data": {
+                "ego_view": {
+                    "rgb": torch.arange(36, dtype=torch.uint8).reshape(
+                        3, 2, 2, 3
+                    )
+                },
+                "wrist_view": {
+                    "rgb": torch.arange(36, dtype=torch.uint8).reshape(
+                        3, 2, 2, 3
+                    )
+                },
+            },
+        }
+
+        raw = _raw_observation(observation, instruction="reach", world=1)
+
+        self.assertEqual(raw.instruction, "reach")
+        self.assertEqual(raw.images["ego_view"].shape, (1, 2, 2, 3))
+        self.assertEqual(raw.state["eef_9d"].shape, (1, 9))
+        np.testing.assert_array_equal(
+            raw.state["eef_9d"][0],
+            np.arange(9, 18, dtype=np.float32),
+        )
+        with self.assertRaises(IndexError):
+            _raw_observation(observation, instruction="reach", world=3)
 
 
 class TestDistributedContext(unittest.TestCase):

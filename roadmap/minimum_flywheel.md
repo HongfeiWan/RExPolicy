@@ -110,8 +110,10 @@ For each decision:
 1. Reset every candidate world with the episode recipe and replay the exact
    selected effective-action history.
 2. Reject the decision if the full state fingerprint differs across worlds.
-3. Form the frozen VLM/state conditions and sample K chunks with independent
-   diffusion noise.
+3. Encode the verified common observation once with the frozen VLM, share that
+   cached condition read-only across K worlds, and sample K chunks with
+   independent diffusion noise. Never rerun the frozen VLM K times for the same
+   decision.
 4. Project every action to the task-effective controls, execute only the
    configured prefix, and measure reward, success, failure, and termination.
 5. Compute the median score inside the same-state comparison pool.

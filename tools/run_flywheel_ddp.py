@@ -314,6 +314,59 @@ def _raw_observations(
     ]
 
 
+def _raw_observation(
+    observation: dict[str, Any],
+    *,
+    instruction: str,
+    world: int = 0,
+) -> RawPolicyObservation:
+    """Copy one selected simulator world into the raw policy layout."""
+    eef = observation["extra"]["eef_9d"]
+    if world < 0 or world >= int(eef.shape[0]):
+        raise IndexError(f"Raw observation world {world} is out of range")
+    return RawPolicyObservation(
+        images={
+            "ego_view": np.ascontiguousarray(
+                observation["sensor_data"]["ego_view"]["rgb"][
+                    world : world + 1
+                ]
+                .detach()
+                .cpu()
+                .numpy()
+            ),
+            "wrist_view": np.ascontiguousarray(
+                observation["sensor_data"]["wrist_view"]["rgb"][
+                    world : world + 1
+                ]
+                .detach()
+                .cpu()
+                .numpy()
+            ),
+        },
+        state={
+            "eef_9d": np.ascontiguousarray(
+                eef[world : world + 1].detach().cpu().numpy(),
+                dtype=np.float32,
+            ),
+            "hand_joint_pos": np.ascontiguousarray(
+                observation["agent"]["hand_joint_pos"][world : world + 1]
+                .detach()
+                .cpu()
+                .numpy(),
+                dtype=np.float32,
+            ),
+            "arm_joint_pos": np.ascontiguousarray(
+                observation["agent"]["arm_joint_pos"][world : world + 1]
+                .detach()
+                .cpu()
+                .numpy(),
+                dtype=np.float32,
+            ),
+        },
+        instruction=instruction,
+    )
+
+
 def _copy_initial_state(observation: RawPolicyObservation) -> dict[str, np.ndarray]:
     return {
         key: np.asarray(value[-1], dtype=np.float32).copy()
@@ -521,11 +574,11 @@ def _collect_episode(
     )
     if replay_ended:
         raise RuntimeError("Freshly reset Reach episode terminated unexpectedly")
-    initial_raw = _raw_observations(
+    initial_raw = _raw_observation(
         observation,
         instruction=task.instruction,
     )
-    initial_state = _copy_initial_state(initial_raw[0])
+    initial_state = _copy_initial_state(initial_raw)
     root_actions: list[np.ndarray] = []
     root_rewards: list[float] = []
     selected_actions: list[dict[str, Any]] = []
@@ -554,8 +607,11 @@ def _collect_episode(
             world_count=env.num_envs,
             float_tolerance=args.same_state_tolerance,
         )
-        raw = _raw_observations(observation, instruction=task.instruction)
-        sampled = policy.sample(raw)
+        raw = _raw_observation(observation, instruction=task.instruction)
+        sampled = policy.sample_same_state(
+            raw,
+            candidate_count=env.num_envs,
+        )
         decoded = sampled.decoded_action
         horizon = min(
             args.execution_horizon,
@@ -629,14 +685,14 @@ def _collect_episode(
                     effective_action[:, 9:19]
                 ),
                 "arm_joint_target": np.repeat(
-                    raw[world].state["arm_joint_pos"][-1][None],
+                    raw.state["arm_joint_pos"][-1][None],
                     count,
                     axis=0,
                 ).astype(np.float32),
             }
             training_sample = policy.make_training_sample(
                 condition=sampled.conditions[world],
-                raw_state=raw[world].state,
+                raw_state=raw.state,
                 executed_action=executed_action,
                 action_dimension_masks=task.action_dimension_masks,
                 sample_metadata={
@@ -705,6 +761,10 @@ def _collect_episode(
                     replay_fingerprint.max_float_spread
                 ),
                 "same_state_field_count": replay_fingerprint.field_count,
+                "shared_vlm_condition": True,
+                "condition_reference_world": 0,
+                "vlm_condition_count": 1,
+                "dit_candidate_count": env.num_envs,
                 "advantage_baseline": selection.baseline,
                 "selection_mode": selection.mode,
                 "success_constraint_active": any(
@@ -910,7 +970,7 @@ def _materialize_historical_samples(
             raise RuntimeError(
                 f"Historical candidate is missing for {reference.sample_id}"
             )
-        raw = _raw_observations(observation, instruction=task.instruction)[0]
+        raw = _raw_observation(observation, instruction=task.instruction)
         condition = policy.encode_conditions([raw])[0]
         archived_action = candidate["action"]
         executed_action = {

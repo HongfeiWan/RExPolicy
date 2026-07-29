@@ -384,6 +384,27 @@ class GrootFlowDitPolicy:
             observations=observations,
         )
 
+    def sample_same_state(
+        self,
+        observation: RawPolicyObservation,
+        *,
+        candidate_count: int,
+    ) -> PolicyBatch:
+        """Encode one shared state and sample independent DiT noise per world.
+
+        The caller must first verify that every candidate world represents the
+        same simulator state. The frozen VLM runs only for the canonical
+        reference world; the condition and raw state are then expanded across
+        the candidate batch before Flow-DiT samples independent noise.
+        """
+        if candidate_count < 1:
+            raise ValueError("candidate_count must be positive")
+        condition = self.encode_conditions([observation])[0]
+        return self.sample_from_conditions(
+            conditions=[condition] * candidate_count,
+            observations=[observation] * candidate_count,
+        )
+
     def make_training_sample(
         self,
         *,

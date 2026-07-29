@@ -153,11 +153,15 @@ action may make the eventual grasp or placement worse.
 At each decision, K chunks start from one reconstructed root state. A practical
 bootstrap can obtain that state by deterministic reset plus replay of the
 selected action history; native simulator snapshots may replace replay later as
-an optimization. Before success is available, subtract a within-group median
-baseline, select positive advantages up to a configured fraction, and apply
-normalized advantage weights to the per-sample Flow-Matching loss. This
-accelerates discovery of a workable behavior. These comparative advantages do
-not imply a PPO objective and require neither a critic nor GAE.
+an optimization. Once the full same-state fingerprint passes, the frozen VLM
+encodes the common image, instruction, and state exactly once. That cached
+condition is shared read-only across the K candidates, while Flow-DiT draws
+independent noise for every candidate. Before success is available, subtract a
+within-group median baseline, select positive advantages up to a configured
+fraction, and apply normalized advantage weights to the per-sample
+Flow-Matching loss. This accelerates discovery of a workable behavior. These
+comparative advantages do not imply a PPO objective and require neither a
+critic nor GAE.
 
 As soon as a decision contains valid successes, the hard top-fraction rule no
 longer applies to them. Every successful executed chunk receives a positive
