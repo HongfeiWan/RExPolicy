@@ -18,9 +18,10 @@ The repository contains:
 - deterministic reset-and-replay reconstruction of a common root state across
   K candidate worlds, with seed-stable Reach bottle XY recipes;
 - success-first continuation and chunk-level advantage selection;
-- a frozen BF16 GR00T VLM encoded once per verified same-state decision, then
-  expanded across K independent Flow-DiT noise samples; the trainable DiT keeps
-  FP32 master parameters with BF16 sampling and training forward passes;
+- a frozen BF16 GR00T VLM and frozen action-head conditioner encoded once per
+  verified same-state decision, then expanded across K independent Flow-DiT
+  noise samples; the trainable DiT keeps FP32 master parameters with BF16
+  sampling and training forward passes;
 - exact globally weighted DDP updates, including zero-weight padding for
   unequal rank-local sample counts and 100% current-generation sample coverage;
 - an append-only, metadata-only Success Archive with deterministic

@@ -107,6 +107,7 @@ class GrootFlowDitPolicy:
         self.dit.to(device=device, dtype=torch.float32)
         self.model.eval()
         self.assert_precision_contract()
+        self._validate_same_state_condition_api()
 
         self.processor = AutoProcessor.from_pretrained(
             _processor_path(checkpoint),
@@ -202,6 +203,20 @@ class GrootFlowDitPolicy:
             raise RuntimeError(
                 "Flow-DiT FP32 master-parameter contract failed: "
                 + "; ".join(violations[:8])
+            )
+
+    def _validate_same_state_condition_api(self) -> None:
+        """Require the pinned GR00T action-head feature sampling interface."""
+        required = ("_encode_features", "get_action_with_features")
+        missing = [
+            name
+            for name in required
+            if not callable(getattr(self.action_head, name, None))
+        ]
+        if missing:
+            raise RuntimeError(
+                "GR00T action head does not expose the pinned same-state "
+                "condition API: " + ", ".join(missing)
             )
 
     def encode_conditions(
@@ -356,6 +371,20 @@ class GrootFlowDitPolicy:
         ):
             prediction = self.action_head.get_action(backbone_output, action_input)
 
+        return self._decode_prediction(
+            prediction=prediction,
+            conditions=conditions,
+            observations=observations,
+        )
+
+    def _decode_prediction(
+        self,
+        *,
+        prediction: Any,
+        conditions: list[CachedCondition],
+        observations: list[RawPolicyObservation],
+    ) -> PolicyBatch:
+        """Decode normalized action chunks against their raw policy states."""
         normalized_action = prediction["action_pred"].float().cpu().numpy()
         batched_states = {
             key: np.stack(
@@ -375,6 +404,75 @@ class GrootFlowDitPolicy:
             },
             conditions=conditions,
         )
+
+    def _sample_same_state_prediction(
+        self,
+        *,
+        condition: CachedCondition,
+        candidate_count: int,
+    ) -> Any:
+        """Encode the frozen action-head condition once, then expand it for DiT."""
+        from transformers.feature_extraction_utils import BatchFeature
+
+        if candidate_count < 1:
+            raise ValueError("candidate_count must be positive")
+        self._validate_same_state_condition_api()
+        backbone_output, action_input = self._collate_conditions([condition])
+        with (
+            self.torch.inference_mode(),
+            self.torch.autocast(
+                device_type="cuda",
+                dtype=self.compute_dtype,
+                enabled=self.device.type == "cuda",
+            ),
+        ):
+            encoded = self.action_head._encode_features(
+                backbone_output,
+                action_input,
+            )
+
+            def expand_batch(tensor: Any) -> Any:
+                if int(tensor.shape[0]) != 1:
+                    raise RuntimeError(
+                        "Same-state condition encoding must have batch size 1"
+                    )
+                return tensor.expand(
+                    (candidate_count,) + tuple(tensor.shape[1:])
+                )
+
+            expanded_features = expand_batch(
+                encoded.backbone_features
+            ).contiguous()
+            expanded_state_features = expand_batch(
+                encoded.state_features
+            ).contiguous()
+            expanded_backbone_data = {
+                "backbone_features": expanded_features,
+                "backbone_attention_mask": expand_batch(
+                    backbone_output["backbone_attention_mask"]
+                ).contiguous(),
+            }
+            image_mask = backbone_output.get("image_mask")
+            if image_mask is not None:
+                expanded_backbone_data["image_mask"] = expand_batch(
+                    image_mask
+                ).contiguous()
+            expanded_backbone = BatchFeature(data=expanded_backbone_data)
+            expanded_action = BatchFeature(
+                data={
+                    "state": expand_batch(action_input["state"]).contiguous(),
+                    "embodiment_id": expand_batch(
+                        action_input["embodiment_id"]
+                    ).contiguous(),
+                }
+            )
+            return self.action_head.get_action_with_features(
+                backbone_features=expanded_features,
+                state_features=expanded_state_features,
+                embodiment_id=expanded_action["embodiment_id"],
+                backbone_output=expanded_backbone,
+                action_input=expanded_action,
+            )
 
     def sample(self, observations: list[RawPolicyObservation]) -> PolicyBatch:
         """Encode observations and sample independent DiT noise per world."""
@@ -400,9 +498,16 @@ class GrootFlowDitPolicy:
         if candidate_count < 1:
             raise ValueError("candidate_count must be positive")
         condition = self.encode_conditions([observation])[0]
-        return self.sample_from_conditions(
-            conditions=[condition] * candidate_count,
-            observations=[observation] * candidate_count,
+        prediction = self._sample_same_state_prediction(
+            condition=condition,
+            candidate_count=candidate_count,
+        )
+        conditions = [condition] * candidate_count
+        observations = [observation] * candidate_count
+        return self._decode_prediction(
+            prediction=prediction,
+            conditions=conditions,
+            observations=observations,
         )
 
     def make_training_sample(

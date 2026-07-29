@@ -202,6 +202,9 @@ class TestSharedConditionSampling(unittest.TestCase):
             decoded_action={"eef_9d": np.zeros((8, 1, 9), dtype=np.float32)},
             conditions=[condition] * candidate_count,
         )
+        prediction = {
+            "action_pred": torch.zeros(candidate_count, 1, 9)
+        }
 
         with (
             mock.patch.object(
@@ -211,9 +214,14 @@ class TestSharedConditionSampling(unittest.TestCase):
             ) as encode,
             mock.patch.object(
                 policy,
-                "sample_from_conditions",
+                "_sample_same_state_prediction",
+                return_value=prediction,
+            ) as sample_prediction,
+            mock.patch.object(
+                policy,
+                "_decode_prediction",
                 return_value=expected,
-            ) as sample,
+            ) as decode,
         ):
             actual = policy.sample_same_state(
                 observation,
@@ -222,11 +230,15 @@ class TestSharedConditionSampling(unittest.TestCase):
 
         self.assertIs(actual, expected)
         encode.assert_called_once_with([observation])
-        sample.assert_called_once()
-        expanded = sample.call_args.kwargs["conditions"]
+        sample_prediction.assert_called_once_with(
+            condition=condition,
+            candidate_count=candidate_count,
+        )
+        decode.assert_called_once()
+        expanded = decode.call_args.kwargs["conditions"]
         self.assertEqual(len(expanded), candidate_count)
         self.assertTrue(all(item is condition for item in expanded))
-        decoded_observations = sample.call_args.kwargs["observations"]
+        decoded_observations = decode.call_args.kwargs["observations"]
         self.assertEqual(len(decoded_observations), candidate_count)
         self.assertTrue(all(item is observation for item in decoded_observations))
 
@@ -237,11 +249,49 @@ class TestSharedConditionSampling(unittest.TestCase):
             policy.sample_same_state(observation, candidate_count=0)
 
     def test_same_state_keeps_dit_noise_independent_and_replayable(self) -> None:
+        from transformers.feature_extraction_utils import BatchFeature
+
         class FakeActionHead:
-            @staticmethod
-            def get_action(backbone_output, action_input):
-                del backbone_output
-                batch_size = int(action_input["state"].shape[0])
+            def __init__(self) -> None:
+                self.encode_batch_sizes = []
+                self.sample_batch_sizes = []
+                self.expanded_feature_strides = []
+                self.mask_batch_sizes = []
+                self.image_masks = []
+
+            def _encode_features(self, backbone_output, action_input):
+                self.encode_batch_sizes.append(
+                    int(backbone_output["backbone_features"].shape[0])
+                )
+                return SimpleNamespace(
+                    backbone_features=backbone_output["backbone_features"] + 1,
+                    state_features=action_input["state"] + 1,
+                )
+
+            def get_action_with_features(
+                self,
+                *,
+                backbone_features,
+                state_features,
+                embodiment_id,
+                backbone_output,
+                action_input,
+            ):
+                del state_features, embodiment_id, action_input
+                batch_size = int(backbone_features.shape[0])
+                self.sample_batch_sizes.append(batch_size)
+                self.expanded_feature_strides.append(
+                    tuple(backbone_features.stride())
+                )
+                self.mask_batch_sizes.append(
+                    (
+                        int(backbone_output["backbone_attention_mask"].shape[0]),
+                        int(backbone_output["image_mask"].shape[0]),
+                    )
+                )
+                self.image_masks.append(
+                    backbone_output["image_mask"].cpu().tolist()
+                )
                 return {
                     "action_pred": torch.randn(
                         batch_size,
@@ -278,8 +328,27 @@ class TestSharedConditionSampling(unittest.TestCase):
         policy.encode_conditions = mock.Mock(return_value=[condition])
         policy._collate_conditions = mock.Mock(
             side_effect=lambda conditions: (
-                {"batch_size": len(conditions)},
-                {"state": torch.zeros(len(conditions), 1, 3)},
+                BatchFeature(
+                    data={
+                        "backbone_features": torch.ones(
+                            len(conditions), 2, 3
+                        ),
+                        "backbone_attention_mask": torch.ones(
+                            len(conditions), 2, dtype=torch.bool
+                        ),
+                        "image_mask": torch.tensor(
+                            [[True, False]] * len(conditions)
+                        ),
+                    }
+                ),
+                BatchFeature(
+                    data={
+                        "state": torch.zeros(len(conditions), 1, 3),
+                        "embodiment_id": torch.full(
+                            (len(conditions),), 10, dtype=torch.long
+                        ),
+                    }
+                ),
             )
         )
         observation = RawPolicyObservation(
@@ -305,6 +374,30 @@ class TestSharedConditionSampling(unittest.TestCase):
         self.assertTrue(
             np.all(policy.processor.decoded_states["eef"] == 1.0)
         )
+        self.assertEqual(policy.model.action_head.encode_batch_sizes, [1, 1])
+        self.assertEqual(policy.model.action_head.sample_batch_sizes, [8, 8])
+        self.assertEqual(
+            policy.model.action_head.expanded_feature_strides,
+            [(6, 3, 1), (6, 3, 1)],
+        )
+        self.assertEqual(
+            policy.model.action_head.mask_batch_sizes,
+            [(8, 8), (8, 8)],
+        )
+        expected_image_mask = [[True, False]] * 8
+        self.assertEqual(
+            policy.model.action_head.image_masks,
+            [expected_image_mask, expected_image_mask],
+        )
+        for call in policy._collate_conditions.call_args_list:
+            self.assertEqual(len(call.args[0]), 1)
+            self.assertIs(call.args[0][0], condition)
+
+    def test_same_state_requires_pinned_action_head_feature_api(self) -> None:
+        policy = object.__new__(GrootFlowDitPolicy)
+        policy.model = SimpleNamespace(action_head=SimpleNamespace())
+        with self.assertRaisesRegex(RuntimeError, "_encode_features"):
+            policy._validate_same_state_condition_api()
 
     def test_shared_condition_does_not_alias_sample_actions_or_identity(self) -> None:
         class IdentityStateActionProcessor:
