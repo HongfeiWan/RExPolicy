@@ -202,9 +202,7 @@ class TestSharedConditionSampling(unittest.TestCase):
             decoded_action={"eef_9d": np.zeros((8, 1, 9), dtype=np.float32)},
             conditions=[condition] * candidate_count,
         )
-        prediction = {
-            "action_pred": torch.zeros(candidate_count, 1, 9)
-        }
+        prediction = {"action_pred": torch.zeros(candidate_count, 1, 9)}
 
         with (
             mock.patch.object(
@@ -280,18 +278,14 @@ class TestSharedConditionSampling(unittest.TestCase):
                 del state_features, embodiment_id, action_input
                 batch_size = int(backbone_features.shape[0])
                 self.sample_batch_sizes.append(batch_size)
-                self.expanded_feature_strides.append(
-                    tuple(backbone_features.stride())
-                )
+                self.expanded_feature_strides.append(tuple(backbone_features.stride()))
                 self.mask_batch_sizes.append(
                     (
                         int(backbone_output["backbone_attention_mask"].shape[0]),
                         int(backbone_output["image_mask"].shape[0]),
                     )
                 )
-                self.image_masks.append(
-                    backbone_output["image_mask"].cpu().tolist()
-                )
+                self.image_masks.append(backbone_output["image_mask"].cpu().tolist())
                 return {
                     "action_pred": torch.randn(
                         batch_size,
@@ -330,15 +324,11 @@ class TestSharedConditionSampling(unittest.TestCase):
             side_effect=lambda conditions: (
                 BatchFeature(
                     data={
-                        "backbone_features": torch.ones(
-                            len(conditions), 2, 3
-                        ),
+                        "backbone_features": torch.ones(len(conditions), 2, 3),
                         "backbone_attention_mask": torch.ones(
                             len(conditions), 2, dtype=torch.bool
                         ),
-                        "image_mask": torch.tensor(
-                            [[True, False]] * len(conditions)
-                        ),
+                        "image_mask": torch.tensor([[True, False]] * len(conditions)),
                     }
                 ),
                 BatchFeature(
@@ -368,12 +358,12 @@ class TestSharedConditionSampling(unittest.TestCase):
             second.decoded_action["eef_9d"],
         )
         self.assertFalse(
-            np.all(first.decoded_action["eef_9d"][0] == first.decoded_action["eef_9d"][1])
+            np.all(
+                first.decoded_action["eef_9d"][0] == first.decoded_action["eef_9d"][1]
+            )
         )
         self.assertEqual(policy.processor.decoded_states["eef"].shape, (8, 1, 3))
-        self.assertTrue(
-            np.all(policy.processor.decoded_states["eef"] == 1.0)
-        )
+        self.assertTrue(np.all(policy.processor.decoded_states["eef"] == 1.0))
         self.assertEqual(policy.model.action_head.encode_batch_sizes, [1, 1])
         self.assertEqual(policy.model.action_head.sample_batch_sizes, [8, 8])
         self.assertEqual(
@@ -475,14 +465,10 @@ class TestSharedConditionSampling(unittest.TestCase):
             },
             "sensor_data": {
                 "ego_view": {
-                    "rgb": torch.arange(36, dtype=torch.uint8).reshape(
-                        3, 2, 2, 3
-                    )
+                    "rgb": torch.arange(36, dtype=torch.uint8).reshape(3, 2, 2, 3)
                 },
                 "wrist_view": {
-                    "rgb": torch.arange(36, dtype=torch.uint8).reshape(
-                        3, 2, 2, 3
-                    )
+                    "rgb": torch.arange(36, dtype=torch.uint8).reshape(3, 2, 2, 3)
                 },
             },
         }
@@ -649,9 +635,7 @@ class TestRunnerConfiguration(unittest.TestCase):
                 {"CUDA_VISIBLE_DEVICES": "2,4", "LOCAL_RANK": "1"},
                 clear=False,
             ),
-            mock.patch(
-                "tools.run_flywheel_ddp.preflight_selected_gpus"
-            ) as preflight,
+            mock.patch("tools.run_flywheel_ddp.preflight_selected_gpus") as preflight,
         ):
             _early_gpu_preflight(args)
         preflight.assert_called_once_with(

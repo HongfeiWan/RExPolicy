@@ -286,9 +286,7 @@ class GrootFlowDitPolicy:
             )
         return conditions
 
-    def _collate_conditions(
-        self, conditions: list[CachedCondition]
-    ) -> tuple[Any, Any]:
+    def _collate_conditions(self, conditions: list[CachedCondition]) -> tuple[Any, Any]:
         """Move cached frozen features back to CUDA for action sampling."""
         from transformers.feature_extraction_utils import BatchFeature
 
@@ -309,10 +307,10 @@ class GrootFlowDitPolicy:
             device=self.device,
             dtype=self.torch.bool,
         )
-        has_image_mask = any(condition.image_mask is not None for condition in conditions)
-        image_mask = (
-            self.torch.zeros_like(attention) if has_image_mask else None
+        has_image_mask = any(
+            condition.image_mask is not None for condition in conditions
         )
+        image_mask = self.torch.zeros_like(attention) if has_image_mask else None
         for index, condition in enumerate(conditions):
             length = int(condition.backbone_features.shape[0])
             features[index, :length].copy_(
@@ -327,9 +325,7 @@ class GrootFlowDitPolicy:
             )
             if image_mask is not None and condition.image_mask is not None:
                 image_mask[index, :length].copy_(
-                    condition.image_mask.to(
-                        device=self.device, dtype=self.torch.bool
-                    )
+                    condition.image_mask.to(device=self.device, dtype=self.torch.bool)
                 )
         backbone_data = {
             "backbone_features": features,
@@ -436,16 +432,10 @@ class GrootFlowDitPolicy:
                     raise RuntimeError(
                         "Same-state condition encoding must have batch size 1"
                     )
-                return tensor.expand(
-                    (candidate_count,) + tuple(tensor.shape[1:])
-                )
+                return tensor.expand((candidate_count,) + tuple(tensor.shape[1:]))
 
-            expanded_features = expand_batch(
-                encoded.backbone_features
-            ).contiguous()
-            expanded_state_features = expand_batch(
-                encoded.state_features
-            ).contiguous()
+            expanded_features = expand_batch(encoded.backbone_features).contiguous()
+            expanded_state_features = expand_batch(encoded.state_features).contiguous()
             expanded_backbone_data = {
                 "backbone_features": expanded_features,
                 "backbone_attention_mask": expand_batch(
@@ -574,9 +564,7 @@ class GrootFlowDitPolicy:
                         configured_mask,
                         dtype=action_mask.dtype,
                     )
-                    action_mask[
-                        :valid_steps, offset : offset + width
-                    ] = dimension_mask
+                    action_mask[:valid_steps, offset : offset + width] = dimension_mask
             offset += width
 
         sample = TrainingSample(
