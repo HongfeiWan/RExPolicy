@@ -73,6 +73,32 @@ def _reference(
 
 
 class TestSuccessArchive(unittest.TestCase):
+    def _populated_archive(
+        self,
+        run_dir: Path,
+        *,
+        worlds: int = 3,
+    ) -> SuccessArchive:
+        episode_path = (
+            run_dir
+            / "archive/attempts/a/generation-000003/rank-00000.episodes.jsonl"
+        )
+        episode_path.parent.mkdir(parents=True)
+        episode_path.write_text(
+            json.dumps({"generation": 3, "rank": 0, "episode": 1}) + "\n",
+            encoding="utf-8",
+        )
+        archive = SuccessArchive(run_dir=run_dir, rank=0, attempt_id="a")
+        relative = archive.write_generation(
+            generation=3,
+            references=[
+                _reference(world, episode_sha256=file_sha256(episode_path))
+                for world in range(worlds)
+            ],
+        )
+        archive.commit_shard(relative or "")
+        return archive
+
     def test_round_robin_is_unique_and_restartable(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             run_dir = Path(temporary)
@@ -173,6 +199,118 @@ class TestSuccessArchive(unittest.TestCase):
         sample.add_success_role(SUCCESS_PATH_ROLE)
         sample.add_success_role(SUCCESS_PATH_ROLE)
         self.assertEqual(sample.success_roles, (SUCCESS_PATH_ROLE,))
+
+    def test_quarantine_separates_retention_from_replay_eligibility(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            run_dir = Path(temporary)
+            archive = self._populated_archive(run_dir)
+            quarantined = _reference(
+                1,
+                episode_sha256=file_sha256(
+                    run_dir
+                    / "archive/attempts/a/generation-000003/"
+                    "rank-00000.episodes.jsonl"
+                ),
+            )
+            shard_path = run_dir / archive.shards[0]
+            original_shard = shard_path.read_bytes()
+            archive.quarantine(
+                quarantined,
+                reason_code="candidate_replay_mismatch",
+                detail="reward drifted by 0.2",
+                detected_generation=4,
+            )
+
+            planned = archive.plan(
+                replay_per_rank=3,
+                max_generation_exclusive=5,
+            )
+            self.assertEqual(archive.size, 3)
+            self.assertEqual(archive.eligible_size, 2)
+            self.assertEqual(archive.quarantined_size, 1)
+            self.assertEqual(len(planned), 2)
+            self.assertNotIn(
+                quarantined.sample_id,
+                {item.sample_id for item in planned},
+            )
+            self.assertEqual(shard_path.read_bytes(), original_shard)
+
+    def test_quarantine_is_strict_restartable_and_v2_compatible(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            run_dir = Path(temporary)
+            archive = self._populated_archive(run_dir)
+            reference = archive.plan(
+                replay_per_rank=1,
+                max_generation_exclusive=4,
+            )[0]
+            self.assertTrue(
+                archive.quarantine(
+                    reference,
+                    reason_code="candidate_replay_mismatch",
+                    detail="outcome changed",
+                    detected_generation=4,
+                )
+            )
+            state = archive.state_dict()
+            restored = SuccessArchive(
+                run_dir=run_dir,
+                rank=0,
+                attempt_id="b",
+                state=state,
+            )
+            self.assertEqual(restored.quarantined, archive.quarantined)
+            self.assertEqual(restored.quarantined_size, 1)
+
+            v2_state = dict(state)
+            v2_state["schema_version"] = 2
+            v2_state.pop("quarantined")
+            migrated = SuccessArchive(
+                run_dir=run_dir,
+                rank=0,
+                attempt_id="c",
+                state=v2_state,
+            )
+            self.assertEqual(migrated.quarantined_size, 0)
+            self.assertEqual(migrated.state_dict()["schema_version"], 3)
+
+    def test_quarantine_rejects_unknown_and_conflicting_records(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            run_dir = Path(temporary)
+            archive = self._populated_archive(run_dir)
+            with self.assertRaisesRegex(KeyError, "Unknown success"):
+                archive.quarantine(
+                    _reference(99),
+                    reason_code="candidate_replay_mismatch",
+                    detail="test",
+                    detected_generation=4,
+                )
+            reference = archive.plan(
+                replay_per_rank=1,
+                max_generation_exclusive=4,
+            )[0]
+            self.assertTrue(
+                archive.quarantine(
+                    reference,
+                    reason_code="candidate_replay_mismatch",
+                    detail="reward changed",
+                    detected_generation=4,
+                )
+            )
+            self.assertFalse(
+                archive.quarantine(
+                    reference,
+                    reason_code="candidate_replay_mismatch",
+                    detail="reward changed",
+                    detected_generation=4,
+                )
+            )
+            with self.assertRaisesRegex(ValueError, "Conflicting quarantine"):
+                archive.quarantine(
+                    reference,
+                    reason_code="candidate_replay_mismatch",
+                    detail="different outcome",
+                    detected_generation=4,
+                )
 
 
 def _metrics(

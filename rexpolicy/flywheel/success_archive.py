@@ -14,6 +14,40 @@ from .checkpoint import file_sha256
 from .experience import SUCCESS_ROLES, TrainingSample
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_REASON_CODE = re.compile(r"^[a-z][a-z0-9_]*$")
+
+
+@dataclass(frozen=True)
+class QuarantineRecord:
+    """Why one immutable success reference is no longer replay eligible."""
+
+    schema_version: int
+    sample_id: str
+    reason_code: str
+    detail: str
+    detected_generation: int
+
+    def validate(self) -> None:
+        """Reject incomplete or unsupported quarantine records."""
+        if self.schema_version != 1:
+            raise ValueError(
+                f"Unsupported archive quarantine schema {self.schema_version}"
+            )
+        if self.detected_generation < 0:
+            raise ValueError("Quarantine generation cannot be negative")
+        if not self.sample_id:
+            raise ValueError("Quarantine sample_id cannot be empty")
+        if _REASON_CODE.fullmatch(self.reason_code) is None:
+            raise ValueError(f"Invalid quarantine reason code {self.reason_code!r}")
+        if not self.detail.strip():
+            raise ValueError("Quarantine records require detail")
+
+    @classmethod
+    def from_record(cls, record: dict[str, Any]) -> QuarantineRecord:
+        """Validate and decode one checkpointed quarantine record."""
+        quarantine = cls(**record)
+        quarantine.validate()
+        return quarantine
 
 
 @dataclass(frozen=True)
@@ -158,6 +192,7 @@ class SuccessArchive:
         self._shards: list[dict[str, Any]] = []
         self._references: list[SuccessReference] = []
         self._reference_ids: set[str] = set()
+        self._quarantined: dict[str, QuarantineRecord] = {}
         self.cursor = 0
         if state is not None:
             self.load_state_dict(state)
@@ -171,6 +206,63 @@ class SuccessArchive:
     def shards(self) -> tuple[str, ...]:
         """Committed immutable shard paths, relative to the run directory."""
         return tuple(str(shard["path"]) for shard in self._shards)
+
+    @property
+    def eligible_size(self) -> int:
+        """Number of retained references currently eligible for replay."""
+        return self.size - self.quarantined_size
+
+    @property
+    def quarantined_size(self) -> int:
+        """Number of retained references excluded after replay mismatch."""
+        return len(self._quarantined)
+
+    @property
+    def quarantined(self) -> tuple[QuarantineRecord, ...]:
+        """Stable quarantine audit records ordered by sample identity."""
+        return tuple(self._quarantined[key] for key in sorted(self._quarantined))
+
+    def quarantine(
+        self,
+        reference: SuccessReference,
+        *,
+        reason_code: str,
+        detail: str,
+        detected_generation: int,
+    ) -> bool:
+        """Exclude a replay mismatch without altering its source shard."""
+        if reference.sample_id not in self._reference_ids:
+            raise KeyError(f"Unknown success sample ID {reference.sample_id}")
+        retained = next(
+            item
+            for item in self._references
+            if item.sample_id == reference.sample_id
+        )
+        if retained != reference:
+            raise ValueError(
+                f"Quarantine reference changed for {reference.sample_id}"
+            )
+        quarantine = QuarantineRecord(
+            schema_version=1,
+            sample_id=reference.sample_id,
+            reason_code=str(reason_code),
+            detail=str(detail),
+            detected_generation=int(detected_generation),
+        )
+        quarantine.validate()
+        if quarantine.detected_generation < reference.source_generation:
+            raise ValueError(
+                "Quarantine generation precedes the source generation"
+            )
+        existing = self._quarantined.get(reference.sample_id)
+        if existing is not None:
+            if existing == quarantine:
+                return False
+            raise ValueError(
+                f"Conflicting quarantine for {reference.sample_id}"
+            )
+        self._quarantined[reference.sample_id] = quarantine
+        return True
 
     def write_generation(
         self,
@@ -239,6 +331,7 @@ class SuccessArchive:
                 reference
                 for reference in self._references
                 if reference.source_generation < max_generation_exclusive
+                and reference.sample_id not in self._quarantined
             ),
             key=lambda reference: (
                 reference.source_generation,
@@ -259,16 +352,20 @@ class SuccessArchive:
     def state_dict(self) -> dict[str, Any]:
         """Return the restart state; shards remain the source of truth."""
         return {
-            "schema_version": 2,
+            "schema_version": 3,
             "rank": self.rank,
             "cursor": self.cursor,
             "shards": [dict(shard) for shard in self._shards],
+            "quarantined": [asdict(record) for record in self.quarantined],
         }
 
     def load_state_dict(self, state: dict[str, Any]) -> None:
         """Restore and strictly validate every committed shard."""
-        if int(state.get("schema_version", -1)) != 2:
+        schema_version = int(state.get("schema_version", -1))
+        if schema_version not in (2, 3):
             raise ValueError("Unsupported Success Archive state schema")
+        if schema_version == 3 and "quarantined" not in state:
+            raise ValueError("Success Archive v3 state is missing quarantined records")
         if int(state.get("rank", -1)) != self.rank:
             raise ValueError("Success Archive rank does not match resume rank")
         shards = [dict(shard) for shard in state.get("shards", ())]
@@ -307,6 +404,36 @@ class SuccessArchive:
         self._shards = shards
         self._references = references
         self._reference_ids = seen
+        self._quarantined = {}
+        quarantine_records = (
+            state.get("quarantined", ()) if schema_version >= 3 else ()
+        )
+        previous_sample_id = None
+        for record in quarantine_records:
+            quarantine = QuarantineRecord.from_record(dict(record))
+            if quarantine.sample_id not in self._reference_ids:
+                raise ValueError(
+                    "Archive quarantine references unknown sample "
+                    f"{quarantine.sample_id}"
+                )
+            if (
+                previous_sample_id is not None
+                and quarantine.sample_id <= previous_sample_id
+            ):
+                raise ValueError(
+                    "Archive quarantine records must be uniquely sorted"
+                )
+            reference = next(
+                item
+                for item in references
+                if item.sample_id == quarantine.sample_id
+            )
+            if quarantine.detected_generation < reference.source_generation:
+                raise ValueError(
+                    "Quarantine generation precedes the source generation"
+                )
+            self._quarantined[quarantine.sample_id] = quarantine
+            previous_sample_id = quarantine.sample_id
         self.cursor = int(state.get("cursor", 0))
         if self.cursor < 0:
             raise ValueError("Success Archive cursor cannot be negative")
