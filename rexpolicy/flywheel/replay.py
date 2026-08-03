@@ -31,60 +31,77 @@ class CandidateReplayResult:
     executed_action: np.ndarray
 
 
+class CandidateReplayMismatch(RuntimeError):
+    """An archived candidate no longer reproduces under its bound contract."""
+
+
 def validate_candidate_replay(
     archived: dict[str, Any],
     replayed: CandidateReplayResult,
     *,
-    float_tolerance: float,
+    action_tolerance: float,
+    reward_tolerance: float,
 ) -> None:
     """Require replayed actions, rewards, and outcomes to match the archive."""
-    if not np.isfinite(float_tolerance) or float_tolerance <= 0.0:
-        raise ValueError("float_tolerance must be positive")
+    for name, tolerance in (
+        ("action_tolerance", action_tolerance),
+        ("reward_tolerance", reward_tolerance),
+    ):
+        if not np.isfinite(tolerance) or tolerance <= 0.0:
+            raise ValueError(f"{name} must be positive and finite")
     archived_action = np.asarray(
         archived["action"]["action_19d"],
         dtype=np.float32,
     )
     replayed_action = np.asarray(replayed.executed_action, dtype=np.float32)
     if archived_action.shape != replayed_action.shape:
-        raise RuntimeError(
+        raise CandidateReplayMismatch(
             "Historical candidate action shape changed: "
             f"{archived_action.shape} != {replayed_action.shape}"
         )
     if not np.isfinite(archived_action).all():
-        raise FloatingPointError("Historical candidate archive contains non-finite actions")
+        raise CandidateReplayMismatch(
+            "Historical candidate archive contains non-finite actions"
+        )
     if not np.isfinite(replayed_action).all():
-        raise FloatingPointError("Historical candidate replay produced non-finite actions")
+        raise CandidateReplayMismatch(
+            "Historical candidate replay produced non-finite actions"
+        )
     action_error = (
         float(np.max(np.abs(archived_action - replayed_action)))
         if archived_action.size
         else 0.0
     )
-    if action_error > float_tolerance:
-        raise RuntimeError(
+    if action_error > action_tolerance:
+        raise CandidateReplayMismatch(
             "Historical candidate effective action changed: "
-            f"{action_error:.3e} > {float_tolerance:.3e}"
+            f"{action_error:.3e} > {action_tolerance:.3e}"
         )
 
     archived_rewards = np.asarray(archived["rewards"], dtype=np.float64)
     replayed_rewards = np.asarray(replayed.rewards, dtype=np.float64)
     if archived_rewards.shape != replayed_rewards.shape:
-        raise RuntimeError(
+        raise CandidateReplayMismatch(
             "Historical candidate reward length changed: "
             f"{archived_rewards.shape} != {replayed_rewards.shape}"
         )
     if not np.isfinite(archived_rewards).all():
-        raise FloatingPointError("Historical candidate archive contains non-finite rewards")
+        raise CandidateReplayMismatch(
+            "Historical candidate archive contains non-finite rewards"
+        )
     if not np.isfinite(replayed_rewards).all():
-        raise FloatingPointError("Historical candidate replay produced non-finite rewards")
+        raise CandidateReplayMismatch(
+            "Historical candidate replay produced non-finite rewards"
+        )
     reward_error = (
         float(np.max(np.abs(archived_rewards - replayed_rewards)))
         if archived_rewards.size
         else 0.0
     )
-    if reward_error > float_tolerance:
-        raise RuntimeError(
+    if reward_error > reward_tolerance:
+        raise CandidateReplayMismatch(
             "Historical candidate rewards changed: "
-            f"{reward_error:.3e} > {float_tolerance:.3e}"
+            f"{reward_error:.3e} > {reward_tolerance:.3e}"
         )
 
     archived_success = bool(archived["success"])
@@ -120,7 +137,9 @@ def validate_candidate_replay(
         detail = ", ".join(
             f"{name}={expected[name]}->{actual[name]}" for name in mismatches
         )
-        raise RuntimeError(f"Historical candidate outcome changed: {detail}")
+        raise CandidateReplayMismatch(
+            f"Historical candidate outcome changed: {detail}"
+        )
 
 
 def validate_replay_fingerprint(

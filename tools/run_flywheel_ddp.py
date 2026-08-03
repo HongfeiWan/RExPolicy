@@ -140,6 +140,12 @@ def create_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--advantage-temperature", type=float, default=0.1)
     parser.add_argument("--same-state-tolerance", type=float, default=1.0e-5)
+    parser.add_argument(
+        "--candidate-replay-reward-tolerance",
+        type=float,
+        default=7.0e-4,
+        help="Absolute reward tolerance, separate from state/action replay.",
+    )
     parser.add_argument("--train-steps-per-generation", type=int, default=4)
     parser.add_argument("--train-batch-size", type=int, default=1)
     parser.add_argument("--gradient-accumulation", type=int, default=2)
@@ -236,8 +242,16 @@ def _validate_args(
         raise ValueError("chunk-elite-fraction must be in (0, 1]")
     if args.advantage_temperature <= 0.0:
         raise ValueError("advantage-temperature must be positive")
-    if args.same_state_tolerance <= 0.0:
+    if (
+        not np.isfinite(args.same_state_tolerance)
+        or args.same_state_tolerance <= 0.0
+    ):
         raise ValueError("same-state-tolerance must be positive")
+    if (
+        not np.isfinite(args.candidate_replay_reward_tolerance)
+        or args.candidate_replay_reward_tolerance <= 0.0
+    ):
+        raise ValueError("candidate-replay-reward-tolerance must be positive")
     if args.train_steps_per_generation < 0:
         raise ValueError("train-steps-per-generation cannot be negative")
     if min(args.train_batch_size, args.gradient_accumulation) < 1:
@@ -965,7 +979,16 @@ def _materialize_historical_samples(
             raise RuntimeError(
                 f"Historical candidate is missing for {reference.sample_id}"
             )
-        raw = _raw_observations(observation, instruction=task.instruction)[0]
+        replay_world = int(reference.world)
+        if replay_world < 0 or replay_world >= env.num_envs:
+            raise RuntimeError(
+                f"Historical world is unavailable for {reference.sample_id}: "
+                f"world={replay_world}, envs={env.num_envs}"
+            )
+        raw = _raw_observations(
+            observation,
+            instruction=task.instruction,
+        )[replay_world]
         condition = policy.encode_conditions([raw])[0]
         archived_action = candidate["action"]
         candidate_action_19d = np.asarray(
@@ -986,36 +1009,45 @@ def _materialize_historical_samples(
             effective = env.project_effective_action_torch(proposed)
             _, reward, terminated, truncated, _ = env.step(effective)
             replayed_actions.append(
-                env.effective_action_torch()[0]
+                env.effective_action_torch()[replay_world]
                 .detach()
                 .float()
                 .cpu()
                 .numpy()
                 .copy()
             )
-            replayed_rewards.append(float(reward[0].item()))
-            terminated_any = terminated_any or bool(terminated[0].item())
-            truncated_any = truncated_any or bool(truncated[0].item())
+            replayed_rewards.append(float(reward[replay_world].item()))
+            terminated_any = terminated_any or bool(
+                terminated[replay_world].item()
+            )
+            truncated_any = truncated_any or bool(
+                truncated[replay_world].item()
+            )
             if terminated_any or truncated_any:
                 break
         replay_evaluation = env.evaluate()
-        replay_failure = bool(replay_evaluation["fail"][0].item())
+        replay_failure = bool(replay_evaluation["fail"][replay_world].item())
         replay_safety = bool(
-            replay_evaluation["reach_contact_violation"][0].item()
-            or replay_evaluation["reach_displacement_violation"][0].item()
+            replay_evaluation["reach_contact_violation"][replay_world].item()
+            or replay_evaluation[
+                "reach_displacement_violation"
+            ][replay_world].item()
         )
         validate_candidate_replay(
             candidate,
             CandidateReplayResult(
                 rewards=tuple(replayed_rewards),
-                success=bool(replay_evaluation["success"][0].item()),
+                success=bool(
+                    replay_evaluation["success"][replay_world].item()
+                ),
                 failure=replay_failure,
                 safety_violation=replay_safety,
                 terminated=terminated_any,
                 truncated=truncated_any,
                 executed_action=np.asarray(replayed_actions, dtype=np.float32),
             ),
-            float_tolerance=args.same_state_tolerance,
+            action_tolerance=args.same_state_tolerance,
+            reward_tolerance=args.candidate_replay_reward_tolerance,
         )
         executed_action = {
             key: np.asarray(archived_action[key], dtype=np.float32)
@@ -1442,6 +1474,9 @@ def _build_run_manifest(
             "chunk_elite_fraction": args.chunk_elite_fraction,
             "advantage_temperature": args.advantage_temperature,
             "same_state_tolerance": args.same_state_tolerance,
+            "candidate_replay_reward_tolerance": (
+                args.candidate_replay_reward_tolerance
+            ),
             "train_steps_per_generation": args.train_steps_per_generation,
             "train_batch_size": args.train_batch_size,
             "gradient_accumulation": args.gradient_accumulation,
