@@ -18,6 +18,111 @@ class ReplayFingerprint:
     field_count: int
 
 
+@dataclass(frozen=True)
+class CandidateReplayResult:
+    """Observed result of re-executing one archived candidate prefix."""
+
+    rewards: tuple[float, ...]
+    success: bool
+    failure: bool
+    safety_violation: bool
+    terminated: bool
+    truncated: bool
+    executed_action: np.ndarray
+
+
+def validate_candidate_replay(
+    archived: dict[str, Any],
+    replayed: CandidateReplayResult,
+    *,
+    float_tolerance: float,
+) -> None:
+    """Require replayed actions, rewards, and outcomes to match the archive."""
+    if not np.isfinite(float_tolerance) or float_tolerance <= 0.0:
+        raise ValueError("float_tolerance must be positive")
+    archived_action = np.asarray(
+        archived["action"]["action_19d"],
+        dtype=np.float32,
+    )
+    replayed_action = np.asarray(replayed.executed_action, dtype=np.float32)
+    if archived_action.shape != replayed_action.shape:
+        raise RuntimeError(
+            "Historical candidate action shape changed: "
+            f"{archived_action.shape} != {replayed_action.shape}"
+        )
+    if not np.isfinite(archived_action).all():
+        raise FloatingPointError("Historical candidate archive contains non-finite actions")
+    if not np.isfinite(replayed_action).all():
+        raise FloatingPointError("Historical candidate replay produced non-finite actions")
+    action_error = (
+        float(np.max(np.abs(archived_action - replayed_action)))
+        if archived_action.size
+        else 0.0
+    )
+    if action_error > float_tolerance:
+        raise RuntimeError(
+            "Historical candidate effective action changed: "
+            f"{action_error:.3e} > {float_tolerance:.3e}"
+        )
+
+    archived_rewards = np.asarray(archived["rewards"], dtype=np.float64)
+    replayed_rewards = np.asarray(replayed.rewards, dtype=np.float64)
+    if archived_rewards.shape != replayed_rewards.shape:
+        raise RuntimeError(
+            "Historical candidate reward length changed: "
+            f"{archived_rewards.shape} != {replayed_rewards.shape}"
+        )
+    if not np.isfinite(archived_rewards).all():
+        raise FloatingPointError("Historical candidate archive contains non-finite rewards")
+    if not np.isfinite(replayed_rewards).all():
+        raise FloatingPointError("Historical candidate replay produced non-finite rewards")
+    reward_error = (
+        float(np.max(np.abs(archived_rewards - replayed_rewards)))
+        if archived_rewards.size
+        else 0.0
+    )
+    if reward_error > float_tolerance:
+        raise RuntimeError(
+            "Historical candidate rewards changed: "
+            f"{reward_error:.3e} > {float_tolerance:.3e}"
+        )
+
+    archived_success = bool(archived["success"])
+    archived_truncated = bool(archived["truncated"])
+    archived_failure = bool(
+        archived.get(
+            "failure",
+            bool(archived["terminated"])
+            and not archived_success
+            and not archived_truncated,
+        )
+    )
+    archived_safety = bool(archived.get("safety_violation", archived_failure))
+    expected = {
+        "success": archived_success,
+        "failure": archived_failure,
+        "safety_violation": archived_safety,
+        "terminated": bool(archived["terminated"]),
+        "truncated": archived_truncated,
+    }
+    actual = {
+        "success": bool(replayed.success),
+        "failure": bool(replayed.failure),
+        "safety_violation": bool(replayed.safety_violation),
+        "terminated": bool(replayed.terminated),
+        "truncated": bool(replayed.truncated),
+    }
+    mismatches = [
+        name for name, expected_value in expected.items()
+        if actual[name] != expected_value
+    ]
+    if mismatches:
+        detail = ", ".join(
+            f"{name}={expected[name]}->{actual[name]}" for name in mismatches
+        )
+        raise RuntimeError(f"Historical candidate outcome changed: {detail}")
+
+
 def validate_replay_fingerprint(
     tree: dict[str, Any],
     *,

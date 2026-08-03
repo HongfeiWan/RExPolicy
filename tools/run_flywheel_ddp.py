@@ -52,7 +52,11 @@ from rexpolicy.flywheel.operations import (
     RunOperations,
     preflight_selected_gpus,
 )
-from rexpolicy.flywheel.replay import validate_replay_fingerprint
+from rexpolicy.flywheel.replay import (
+    CandidateReplayResult,
+    validate_candidate_replay,
+    validate_replay_fingerprint,
+)
 from rexpolicy.flywheel.success_archive import (
     SuccessArchive,
     SuccessReference,
@@ -894,6 +898,8 @@ def _materialize_historical_samples(
     simulator_fingerprint: str,
 ) -> list[TrainingSample]:
     """Reconstruct historical conditions from reset/action recipes."""
+    import torch
+
     samples = []
     for reference in references:
         if reference.task_id != task.task_id:
@@ -962,6 +968,55 @@ def _materialize_historical_samples(
         raw = _raw_observations(observation, instruction=task.instruction)[0]
         condition = policy.encode_conditions([raw])[0]
         archived_action = candidate["action"]
+        candidate_action_19d = np.asarray(
+            archived_action["action_19d"],
+            dtype=np.float32,
+        )
+        replayed_rewards = []
+        replayed_actions = []
+        terminated_any = False
+        truncated_any = False
+        for action_row in candidate_action_19d:
+            tiled = np.repeat(action_row[None], env.num_envs, axis=0)
+            proposed = torch.as_tensor(
+                tiled,
+                dtype=torch.float32,
+                device=context.device,
+            )
+            effective = env.project_effective_action_torch(proposed)
+            _, reward, terminated, truncated, _ = env.step(effective)
+            replayed_actions.append(
+                env.effective_action_torch()[0]
+                .detach()
+                .float()
+                .cpu()
+                .numpy()
+                .copy()
+            )
+            replayed_rewards.append(float(reward[0].item()))
+            terminated_any = terminated_any or bool(terminated[0].item())
+            truncated_any = truncated_any or bool(truncated[0].item())
+            if terminated_any or truncated_any:
+                break
+        replay_evaluation = env.evaluate()
+        replay_failure = bool(replay_evaluation["fail"][0].item())
+        replay_safety = bool(
+            replay_evaluation["reach_contact_violation"][0].item()
+            or replay_evaluation["reach_displacement_violation"][0].item()
+        )
+        validate_candidate_replay(
+            candidate,
+            CandidateReplayResult(
+                rewards=tuple(replayed_rewards),
+                success=bool(replay_evaluation["success"][0].item()),
+                failure=replay_failure,
+                safety_violation=replay_safety,
+                terminated=terminated_any,
+                truncated=truncated_any,
+                executed_action=np.asarray(replayed_actions, dtype=np.float32),
+            ),
+            float_tolerance=args.same_state_tolerance,
+        )
         executed_action = {
             key: np.asarray(archived_action[key], dtype=np.float32)
             for key in ("eef_9d", "hand_joint_target", "arm_joint_target")
