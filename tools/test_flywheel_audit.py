@@ -5,9 +5,12 @@ from __future__ import annotations
 import unittest
 
 from rexpolicy.flywheel.audit import (
+    ClaimEpisodeResult,
     CapabilityClaimPolicy,
     SealedAuditSuite,
     canonical_sha256,
+    evaluate_capability_claim,
+    wilson_lower_bound,
 )
 
 
@@ -82,6 +85,133 @@ class TestSealedAuditSuite(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "threshold"):
             policy.validate()
+
+
+def _test_policy() -> CapabilityClaimPolicy:
+    return CapabilityClaimPolicy(
+        schema_version=1,
+        claim_spec_id="paired_k1_mastery/v1",
+        candidate_count=1,
+        min_independent_training_seeds=2,
+        min_episodes_per_seed=4,
+        min_success_lower_bound=0.20,
+        max_new_safety_failures=0,
+        max_invalid_actions=0,
+    )
+
+
+def _episodes() -> list[ClaimEpisodeResult]:
+    return [
+        ClaimEpisodeResult(
+            training_seed=training_seed,
+            reset_seed=100 + recipe,
+            diffusion_seed=200 + recipe,
+            success=True,
+            safety_failure=False,
+            baseline_safety_failure=False,
+            invalid_action=False,
+        )
+        for training_seed in (11, 22)
+        for recipe in range(4)
+    ]
+
+
+class TestCapabilityClaimReport(unittest.TestCase):
+    def test_accepts_complete_paired_k1_evidence(self) -> None:
+        suite = _suite(
+            independent_training_seeds=(11, 22),
+            episodes_per_training_seed=4,
+        )
+        report = evaluate_capability_claim(
+            suite=suite,
+            policy=_test_policy(),
+            episodes=_episodes(),
+        )
+
+        self.assertTrue(report.accepted)
+        self.assertEqual(report.total_episode_count, 8)
+        self.assertEqual(len(report.seed_metrics), 2)
+        self.assertGreater(report.seed_metrics[0].success_lower_bound, 0.20)
+        self.assertEqual(len(report.fingerprint), 64)
+
+    def test_report_hash_is_independent_of_input_order(self) -> None:
+        suite = _suite(
+            independent_training_seeds=(11, 22),
+            episodes_per_training_seed=4,
+        )
+        forward = evaluate_capability_claim(
+            suite=suite,
+            policy=_test_policy(),
+            episodes=_episodes(),
+        )
+        reverse = evaluate_capability_claim(
+            suite=suite,
+            policy=_test_policy(),
+            episodes=list(reversed(_episodes())),
+        )
+        self.assertEqual(forward.fingerprint, reverse.fingerprint)
+
+    def test_new_safety_and_invalid_actions_reject_claim(self) -> None:
+        suite = _suite(
+            independent_training_seeds=(11, 22),
+            episodes_per_training_seed=4,
+        )
+        episodes = _episodes()
+        episodes[0] = ClaimEpisodeResult(
+            **{
+                **episodes[0].__dict__,
+                "safety_failure": True,
+            }
+        )
+        episodes[1] = ClaimEpisodeResult(
+            **{
+                **episodes[1].__dict__,
+                "invalid_action": True,
+            }
+        )
+        report = evaluate_capability_claim(
+            suite=suite,
+            policy=_test_policy(),
+            episodes=episodes,
+        )
+        self.assertFalse(report.accepted)
+        self.assertTrue(any("safety" in reason for reason in report.reasons))
+        self.assertTrue(any("invalid" in reason for reason in report.reasons))
+
+    def test_incomplete_duplicate_or_unpaired_evidence_is_rejected(self) -> None:
+        suite = _suite(
+            independent_training_seeds=(11, 22),
+            episodes_per_training_seed=4,
+        )
+        cases = (
+            (_episodes()[:-1], "incomplete"),
+            ([*_episodes(), _episodes()[0]], "duplicate"),
+        )
+        for episodes, message in cases:
+            with self.assertRaisesRegex(ValueError, message):
+                evaluate_capability_claim(
+                    suite=suite,
+                    policy=_test_policy(),
+                    episodes=episodes,
+                )
+
+        unpaired = _episodes()
+        unpaired[-1] = ClaimEpisodeResult(
+            **{
+                **unpaired[-1].__dict__,
+                "reset_seed": 999,
+            }
+        )
+        with self.assertRaisesRegex(ValueError, "not paired"):
+            evaluate_capability_claim(
+                suite=suite,
+                policy=_test_policy(),
+                episodes=unpaired,
+            )
+
+    def test_wilson_bound_is_conservative(self) -> None:
+        self.assertLess(wilson_lower_bound(4, 4), 1.0)
+        self.assertEqual(wilson_lower_bound(0, 4), 0.0)
 
 
 if __name__ == "__main__":
