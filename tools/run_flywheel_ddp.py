@@ -20,6 +20,7 @@ from typing import Any
 import numpy as np
 
 from rexpolicy.envs import GrootNewtonEnv, GrootNewtonEnvConfig
+from rexpolicy.flywheel.archive_replay import admit_candidate_replay
 from rexpolicy.flywheel.checkpoint import (
     CheckpointManager,
     atomic_write_json,
@@ -54,7 +55,6 @@ from rexpolicy.flywheel.operations import (
 )
 from rexpolicy.flywheel.replay import (
     CandidateReplayResult,
-    validate_candidate_replay,
     validate_replay_fingerprint,
 )
 from rexpolicy.flywheel.success_archive import (
@@ -910,11 +910,14 @@ def _materialize_historical_samples(
     env: GrootNewtonEnv,
     task: FlywheelTaskSpec,
     simulator_fingerprint: str,
-) -> list[TrainingSample]:
+    archive: SuccessArchive,
+    generation: int,
+) -> tuple[list[TrainingSample], list[dict[str, Any]]]:
     """Reconstruct historical conditions from reset/action recipes."""
     import torch
 
     samples = []
+    quarantines = []
     for reference in references:
         if reference.task_id != task.task_id:
             raise RuntimeError(
@@ -1033,9 +1036,11 @@ def _materialize_historical_samples(
                 "reach_displacement_violation"
             ][replay_world].item()
         )
-        validate_candidate_replay(
-            candidate,
-            CandidateReplayResult(
+        admission = admit_candidate_replay(
+            archive=archive,
+            reference=reference,
+            archived=candidate,
+            replayed=CandidateReplayResult(
                 rewards=tuple(replayed_rewards),
                 success=bool(
                     replay_evaluation["success"][replay_world].item()
@@ -1046,9 +1051,21 @@ def _materialize_historical_samples(
                 truncated=truncated_any,
                 executed_action=np.asarray(replayed_actions, dtype=np.float32),
             ),
+            detected_generation=generation,
             action_tolerance=args.same_state_tolerance,
             reward_tolerance=args.candidate_replay_reward_tolerance,
         )
+        if not admission.accepted:
+            quarantines.append(
+                {
+                    "sample_id": reference.sample_id,
+                    "source_generation": reference.source_generation,
+                    "reason_code": admission.reason_code,
+                    "detail": admission.detail,
+                    "created": admission.quarantine_created,
+                }
+            )
+            continue
         executed_action = {
             key: np.asarray(archived_action[key], dtype=np.float32)
             for key in ("eef_9d", "hand_joint_target", "arm_joint_target")
@@ -1077,7 +1094,7 @@ def _materialize_historical_samples(
         sample.sample_weight = float(reference.archived_weight)
         sample.advantage = float(candidate["advantage"])
         samples.append(sample)
-    return samples
+    return samples, quarantines
 
 
 def _evaluate_held_out(
@@ -1587,6 +1604,7 @@ def _generation_metrics(
     episodes: list[EpisodeExperience],
     current_samples: list[TrainingSample],
     historical_references: list[SuccessReference],
+    historical_samples: list[TrainingSample],
     update: UpdateMetrics,
     archive: SuccessArchive,
     collect_seconds: float,
@@ -1631,7 +1649,12 @@ def _generation_metrics(
             "historical_replay_sample_ids": [
                 reference.sample_id for reference in historical_references
             ],
+            "historical_materialized_sample_ids": [
+                sample.sample_id for sample in historical_samples
+            ],
             "archive_size": archive.size,
+            "archive_eligible_size": archive.eligible_size,
+            "archive_quarantined_size": archive.quarantined_size,
             "archive_cursor": archive.cursor,
             "optimizer_state_device": update.optimizer_state_device,
             "stage_seconds": {
@@ -1684,6 +1707,12 @@ def _generation_metrics(
         "successful_episodes": context.sum_int(local_successes),
         "new_success_chunks": context.sum_int(local_direct_or_path),
         "success_archive_size": context.sum_int(archive.size),
+        "success_archive_eligible_size": context.sum_int(
+            archive.eligible_size
+        ),
+        "success_archive_quarantined_size": context.sum_int(
+            archive.quarantined_size
+        ),
         "archive_cursor_by_rank": [
             record["archive_cursor"] for record in exposure_by_rank
         ],
@@ -2068,7 +2097,10 @@ def main() -> None:
                 replay_per_rank=args.success_replay_per_rank,
                 max_generation_exclusive=generation,
             )
-            historical_samples = _materialize_historical_samples(
+            (
+                historical_samples,
+                replay_quarantines,
+            ) = _materialize_historical_samples(
                 references=historical_references,
                 run_dir=run_dir,
                 args=args,
@@ -2077,7 +2109,22 @@ def main() -> None:
                 env=env,
                 task=task,
                 simulator_fingerprint=simulator_fingerprint,
+                archive=archive,
+                generation=generation,
             )
+            for quarantine in replay_quarantines:
+                operations.metric(
+                    "archive_quarantine",
+                    generation=generation,
+                    rank=context.rank,
+                    **quarantine,
+                )
+                operations.log(
+                    "quarantined historical replay",
+                    generation=generation,
+                    rank=context.rank,
+                    **quarantine,
+                )
             historical_seconds = time.perf_counter() - historical_started
             collect_started = time.perf_counter()
             episodes = _collect_generation(
@@ -2141,6 +2188,7 @@ def main() -> None:
                 episodes=episodes,
                 current_samples=current_samples,
                 historical_references=historical_references,
+                historical_samples=historical_samples,
                 update=update,
                 archive=archive,
                 collect_seconds=collect_seconds,

@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import Mock
 
 import numpy as np
 
+from rexpolicy.flywheel.archive_replay import (
+    REPLAY_MISMATCH_REASON,
+    admit_candidate_replay,
+)
 from rexpolicy.flywheel.replay import (
     CandidateReplayMismatch,
     CandidateReplayResult,
@@ -144,6 +149,72 @@ class TestCandidateReplayValidation(unittest.TestCase):
                 terminated=True,
             ),
         )
+
+
+class TestCandidateReplayAdmission(unittest.TestCase):
+    def test_exact_replay_does_not_touch_quarantine(self) -> None:
+        archive = Mock()
+        admission = admit_candidate_replay(
+            archive=archive,
+            reference=Mock(),
+            archived=_archived_candidate(),
+            replayed=_replayed_result(),
+            detected_generation=4,
+            action_tolerance=1.0e-6,
+            reward_tolerance=1.0e-3,
+        )
+        self.assertTrue(admission.accepted)
+        archive.quarantine.assert_not_called()
+
+    def test_only_typed_mismatch_is_quarantined(self) -> None:
+        archive = Mock()
+        archive.quarantine.return_value = True
+        reference = Mock()
+        admission = admit_candidate_replay(
+            archive=archive,
+            reference=reference,
+            archived=_archived_candidate(),
+            replayed=_replayed_result(rewards=(9.0, 9.0)),
+            detected_generation=4,
+            action_tolerance=1.0e-6,
+            reward_tolerance=1.0e-3,
+        )
+        self.assertFalse(admission.accepted)
+        self.assertTrue(admission.quarantine_created)
+        self.assertEqual(admission.reason_code, REPLAY_MISMATCH_REASON)
+        archive.quarantine.assert_called_once_with(
+            reference,
+            reason_code=REPLAY_MISMATCH_REASON,
+            detail=admission.detail,
+            detected_generation=4,
+        )
+
+        following = admit_candidate_replay(
+            archive=archive,
+            reference=Mock(),
+            archived=_archived_candidate(),
+            replayed=_replayed_result(),
+            detected_generation=4,
+            action_tolerance=1.0e-6,
+            reward_tolerance=1.0e-3,
+        )
+        self.assertTrue(following.accepted)
+
+    def test_archive_structure_error_remains_hard(self) -> None:
+        archive = Mock()
+        archived = _archived_candidate()
+        archived.pop("action")
+        with self.assertRaises(KeyError):
+            admit_candidate_replay(
+                archive=archive,
+                reference=Mock(),
+                archived=archived,
+                replayed=_replayed_result(),
+                detected_generation=4,
+                action_tolerance=1.0e-6,
+                reward_tolerance=1.0e-3,
+            )
+        archive.quarantine.assert_not_called()
 
 
 if __name__ == "__main__":
