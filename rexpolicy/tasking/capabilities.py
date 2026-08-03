@@ -59,13 +59,22 @@ class MetricSpec:
     maximum: float | None
     unit: str
     available_at: tuple[str, ...]
+    allowed_purposes: tuple[str, ...]
 
     @classmethod
     def from_record(cls, value: Any, path: str) -> MetricSpec:
         record = _mapping(value, path)
         _keys(
             record,
-            {"name", "value_type", "minimum", "maximum", "unit", "available_at"},
+            {
+                "name",
+                "value_type",
+                "minimum",
+                "maximum",
+                "unit",
+                "available_at",
+                "allowed_purposes",
+            },
             path,
         )
         value_type = _string(record["value_type"], f"{path}.value_type")
@@ -80,6 +89,14 @@ class MetricSpec:
         available_at = _strings(record["available_at"], f"{path}.available_at")
         if not set(available_at).issubset({"previous", "current"}):
             raise ValueError(f"{path}.available_at contains an unsupported time")
+        allowed_purposes = _strings(
+            record["allowed_purposes"],
+            f"{path}.allowed_purposes",
+        )
+        if not set(allowed_purposes).issubset(
+            {"goal", "terminal", "reward", "process"}
+        ):
+            raise ValueError(f"{path}.allowed_purposes is unsupported")
         return cls(
             name=_string(record["name"], f"{path}.name"),
             value_type=value_type,
@@ -87,6 +104,7 @@ class MetricSpec:
             maximum=maximum,
             unit=_string(record["unit"], f"{path}.unit"),
             available_at=available_at,
+            allowed_purposes=allowed_purposes,
         )
 
     def to_record(self) -> dict[str, Any]:
@@ -97,6 +115,7 @@ class MetricSpec:
             "maximum": self.maximum,
             "unit": self.unit,
             "available_at": list(self.available_at),
+            "allowed_purposes": list(self.allowed_purposes),
         }
 
 

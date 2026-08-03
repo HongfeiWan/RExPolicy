@@ -28,6 +28,7 @@ def capability_record() -> dict:
                         "maximum": 2.0,
                         "unit": "m",
                         "available_at": ["previous", "current"],
+                        "allowed_purposes": ["goal", "reward", "process"],
                     },
                     {
                         "name": "reach.contact_violation",
@@ -36,6 +37,7 @@ def capability_record() -> dict:
                         "maximum": None,
                         "unit": "bool",
                         "available_at": ["current"],
+                        "allowed_purposes": ["terminal", "process"],
                     },
                     {
                         "name": "reach.displacement_violation",
@@ -44,6 +46,7 @@ def capability_record() -> dict:
                         "maximum": None,
                         "unit": "bool",
                         "available_at": ["current"],
+                        "allowed_purposes": ["terminal", "process"],
                     },
                 ],
             }
