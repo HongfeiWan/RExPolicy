@@ -12,6 +12,39 @@ SUCCESS_ROLES = frozenset((DIRECT_SUCCESS_ROLE, SUCCESS_PATH_ROLE))
 
 
 @dataclass
+class BranchOutcomeAccumulator:
+    """Sticky oracle outcomes observed over an executed candidate prefix."""
+
+    failure: bool = False
+    contact_violation: bool = False
+    displacement_violation: bool = False
+
+    def observe(
+        self,
+        *,
+        executed: bool,
+        failure: bool,
+        contact_violation: bool,
+        displacement_violation: bool,
+    ) -> None:
+        """Accumulate only frames that belong to this candidate prefix."""
+        if not executed:
+            return
+        self.failure = self.failure or bool(failure)
+        self.contact_violation = (
+            self.contact_violation or bool(contact_violation)
+        )
+        self.displacement_violation = (
+            self.displacement_violation or bool(displacement_violation)
+        )
+
+    @property
+    def safety_violation(self) -> bool:
+        """Whether any trusted safety predicate fired during the prefix."""
+        return self.contact_violation or self.displacement_violation
+
+
+@dataclass
 class TrainingSample:
     """One executed action window conditioned on frozen VLM features."""
 

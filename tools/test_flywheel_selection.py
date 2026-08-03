@@ -5,6 +5,7 @@ from __future__ import annotations
 import unittest
 
 from rexpolicy.flywheel.experience import (
+    BranchOutcomeAccumulator,
     ChunkCandidate,
     TrainingSample,
     select_advantage_chunks,
@@ -46,6 +47,32 @@ def _candidate(
 
 
 class TestFailureAwareChunkSelection(unittest.TestCase):
+    def test_transient_contact_is_sticky_but_inactive_frames_are_ignored(self) -> None:
+        outcome = BranchOutcomeAccumulator()
+        outcome.observe(
+            executed=True,
+            failure=True,
+            contact_violation=True,
+            displacement_violation=False,
+        )
+        outcome.observe(
+            executed=True,
+            failure=False,
+            contact_violation=False,
+            displacement_violation=False,
+        )
+        outcome.observe(
+            executed=False,
+            failure=True,
+            contact_violation=False,
+            displacement_violation=True,
+        )
+
+        self.assertTrue(outcome.failure)
+        self.assertTrue(outcome.contact_violation)
+        self.assertFalse(outcome.displacement_violation)
+        self.assertTrue(outcome.safety_violation)
+
     def test_failure_cannot_beat_lower_scoring_safe_candidate(self) -> None:
         failed_progress = _candidate(
             0,

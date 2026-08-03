@@ -38,6 +38,7 @@ from rexpolicy.flywheel.evaluation import (
     fixed_evaluation_suite,
 )
 from rexpolicy.flywheel.experience import (
+    BranchOutcomeAccumulator,
     DIRECT_SUCCESS_ROLE,
     ChunkCandidate,
     EpisodeExperience,
@@ -70,6 +71,7 @@ from rexpolicy.flywheel.task_spec import (
 from rexpolicy.flywheel.trainer import DitDdpTrainer, UpdateMetrics
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+REACH_BOTTLE_DISPLACEMENT_LIMIT_M = 0.010
 
 
 def _first_existing(*paths: Path) -> Path:
@@ -593,6 +595,9 @@ def _collect_episode(
         executed_steps: list[list[np.ndarray]] = [
             [] for _ in range(env.num_envs)
         ]
+        branch_outcomes = [
+            BranchOutcomeAccumulator() for _ in range(env.num_envs)
+        ]
 
         for chunk_step in range(horizon):
             active_before = active.clone()
@@ -613,14 +618,34 @@ def _collect_episode(
             hold = env.hold_action_torch().clone()
             mixed = torch.where(active_before[:, None], proposed, hold)
             effective = env.project_effective_action_torch(mixed)
-            observation, reward, terminated, truncated, _ = env.step(effective)
+            observation, reward, terminated, truncated, info = env.step(effective)
             executed = (
                 env.effective_action_torch().detach().float().cpu().numpy().copy()
             )
             reward_values = reward.detach().float().cpu().tolist()
             active_cpu = active_before.detach().cpu().tolist()
+            failure_step = info["fail"].detach().cpu().tolist()
+            contact_step = (
+                info["had_hand_contact_this_control_step"]
+                .detach()
+                .cpu()
+                .tolist()
+            )
+            displacement_step = (
+                info["reach_max_bottle_displacement"]
+                .gt(REACH_BOTTLE_DISPLACEMENT_LIMIT_M)
+                .detach()
+                .cpu()
+                .tolist()
+            )
             chunk_scores.add_(reward * active_before)
             for world, was_active in enumerate(active_cpu):
+                branch_outcomes[world].observe(
+                    executed=bool(was_active),
+                    failure=bool(failure_step[world]),
+                    contact_violation=bool(contact_step[world]),
+                    displacement_violation=bool(displacement_step[world]),
+                )
                 if was_active:
                     valid_steps[world] += 1
                     chunk_rewards[world].append(float(reward_values[world]))
@@ -632,13 +657,20 @@ def _collect_episode(
         evaluation = env.evaluate()
         score_values = chunk_scores.detach().float().cpu().tolist()
         success_values = evaluation["success"].detach().cpu().tolist()
-        failure_values = evaluation["fail"].detach().cpu().tolist()
-        contact_violation_values = (
+        final_failure_values = evaluation["fail"].detach().cpu().tolist()
+        final_contact_values = (
             evaluation["reach_contact_violation"].detach().cpu().tolist()
         )
-        displacement_violation_values = (
+        final_displacement_values = (
             evaluation["reach_displacement_violation"].detach().cpu().tolist()
         )
+        for world, outcome in enumerate(branch_outcomes):
+            outcome.observe(
+                executed=valid_steps[world] > 0,
+                failure=bool(final_failure_values[world]),
+                contact_violation=bool(final_contact_values[world]),
+                displacement_violation=bool(final_displacement_values[world]),
+            )
         terminated_values = terminated_any.detach().cpu().tolist()
         truncated_values = truncated_any.detach().cpu().tolist()
         candidates = []
@@ -678,11 +710,12 @@ def _collect_episode(
             if bool(success_values[world]):
                 training_sample.add_success_role(DIRECT_SUCCESS_ROLE)
             failure_reasons = []
-            if bool(contact_violation_values[world]):
+            outcome = branch_outcomes[world]
+            if outcome.contact_violation:
                 failure_reasons.append("hand_contact")
-            if bool(displacement_violation_values[world]):
+            if outcome.displacement_violation:
                 failure_reasons.append("bottle_displacement")
-            if bool(failure_values[world]) and not failure_reasons:
+            if outcome.failure and not failure_reasons:
                 failure_reasons.append("environment_failure")
             candidates.append(
                 ChunkCandidate(
@@ -698,11 +731,8 @@ def _collect_episode(
                         "action_19d": effective_action,
                     },
                     sample=training_sample,
-                    failure=bool(failure_values[world]),
-                    safety_violation=bool(
-                        contact_violation_values[world]
-                        or displacement_violation_values[world]
-                    ),
+                    failure=outcome.failure,
+                    safety_violation=outcome.safety_violation,
                     failure_reasons=tuple(failure_reasons),
                 )
             )
@@ -1002,6 +1032,7 @@ def _materialize_historical_samples(
         replayed_actions = []
         terminated_any = False
         truncated_any = False
+        replay_outcome = BranchOutcomeAccumulator()
         for action_row in candidate_action_19d:
             tiled = np.repeat(action_row[None], env.num_envs, axis=0)
             proposed = torch.as_tensor(
@@ -1010,7 +1041,22 @@ def _materialize_historical_samples(
                 device=context.device,
             )
             effective = env.project_effective_action_torch(proposed)
-            _, reward, terminated, truncated, _ = env.step(effective)
+            _, reward, terminated, truncated, info = env.step(effective)
+            replay_outcome.observe(
+                executed=True,
+                failure=bool(info["fail"][replay_world].item()),
+                contact_violation=bool(
+                    info["had_hand_contact_this_control_step"][
+                        replay_world
+                    ].item()
+                ),
+                displacement_violation=bool(
+                    info["reach_max_bottle_displacement"][
+                        replay_world
+                    ].item()
+                    > REACH_BOTTLE_DISPLACEMENT_LIMIT_M
+                ),
+            )
             replayed_actions.append(
                 env.effective_action_torch()[replay_world]
                 .detach()
@@ -1029,12 +1075,19 @@ def _materialize_historical_samples(
             if terminated_any or truncated_any:
                 break
         replay_evaluation = env.evaluate()
-        replay_failure = bool(replay_evaluation["fail"][replay_world].item())
-        replay_safety = bool(
-            replay_evaluation["reach_contact_violation"][replay_world].item()
-            or replay_evaluation[
-                "reach_displacement_violation"
-            ][replay_world].item()
+        replay_outcome.observe(
+            executed=True,
+            failure=bool(replay_evaluation["fail"][replay_world].item()),
+            contact_violation=bool(
+                replay_evaluation["reach_contact_violation"][
+                    replay_world
+                ].item()
+            ),
+            displacement_violation=bool(
+                replay_evaluation["reach_displacement_violation"][
+                    replay_world
+                ].item()
+            ),
         )
         admission = admit_candidate_replay(
             archive=archive,
@@ -1045,8 +1098,8 @@ def _materialize_historical_samples(
                 success=bool(
                     replay_evaluation["success"][replay_world].item()
                 ),
-                failure=replay_failure,
-                safety_violation=replay_safety,
+                failure=replay_outcome.failure,
+                safety_violation=replay_outcome.safety_violation,
                 terminated=terminated_any,
                 truncated=truncated_any,
                 executed_action=np.asarray(replayed_actions, dtype=np.float32),
