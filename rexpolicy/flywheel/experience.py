@@ -88,6 +88,9 @@ class ChunkCandidate:
     rewards: list[float]
     action: dict[str, Any]
     sample: TrainingSample
+    failure: bool = False
+    safety_violation: bool = False
+    failure_reasons: tuple[str, ...] = ()
     advantage: float = 0.0
     sample_weight: float = 0.0
     selected_for_training: bool = False
@@ -101,6 +104,9 @@ class ChunkCandidate:
             "world": self.world,
             "score": self.score,
             "success": self.success,
+            "failure": self.failure,
+            "safety_violation": self.safety_violation,
+            "failure_reasons": list(self.failure_reasons),
             "terminated": self.terminated,
             "truncated": self.truncated,
             "valid_steps": self.valid_steps,
@@ -120,7 +126,7 @@ class ChunkSelection:
     baseline: float
     mode: str
     selected: list[ChunkCandidate]
-    continuation: ChunkCandidate
+    continuation: ChunkCandidate | None
 
 
 @dataclass
@@ -240,8 +246,41 @@ def select_advantage_chunks(
     if temperature <= 0.0:
         raise ValueError("advantage temperature must be positive")
 
-    successful = [candidate for candidate in candidates if candidate.success]
-    comparison_pool = successful or candidates
+    for candidate in candidates:
+        if candidate.success and candidate.failure:
+            raise ValueError(
+                f"Candidate world {candidate.world} cannot be both success and failure"
+            )
+        if candidate.success and candidate.safety_violation:
+            raise ValueError(
+                f"Candidate world {candidate.world} cannot be both success and unsafe"
+            )
+
+    eligible = [
+        candidate
+        for candidate in candidates
+        if not candidate.failure and not candidate.safety_violation
+    ]
+    successful = [candidate for candidate in eligible if candidate.success]
+    comparison_pool = successful or eligible
+    if not comparison_pool:
+        scores = sorted(candidate.score for candidate in candidates)
+        midpoint = len(scores) // 2
+        baseline = (
+            scores[midpoint]
+            if len(scores) % 2
+            else 0.5 * (scores[midpoint - 1] + scores[midpoint])
+        )
+        for candidate in candidates:
+            candidate.advantage = candidate.score - baseline
+            candidate.sample.advantage = candidate.advantage
+        return ChunkSelection(
+            baseline=baseline,
+            mode="no_safe_candidate",
+            selected=[],
+            continuation=None,
+        )
+
     scores = sorted(candidate.score for candidate in comparison_pool)
     midpoint = len(scores) // 2
     if len(scores) % 2:

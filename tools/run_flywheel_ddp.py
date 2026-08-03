@@ -614,6 +614,13 @@ def _collect_episode(
         evaluation = env.evaluate()
         score_values = chunk_scores.detach().float().cpu().tolist()
         success_values = evaluation["success"].detach().cpu().tolist()
+        failure_values = evaluation["fail"].detach().cpu().tolist()
+        contact_violation_values = (
+            evaluation["reach_contact_violation"].detach().cpu().tolist()
+        )
+        displacement_violation_values = (
+            evaluation["reach_displacement_violation"].detach().cpu().tolist()
+        )
         terminated_values = terminated_any.detach().cpu().tolist()
         truncated_values = truncated_any.detach().cpu().tolist()
         candidates = []
@@ -652,6 +659,13 @@ def _collect_episode(
             )
             if bool(success_values[world]):
                 training_sample.add_success_role(DIRECT_SUCCESS_ROLE)
+            failure_reasons = []
+            if bool(contact_violation_values[world]):
+                failure_reasons.append("hand_contact")
+            if bool(displacement_violation_values[world]):
+                failure_reasons.append("bottle_displacement")
+            if bool(failure_values[world]) and not failure_reasons:
+                failure_reasons.append("environment_failure")
             candidates.append(
                 ChunkCandidate(
                     world=world,
@@ -666,6 +680,12 @@ def _collect_episode(
                         "action_19d": effective_action,
                     },
                     sample=training_sample,
+                    failure=bool(failure_values[world]),
+                    safety_violation=bool(
+                        contact_violation_values[world]
+                        or displacement_violation_values[world]
+                    ),
+                    failure_reasons=tuple(failure_reasons),
                 )
             )
         if not candidates:
@@ -679,6 +699,31 @@ def _collect_episode(
         diversity_mean, diversity_max = _normalized_action_diversity(candidates)
         selected_samples.extend(candidate.sample for candidate in selection.selected)
         continuation = selection.continuation
+        if continuation is None:
+            decisions.append(
+                {
+                    "decision_index": decision_index,
+                    "start_control_step": len(root_actions),
+                    "replay_fingerprint_sha256": replay_fingerprint.digest,
+                    "same_state_float_spread_max_abs": (
+                        replay_fingerprint.max_float_spread
+                    ),
+                    "same_state_field_count": replay_fingerprint.field_count,
+                    "advantage_baseline": selection.baseline,
+                    "selection_mode": selection.mode,
+                    "success_constraint_active": False,
+                    "safe_candidate_count": 0,
+                    "selected_chunk_count": 0,
+                    "normalized_action_pairwise_rms_mean": diversity_mean,
+                    "normalized_action_pairwise_rms_max": diversity_max,
+                    "candidates": [
+                        candidate.archive_record() for candidate in candidates
+                    ],
+                }
+            )
+            episode_done = True
+            decision_index += 1
+            continue
         path_samples.append(continuation.sample)
         selected_return += continuation.score
         root_rewards.extend(continuation.rewards)
@@ -709,6 +754,10 @@ def _collect_episode(
                 "selection_mode": selection.mode,
                 "success_constraint_active": any(
                     candidate.success for candidate in candidates
+                ),
+                "safe_candidate_count": sum(
+                    not candidate.failure and not candidate.safety_violation
+                    for candidate in candidates
                 ),
                 "selected_chunk_count": len(selection.selected),
                 "normalized_action_pairwise_rms_mean": diversity_mean,
