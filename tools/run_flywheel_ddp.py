@@ -44,6 +44,7 @@ from rexpolicy.flywheel.experience import (
     EpisodeExperience,
     TrainingSample,
     select_advantage_chunks,
+    validate_candidate_archive_record,
 )
 from rexpolicy.flywheel.groot_policy import (
     GrootFlowDitPolicy,
@@ -962,6 +963,10 @@ def _materialize_historical_samples(
                 f"Historical simulator fingerprint mismatch for {reference.sample_id}"
             )
         record = load_episode_record(run_dir, reference)
+        if int(record.get("schema_version", -1)) != 5:
+            raise RuntimeError(
+                f"Historical episode schema is not v5 for {reference.sample_id}"
+            )
         decision = next(
             (
                 item
@@ -1012,6 +1017,7 @@ def _materialize_historical_samples(
             raise RuntimeError(
                 f"Historical candidate is missing for {reference.sample_id}"
             )
+        validate_candidate_archive_record(candidate)
         replay_world = int(reference.world)
         if replay_world < 0 or replay_world >= env.num_envs:
             raise RuntimeError(

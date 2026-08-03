@@ -131,7 +131,7 @@ class ChunkCandidate:
 
     def archive_record(self) -> dict[str, Any]:
         """Return the candidate without its transient VLM condition."""
-        return {
+        record = {
             "sample_id": self.sample.sample_id,
             "success_roles": list(self.sample.success_roles),
             "world": self.world,
@@ -150,6 +150,77 @@ class ChunkCandidate:
             "chosen_for_continuation": self.chosen_for_continuation,
             "action": self.action,
         }
+        validate_candidate_archive_record(record)
+        return record
+
+
+def validate_candidate_archive_record(record: dict[str, Any]) -> None:
+    """Enforce the schema-v5 branch outcome and numeric invariants."""
+    required = {
+        "score",
+        "success",
+        "failure",
+        "safety_violation",
+        "failure_reasons",
+        "terminated",
+        "truncated",
+        "valid_steps",
+        "rewards",
+        "selected_for_training",
+        "chosen_for_continuation",
+    }
+    missing = sorted(required.difference(record))
+    if missing:
+        raise ValueError(
+            "Candidate archive record is missing schema-v5 fields: "
+            + ", ".join(missing)
+        )
+    boolean_fields = (
+        "success",
+        "failure",
+        "safety_violation",
+        "terminated",
+        "truncated",
+        "selected_for_training",
+        "chosen_for_continuation",
+    )
+    if any(type(record[name]) is not bool for name in boolean_fields):
+        raise ValueError("Candidate archive outcome flags must be booleans")
+    success = bool(record["success"])
+    failure = bool(record["failure"])
+    unsafe = bool(record["safety_violation"])
+    if success and failure:
+        raise ValueError("Candidate cannot be both success and failure")
+    if success and unsafe:
+        raise ValueError("Candidate cannot be both success and unsafe")
+    if unsafe and not failure:
+        raise ValueError("Unsafe candidate must also be marked as failure")
+    raw_reasons = record["failure_reasons"]
+    if not isinstance(raw_reasons, (tuple, list)) or any(
+        not isinstance(reason, str) or not reason
+        for reason in raw_reasons
+    ):
+        raise ValueError("Candidate failure reasons must be non-empty strings")
+    reasons = tuple(raw_reasons)
+    if failure and not reasons:
+        raise ValueError("Failed candidate requires a failure reason")
+    if not failure and reasons:
+        raise ValueError("Safe candidate cannot carry failure reasons")
+    if (failure or unsafe) and (
+        bool(record["selected_for_training"])
+        or bool(record["chosen_for_continuation"])
+    ):
+        raise ValueError("Failed or unsafe candidate cannot be selected")
+    if type(record["valid_steps"]) is not int:
+        raise ValueError("Candidate valid_steps must be an integer")
+    valid_steps = record["valid_steps"]
+    rewards = tuple(float(reward) for reward in record["rewards"])
+    if valid_steps < 1 or len(rewards) != valid_steps:
+        raise ValueError("Candidate reward length must equal positive valid_steps")
+    if not math.isfinite(float(record["score"])) or not all(
+        math.isfinite(reward) for reward in rewards
+    ):
+        raise ValueError("Candidate archive contains non-finite scores")
 
 
 @dataclass(frozen=True)
@@ -214,6 +285,10 @@ class EpisodeExperience:
     def archive_record(self) -> dict[str, Any]:
         """Return replay metadata without images or frozen VLM features."""
 
+        for decision in self.decisions:
+            for candidate in decision.get("candidates", ()):
+                validate_candidate_archive_record(candidate)
+
         def serializable(value: Any) -> Any:
             if hasattr(value, "tolist"):
                 return value.tolist()
@@ -224,7 +299,7 @@ class EpisodeExperience:
             return value
 
         return {
-            "schema_version": 4,
+            "schema_version": 5,
             "generation": self.generation,
             "data_generation": self.generation,
             "sampling_policy_generation": self.sampling_policy_generation,

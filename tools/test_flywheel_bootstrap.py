@@ -136,7 +136,7 @@ class TestFlywheelExperience(unittest.TestCase):
     def test_archive_omits_transient_features(self) -> None:
         episode = _episode()
         record = episode.archive_record()
-        self.assertEqual(record["schema_version"], 4)
+        self.assertEqual(record["schema_version"], 5)
         self.assertEqual(record["data_generation"], 1)
         self.assertEqual(record["sampling_policy_generation"], 0)
         self.assertEqual(record["policy_version"], "generation-000000")

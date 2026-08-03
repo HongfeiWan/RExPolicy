@@ -7,6 +7,7 @@ import unittest
 from rexpolicy.flywheel.experience import (
     BranchOutcomeAccumulator,
     ChunkCandidate,
+    EpisodeExperience,
     TrainingSample,
     select_advantage_chunks,
 )
@@ -136,6 +137,41 @@ class TestFailureAwareChunkSelection(unittest.TestCase):
         self.assertTrue(record["failure"])
         self.assertTrue(record["safety_violation"])
         self.assertEqual(record["failure_reasons"], ["test_failure"])
+
+    def test_archive_rejects_unsafe_without_failure(self) -> None:
+        candidate = _candidate(0, 0.0, safety_violation=True)
+        with self.assertRaisesRegex(ValueError, "also be marked as failure"):
+            candidate.archive_record()
+
+    def test_archive_rejects_failed_candidate_selected_for_training(self) -> None:
+        candidate = _candidate(0, 0.0, failure=True)
+        candidate.selected_for_training = True
+        with self.assertRaisesRegex(ValueError, "cannot be selected"):
+            candidate.archive_record()
+
+    def test_episode_schema_v5_revalidates_embedded_candidates(self) -> None:
+        candidate = _candidate(0, 0.0).archive_record()
+        episode = EpisodeExperience(
+            generation=1,
+            sampling_policy_generation=0,
+            rank=0,
+            episode=0,
+            reset_seed=7,
+            instruction="reach",
+            task_id="reach_green_cap/v1",
+            reward_profile_id="reach_progress/v1",
+            score=0.0,
+            success=False,
+            initial_state={},
+            decisions=[{"candidates": [candidate]}],
+        )
+        self.assertEqual(episode.archive_record()["schema_version"], 5)
+
+        candidate["success"] = True
+        candidate["failure"] = True
+        candidate["failure_reasons"] = ["environment_failure"]
+        with self.assertRaisesRegex(ValueError, "both success and failure"):
+            episode.archive_record()
 
 
 if __name__ == "__main__":
