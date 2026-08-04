@@ -14,6 +14,13 @@ from .contract import (
     compile_task_contract,
 )
 from .model import TaskSpecV2
+from .process import ProcessSpecV1
+from .process_contract import (
+    DEFAULT_PROCESS_COMPILER_POLICY,
+    CompiledProcessContract,
+    ProcessCompilerPolicy,
+    compile_process_contract,
+)
 from .property_validation import (
     DEFAULT_PROPERTY_VALIDATION_POLICY,
     PropertyValidationPolicy,
@@ -28,6 +35,12 @@ PRODUCTION_CAPABILITIES_PATH = (
 PRODUCTION_REACH_TASK_PATH = (
     REPOSITORY_ROOT / "configs" / "tasks" / "reach_green_cap.v2.json"
 )
+PRODUCTION_REACH_PROCESS_PATH = (
+    REPOSITORY_ROOT
+    / "configs"
+    / "process_specs"
+    / "reach_pregrasp.v1.json"
+)
 
 
 @dataclass(frozen=True)
@@ -36,6 +49,13 @@ class TaskArtifacts:
     task: TaskSpecV2
     contract: CompiledTaskContract
     property_report: TaskPropertyReport
+
+
+@dataclass(frozen=True)
+class ProcessArtifacts:
+    task_artifacts: TaskArtifacts
+    process_spec: ProcessSpecV1
+    contract: CompiledProcessContract
 
 
 def _read_json(path: Path) -> object:
@@ -61,6 +81,11 @@ def load_capability_catalog(path: Path) -> CapabilityCatalog:
 def load_task_spec(path: Path) -> TaskSpecV2:
     """Load one strict untrusted TaskSpec proposal/artifact."""
     return TaskSpecV2.from_record(_read_json(path))
+
+
+def load_process_spec(path: Path) -> ProcessSpecV1:
+    """Load one strict untrusted ProcessSpec proposal/artifact."""
+    return ProcessSpecV1.from_record(_read_json(path))
 
 
 def load_task_artifacts(
@@ -103,4 +128,38 @@ def load_production_reach_artifacts() -> TaskArtifacts:
     return load_task_artifacts(
         capabilities_path=PRODUCTION_CAPABILITIES_PATH,
         task_path=PRODUCTION_REACH_TASK_PATH,
+    )
+
+
+def load_process_artifacts(
+    *,
+    process_path: Path,
+    task_artifacts: TaskArtifacts,
+    process_policy: ProcessCompilerPolicy = DEFAULT_PROCESS_COMPILER_POLICY,
+    task_policy: TaskCompilerPolicy = DEFAULT_TASK_COMPILER_POLICY,
+) -> ProcessArtifacts:
+    """Load and compile one process contract against exact task artifacts."""
+    process_spec = load_process_spec(process_path)
+    contract = compile_process_contract(
+        process_spec,
+        task=task_artifacts.task,
+        task_contract=task_artifacts.contract,
+        catalog=task_artifacts.capabilities,
+        process_policy=process_policy,
+        task_policy=task_policy,
+    )
+    return ProcessArtifacts(
+        task_artifacts=task_artifacts,
+        process_spec=process_spec,
+        contract=contract,
+    )
+
+
+def load_production_reach_process_artifacts(
+    task_artifacts: TaskArtifacts | None = None,
+) -> ProcessArtifacts:
+    """Return the production Reach process contract from its trusted path."""
+    return load_process_artifacts(
+        process_path=PRODUCTION_REACH_PROCESS_PATH,
+        task_artifacts=task_artifacts or load_production_reach_artifacts(),
     )
