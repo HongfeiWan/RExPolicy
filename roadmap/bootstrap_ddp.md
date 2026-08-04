@@ -4,6 +4,10 @@ This is the execution contract for the minimum `reach_green_cap/v1` flywheel.
 It covers local validation, safe deployment to node3, a disposable two-
 generation engineering run, and a staged 10→20 generation soak.
 
+Passing authoring, lifecycle, ledger, QD, or single-GPU unit suites does not
+satisfy this runtime acceptance. The node3 two-GPU smoke, fresh-process resume,
+and staged soak remain independent hardware gates.
+
 ## Runtime data flow
 
 ```text
@@ -134,9 +138,9 @@ it never kills or preempts another user's job.
 
 ## Git and node3 deployment
 
-Development is committed on `whf/flywheel-readiness` and pushed through the SSH
-remote. Deployment uses the resulting immutable commit SHA; do not copy a dirty
-working tree.
+Development must be committed and pushed to the authorized remote. Deployment
+uses an immutable reviewed commit SHA; never copy or execute a dirty working
+tree.
 
 On node3:
 

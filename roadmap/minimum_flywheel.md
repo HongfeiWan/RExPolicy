@@ -184,6 +184,11 @@ generation by default. There is no hard top-k deletion, so every retained
 success remains reachable over time. Duplicate IDs, missing source records,
 fingerprint mismatch, or early replay termination are hard errors.
 
+The repository contains a separate immutable QD index and explicit
+quality-balanced Success Archive planner. The minimum flywheel intentionally
+does not consume or checkpoint that external state; its production replay
+behavior remains deterministic historical round-robin.
+
 ## Checkpoint and evaluation gate
 
 At a generation boundary, an atomic checkpoint captures FP32 DiT, CPU AdamW
@@ -210,11 +215,17 @@ state is not used to continue training.
 
 ## Deliberate non-goals
 
+These are non-goals of the active Phase 1 execution path, not claims that no
+supporting control-plane or offline artifact exists elsewhere in the
+repository.
+
 The minimum loop does not add:
 
 - PPO, DPPO, GAE, residual RL, a critic, or a state-policy teacher;
-- GPT-generated runtime tasks, instructions, or reward populations;
-- MAP-Elites/Pareto search or learned behavior embeddings;
+- activated provider-generated runtime tasks, instruction batches, or reward
+  populations;
+- live MAP-Elites/Pareto/QD sampling in the trainer or learned behavior
+  embeddings;
 - a persistent multi-root beam;
 - VLM fine-tuning, tactile memory, or recurrent policy state;
 - a compact diffusion head replacing GR00T's existing Flow-DiT.

@@ -1,7 +1,9 @@
 # Final Data-Flywheel Design
 
-This document preserves the intended end state. It is a roadmap, not the current
-implementation scope.
+This document preserves the intended end state. Several control-plane and
+derived-view components now exist, but the architecture below remains
+aspirational: active training is still the single-task Reach flywheel with
+historical round-robin replay.
 
 ## Stable architectural decisions
 
@@ -120,10 +122,16 @@ task completion.
 Advantages are normalized within the same task, initial-state group, and reward
 profile. Reward magnitudes from different profiles are never compared directly.
 
-Newton records raw physical metrics so old trajectories can be rescored under
-new profiles. A later quality-diversity index may organize and prioritize
-successful trajectories by behavior cell without deleting the underlying
-Success Archive entries or reducing their replay eligibility to zero.
+Newton now records reward-free Event Ledgers that can be deterministically
+rescored, compiled into exact success behavior descriptors, and organized in
+immutable quality-diversity indexes. A deterministic Success Archive planning
+path balances behavior, reward, and initial-state strata, but the active Phase
+1 trainer does not yet consume or checkpoint that state and remains
+round-robin.
+
+Process-reward artifacts remain explicitly `shadow_only` with
+`oracle_authority=none`. They cannot alter canonical success or safety,
+lifecycle admission, activation, or model promotion.
 
 The policy may eventually receive a natural-language style request or continuous
 behavior condition. With the condition hidden, Flow-DiT should sample the
@@ -142,6 +150,11 @@ Instructions must not leak simulator coordinates, internal entity names, reward
 thresholds, or state unavailable to the policy. Equivalent instructions should
 produce equivalent behavior, while counterfactual target instructions should
 change the selected object or goal.
+
+TaskSpec v2 now enforces separate train, promotion, and sealed-audit instruction
+commitments. Automatic authoring can produce a provider-attested, statically
+valid quarantined candidate; it does not admit the candidate into a registry or
+make it available to training.
 
 ## Local and global selection
 
@@ -196,19 +209,21 @@ the same-state advantage-weighted regression used here.
 
 ## Relationship to the Phase 1 bootstrap
 
-The minimum implementation now includes same-state chunk comparison,
-`all_success` selection, success-first single-root continuation, successful-path
+The minimum implementation includes same-state chunk comparison, `all_success`
+selection, success-first single-root continuation, successful-path
 back-indexing, a metadata-only cross-generation Success Archive, globally
 weighted FP32/DDP Flow-Matching, atomic resume, and a sealed K=1 non-regression
 gate. Every current-generation selected sample is scheduled at least once, and
 historical successes return through a deterministic round-robin cursor. Phase 1
 uses the single versioned `reach_green_cap/v1` reward profile.
 
-Behavior/reward-profile/initial-state balancing beyond round-robin, GPT task and
-instruction authoring, reward-profile populations, automated task validation,
-and quality-diversity indexing remain later stages. Those additions extend the
-same archive and evaluation contracts rather than replacing the minimum
-flywheel.
+The repository also provides reward-free ledgers, immutable reward/process/QD
+views, provider-attested sandboxed authoring to `quarantined_static`, audited
+lifecycle transitions, and an explicit quality-balanced Success Archive plan.
+These extend the Phase 1 contracts without changing its active learner. The
+only runtime bridge remains Reach, activation has not been operationally
+exercised for an authored task, and QD state is not part of trainer checkpoints
+or online sampling.
 
 ## Evaluation and promotion
 
