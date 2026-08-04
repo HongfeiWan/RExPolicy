@@ -13,7 +13,20 @@ import numpy as np
 import warp as wp
 
 from rexpolicy.envs import groot_newton_env as env_module
-from rexpolicy.flywheel.replay import validate_replay_fingerprint
+from rexpolicy.flywheel.replay import (
+    build_physical_replay_gate_record,
+    validate_historical_physical_replay_gate,
+    validate_physical_replay_gate,
+)
+
+
+def _flatten_tensor_tree(tree, prefix=""):
+    for name, value in tree.items():
+        path = f"{prefix}.{name}" if prefix else name
+        if isinstance(value, dict):
+            yield from _flatten_tensor_tree(value, path)
+        else:
+            yield path, value
 
 
 class TestGrootNewtonReach(unittest.TestCase):
@@ -235,13 +248,14 @@ class TestGrootNewtonReach(unittest.TestCase):
             terminate_on_fail=True,
         )
 
-        def rollout(seed=None):
+        def rollout(seed=None, archived_gates=None):
             _, info = env.reset(seed=seed)
             env.canonicalize_branch_state_torch()
             reset_fingerprint = {
-                f"{group_name}.{field_name}": value.clone()
-                for group_name, group in env.replay_fingerprint_torch().items()
-                for field_name, value in group.items()
+                name: value.clone()
+                for name, value in _flatten_tensor_tree(
+                    env.physical_replay_gate_torch()
+                )
             }
             for name, value in reset_fingerprint.items():
                 if value.is_floating_point():
@@ -251,41 +265,60 @@ class TestGrootNewtonReach(unittest.TestCase):
             goal = info["reach_goal_pos_base"].clone()
             rows = []
             branch_states = []
-            branch_digests = []
+            branch_gates = []
             success_step = None
             previous_distance = float(env.evaluate()["reach_distance"][0])
             for step in range(1, 9):
-                branch_fingerprint = env.replay_fingerprint_torch()
-                branch_digests.append(
-                    validate_replay_fingerprint(
-                        branch_fingerprint,
-                        world_count=env.num_envs,
-                        float_tolerance=1.0e-5,
-                    ).digest
+                branch_fingerprint = env.physical_replay_gate_torch()
+                gate_fingerprint = validate_physical_replay_gate(
+                    branch_fingerprint,
+                    world_count=env.num_envs,
+                    float_tolerance=1.0e-5,
+                )
+                render_contract = env.observation_render_contract()
+                if archived_gates is not None:
+                    self.assertLess(step - 1, len(archived_gates))
+                    validate_historical_physical_replay_gate(
+                        archived_gates[step - 1],
+                        current_fingerprint=gate_fingerprint,
+                        same_state_tolerance=1.0e-5,
+                        historical_replay_state_tolerance=1.0e-4,
+                        simulator_fingerprint_sha256="b" * 64,
+                        observation_contract_sha256="a" * 64,
+                        render_contract=render_contract,
+                    )
+                branch_gates.append(
+                    build_physical_replay_gate_record(
+                        gate_fingerprint,
+                        same_state_tolerance=1.0e-5,
+                        historical_replay_state_tolerance=1.0e-4,
+                        simulator_fingerprint_sha256="b" * 64,
+                        observation_contract_sha256="a" * 64,
+                        render_contract=render_contract,
+                    )
                 )
                 branch_states.append(
                     {
-                        f"{group_name}.{field_name}": value[0].detach().cpu().clone()
-                        for group_name, group in branch_fingerprint.items()
-                        for field_name, value in group.items()
+                        name: value[0].detach().cpu().clone()
+                        for name, value in _flatten_tensor_tree(
+                            branch_fingerprint
+                        )
                     }
                 )
-                for name, group in branch_fingerprint.items():
-                    for field_name, value in group.items():
-                        label = f"{name}.{field_name}"
-                        if value.is_floating_point():
-                            torch.testing.assert_close(
-                                value,
-                                value[:1].expand_as(value),
-                                atol=1.0e-5,
-                                rtol=0.0,
-                                msg=label,
-                            )
-                        else:
-                            self.assertTrue(
-                                torch.equal(value, value[:1].expand_as(value)),
-                                label,
-                            )
+                for label, value in _flatten_tensor_tree(branch_fingerprint):
+                    if value.is_floating_point():
+                        torch.testing.assert_close(
+                            value,
+                            value[:1].expand_as(value),
+                            atol=1.0e-5,
+                            rtol=0.0,
+                            msg=label,
+                        )
+                    else:
+                        self.assertTrue(
+                            torch.equal(value, value[:1].expand_as(value)),
+                            label,
+                        )
                 action = env.hold_action_torch().clone()
                 action[:, :3].copy_(goal)
                 _, reward, terminated, truncated, info = env.step(action)
@@ -329,7 +362,7 @@ class TestGrootNewtonReach(unittest.TestCase):
                 np.asarray(rows, dtype=np.float32),
                 reset_fingerprint,
                 branch_states,
-                branch_digests,
+                branch_gates,
             )
 
         try:
@@ -367,21 +400,22 @@ class TestGrootNewtonReach(unittest.TestCase):
                     first_seeded_offset,
                 )
             )
+            replay_seed = 41
             (
                 first_step,
                 first_rows,
                 first_reset,
                 first_branches,
-                first_digests,
-            ) = rollout()
+                first_gates,
+            ) = rollout(seed=replay_seed)
             (
                 second_step,
                 second_rows,
                 second_reset,
                 second_branches,
-                second_digests,
-            ) = rollout()
-            seeded_step, seeded_rows, _, _, _ = rollout(seed=41)
+                second_gates,
+            ) = rollout(seed=replay_seed, archived_gates=first_gates)
+            seeded_step, seeded_rows, _, _, _ = rollout(seed=42)
             self.assertIsNotNone(first_step)
             self.assertLessEqual(first_step, 8)
             self.assertEqual(first_step, 6)
@@ -402,11 +436,11 @@ class TestGrootNewtonReach(unittest.TestCase):
             self.assertEqual(second_reset.keys(), first_reset.keys())
             for name in first_reset:
                 if first_reset[name].is_floating_point():
-                    torch.testing.assert_close(second_reset[name], first_reset[name], atol=1.0e-5, rtol=0.0)
+                    torch.testing.assert_close(second_reset[name], first_reset[name], atol=1.0e-4, rtol=0.0)
                 else:
                     self.assertTrue(torch.equal(second_reset[name], first_reset[name]), name)
             self.assertEqual(len(second_branches), len(first_branches))
-            self.assertEqual(second_digests, first_digests)
+            self.assertEqual(len(second_gates), len(first_gates))
             for step, (first_branch, second_branch) in enumerate(
                 zip(first_branches, second_branches, strict=True),
                 start=1,
@@ -417,7 +451,7 @@ class TestGrootNewtonReach(unittest.TestCase):
                         torch.testing.assert_close(
                             second_branch[name],
                             first_branch[name],
-                            atol=1.0e-5,
+                            atol=1.0e-4,
                             rtol=0.0,
                             msg=f"replay step={step} field={name}",
                         )
@@ -434,6 +468,12 @@ class TestGrootNewtonReach(unittest.TestCase):
             for group in fingerprint.values():
                 for value in group.values():
                     self.assertEqual(value.shape[0], env.num_envs)
+            render_contract = env.observation_render_contract()
+            self.assertFalse(render_contract["pixel_content_committed"])
+            self.assertEqual(
+                set(render_contract["outputs"]),
+                {"ego_view", "wrist_view"},
+            )
         finally:
             env.close()
 

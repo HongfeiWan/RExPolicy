@@ -3556,12 +3556,16 @@ class GrootNewtonEnv:
             },
         }
 
-    def replay_fingerprint_torch(self) -> dict[str, Any]:
-        """Return all simulator state needed to verify deterministic replay.
+    def replay_fingerprint_torch(
+        self,
+        *,
+        include_images: bool = True,
+    ) -> dict[str, Any]:
+        """Return complete in-memory state used for branch canonicalization.
 
-        Callers should compare this tree in memory and persist only a
-        quantized digest. The returned object and bottle tensors are not an
-        archive format.
+        This tree includes reward-derived values and rendered pixels.  It is
+        not the historical archive gate; use :meth:`physical_replay_gate_torch`
+        for that versioned, reward-free boundary.
         """
         def env_major(value: wp.array, values_per_world: int) -> Any:
             tensor = wp.to_torch(value)
@@ -3644,13 +3648,14 @@ class GrootNewtonEnv:
                 "reach_displacement_violation": self._reach_displacement_violation,
             },
         }
-        images = {}
-        if self._ego_rgb is not None:
-            images["ego_view"] = self._ego_rgb
-        if self._wrist_rgb is not None:
-            images["wrist_view"] = self._wrist_rgb
-        if images:
-            fingerprint["images"] = images
+        if include_images:
+            images = {}
+            if self._ego_rgb is not None:
+                images["ego_view"] = self._ego_rgb
+            if self._wrist_rgb is not None:
+                images["wrist_view"] = self._wrist_rgb
+            if images:
+                fingerprint["images"] = images
         return self._to_torch_tree(fingerprint)
 
     def dynamics_fingerprint_torch(self) -> dict[str, Any]:
@@ -3659,7 +3664,7 @@ class GrootNewtonEnv:
             DYNAMICS_CONTRACT_V1_TASK_FIELDS,
         )
 
-        replay = self.replay_fingerprint_torch()
+        replay = self.replay_fingerprint_torch(include_images=False)
         return {
             "joint": replay["joint"],
             "body": replay["body"],
@@ -3668,6 +3673,58 @@ class GrootNewtonEnv:
                 name: replay["task"][name]
                 for name in DYNAMICS_CONTRACT_V1_TASK_FIELDS
             },
+        }
+
+    def physical_replay_gate_torch(self) -> dict[str, Any]:
+        """Return physical state plus discrete task/contact safety state.
+
+        Rendered pixels and reward-derived values are deliberately excluded;
+        camera/observation configuration is archived separately as provenance.
+        """
+        from rexpolicy.flywheel.replay import physical_replay_gate_tree
+
+        return physical_replay_gate_tree(
+            dynamics=self.dynamics_fingerprint_torch(),
+            replay=self.replay_fingerprint_torch(include_images=False),
+        )
+
+    def observation_render_contract(self) -> dict[str, Any]:
+        """Describe render outputs without hashing or asserting RGB equality."""
+        outputs: dict[str, Any] = {}
+        for name, value in (
+            ("ego_view", self._ego_rgb),
+            ("wrist_view", self._wrist_rgb),
+        ):
+            if value is None:
+                continue
+            tensor = wp.to_torch(value)
+            if tensor.ndim < 1 or int(tensor.shape[0]) != self.num_envs:
+                raise RuntimeError(
+                    f"Render output {name!r} is not environment-major: "
+                    f"{tuple(tensor.shape)}"
+                )
+            outputs[name] = {
+                "shape_per_world": [int(size) for size in tensor.shape[1:]],
+                "dtype": str(tensor.dtype),
+            }
+        return {
+            "render_contract_id": "groot_newton/camera-render/v1",
+            "obs_mode": self.obs_mode,
+            "render_images_enabled": bool(self._render_images),
+            "camera_textures_enabled": bool(self.config.camera_textures),
+            "scene_visuals_enabled": bool(self.config.load_scene_visuals),
+            "camera_dimensions": {
+                "ego_view": {
+                    "width": self.config.ego_width,
+                    "height": self.config.ego_height,
+                },
+                "wrist_view": {
+                    "width": self.config.wrist_width,
+                    "height": self.config.wrist_height,
+                },
+            },
+            "outputs": outputs,
+            "pixel_content_committed": False,
         }
 
     def canonicalize_branch_state_torch(self, source_world: int = 0) -> None:
