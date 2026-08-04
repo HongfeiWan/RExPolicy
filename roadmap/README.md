@@ -54,7 +54,9 @@ The implementation provides:
 No PPO, GAE, critic, full-action teacher, compact replacement policy, or human
 pretraining dataset is required. See [minimum_flywheel.md](minimum_flywheel.md)
 for the learning contract and [bootstrap_ddp.md](bootstrap_ddp.md) for the
-node3 validation protocol.
+node3 validation protocol. Deterministic base-versus-generation MP4 evidence
+can be produced without touching the training archive by following
+[rollout_recorder.md](rollout_recorder.md).
 
 ## Phase 2 — visual-language grounding
 

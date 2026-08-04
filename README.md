@@ -110,7 +110,8 @@ python -m unittest \
   tools.test_flywheel_trainer \
   tools.test_flywheel_archive_evaluation \
   tools.test_flywheel_checkpoint_operations \
-  tools.test_groot_newton_reach
+  tools.test_groot_newton_reach \
+  tools.test_rollout_recorder
 ```
 
 The production-physics Reach oracle is opt-in because it needs a CUDA Newton
@@ -133,6 +134,22 @@ generation soak are specified in
 [roadmap/bootstrap_ddp.md](roadmap/bootstrap_ddp.md). A smoke run proves
 engineering closure, not policy improvement; K=1 held-out metrics determine
 whether a candidate is retained as `last-good`.
+
+Record a deterministic, inference-only base or DiT-generation rollout without
+creating an optimizer or writing the training archive:
+
+```bash
+CUDA_VISIBLE_DEVICES=1 python -m tools.run_rollout_recorder \
+  --device cuda:0 \
+  --output-dir /path/to/new-rollout-directory \
+  --reset-seed 20260722 \
+  --diffusion-seed 20260723 \
+  --execution-horizon 2
+```
+
+The recorder writes annotated ego, wrist, and side-by-side MP4 files. See the
+[rollout recorder protocol](roadmap/rollout_recorder.md) for node3 paths,
+generation overlays, fixed-seed comparisons, and the output contract.
 
 ## Repository layout
 
