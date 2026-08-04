@@ -636,6 +636,70 @@ class BalancedReplayPlan:
     next_state: BalancedReplayState
 
 
+def _balanced_replay_strata(
+    index: QualityDiversityIndex,
+) -> dict[str, list[SuccessBehaviorDescriptor]]:
+    """Return the exact deterministic strata addressed by replay cursors."""
+    cell_by_descriptor = {
+        descriptor_sha256: cell.cell_id
+        for cell in index.cells
+        for descriptor_sha256 in cell.member_descriptor_sha256s
+    }
+    strata: dict[str, list[SuccessBehaviorDescriptor]] = {}
+    for descriptor in index.descriptors:
+        key = "|".join(
+            (
+                cell_by_descriptor[descriptor.fingerprint],
+                descriptor.initial_state_group_id,
+                descriptor.initial_state_group_sha256,
+                descriptor.reward_profile_id,
+                descriptor.reward_profile_sha256,
+            )
+        )
+        strata.setdefault(key, []).append(descriptor)
+    for key in strata:
+        strata[key].sort(key=lambda item: item.fingerprint)
+    return strata
+
+
+def rebase_balanced_replay_state(
+    *,
+    previous_index: QualityDiversityIndex,
+    replacement_index: QualityDiversityIndex,
+    state: BalancedReplayState,
+) -> BalancedReplayState:
+    """Carry compatible cursors when an append-only archive rebuilds its QD view.
+
+    Index fingerprints necessarily change when successes are added or
+    quarantined.  Reusing a state without an explicit rebase fails closed;
+    this operation validates both indexes, drops cursors for strata that no
+    longer exist, and preserves progress only for exact stratum identities.
+    """
+    previous = QualityDiversityIndex.from_record(previous_index.to_record())
+    replacement = QualityDiversityIndex.from_record(
+        replacement_index.to_record()
+    )
+    state.validate(previous)
+    previous_strata = _balanced_replay_strata(previous)
+    replacement_strata = _balanced_replay_strata(replacement)
+    unknown = sorted(set(dict(state.member_cursors)).difference(previous_strata))
+    if unknown:
+        raise ValueError("Balanced replay state contains unknown previous strata")
+    carried = tuple(
+        (key, cursor)
+        for key, cursor in state.member_cursors
+        if key in replacement_strata
+    )
+    rebased = BalancedReplayState(
+        schema_version=1,
+        quality_diversity_index_sha256=replacement.fingerprint,
+        stratum_cursor=state.stratum_cursor,
+        member_cursors=carried,
+    )
+    rebased.validate(replacement)
+    return rebased
+
+
 def plan_balanced_replay(
     *,
     index: QualityDiversityIndex,
@@ -650,26 +714,8 @@ def plan_balanced_replay(
     descriptor_by_sha = {
         item.fingerprint: item for item in canonical_index.descriptors
     }
-    cell_by_descriptor = {
-        descriptor_sha256: cell.cell_id
-        for cell in canonical_index.cells
-        for descriptor_sha256 in cell.member_descriptor_sha256s
-    }
-    strata: dict[str, list[SuccessBehaviorDescriptor]] = {}
-    for descriptor in canonical_index.descriptors:
-        key = "|".join(
-            (
-                cell_by_descriptor[descriptor.fingerprint],
-                descriptor.initial_state_group_id,
-                descriptor.initial_state_group_sha256,
-                descriptor.reward_profile_id,
-                descriptor.reward_profile_sha256,
-            )
-        )
-        strata.setdefault(key, []).append(descriptor)
+    strata = _balanced_replay_strata(canonical_index)
     ordered_strata = tuple(sorted(strata))
-    for key in ordered_strata:
-        strata[key].sort(key=lambda item: item.fingerprint)
     cursors = dict(state.member_cursors)
     unknown = sorted(set(cursors).difference(ordered_strata))
     if unknown:

@@ -18,6 +18,7 @@ from rexpolicy.flywheel.quality_diversity import (
     SuccessBehaviorDescriptor,
     build_quality_diversity_index,
     plan_balanced_replay,
+    rebase_balanced_replay_state,
 )
 
 
@@ -267,6 +268,57 @@ class TestBalancedReplay(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "unknown strata"):
             plan_balanced_replay(index=index, count=1, state=forged)
+
+    def test_state_rebase_preserves_only_exact_surviving_strata(self) -> None:
+        first = _descriptor(
+            "first", angle=-2.0, path_length=0.2, clearance=0.02
+        )
+        removed = _descriptor(
+            "removed",
+            angle=2.0,
+            path_length=0.8,
+            clearance=0.03,
+            reward="reach_smooth/v1",
+        )
+        previous = build_quality_diversity_index(
+            policy=_policy(), descriptors=(first, removed)
+        )
+        advanced = plan_balanced_replay(
+            index=previous,
+            count=2,
+            state=BalancedReplayState.initial(previous),
+        ).next_state
+        added = _descriptor(
+            "added",
+            angle=2.1,
+            path_length=0.75,
+            clearance=0.04,
+            state="reach_reset/right/v1",
+        )
+        replacement = build_quality_diversity_index(
+            policy=_policy(), descriptors=(first, added)
+        )
+
+        rebased = rebase_balanced_replay_state(
+            previous_index=previous,
+            replacement_index=replacement,
+            state=advanced,
+        )
+
+        self.assertEqual(
+            rebased.quality_diversity_index_sha256,
+            replacement.fingerprint,
+        )
+        self.assertEqual(rebased.stratum_cursor, advanced.stratum_cursor)
+        self.assertEqual(len(rebased.member_cursors), 1)
+        self.assertEqual(
+            plan_balanced_replay(
+                index=replacement,
+                count=2,
+                state=rebased,
+            ).sample_ids,
+            (first.sample_id, added.sample_id),
+        )
 
 
 if __name__ == "__main__":
