@@ -355,19 +355,27 @@ def validate_compiled_process_contract(
         raise ValueError("Compiled process segment length exceeds trusted bounds")
     if not contract.stages or len(contract.stages) > process_policy.max_stages:
         raise ValueError("Compiled process stage count is outside trusted bounds")
+    if contract.default_stage_ordinal != 0:
+        raise ValueError("Compiled process default ordinal must be zero")
     stage_ids = [contract.default_stage_id]
     progress_ordinals = [contract.default_stage_ordinal]
     required_metrics: set[str] = set()
+    progress_seen = False
     for stage in contract.stages:
         _identifier(stage.stage_id, "compiled_process.stage_id")
         if stage.kind not in {"progress", "unsafe"}:
             raise ValueError("Compiled process stage kind is invalid")
         if stage.kind == "progress":
+            progress_seen = True
             if type(stage.ordinal) is not int or stage.ordinal < 0:
                 raise ValueError("Compiled process progress ordinal is invalid")
             progress_ordinals.append(stage.ordinal)
         elif stage.ordinal is not None:
             raise ValueError("Compiled unsafe process stage has an ordinal")
+        elif progress_seen:
+            raise ValueError(
+                "Compiled unsafe process stages must precede progress stages"
+            )
         if not isinstance(stage.description, str) or not stage.description:
             raise ValueError("Compiled process stage description is invalid")
         if stage.program_fingerprint != stage.program.fingerprint:
