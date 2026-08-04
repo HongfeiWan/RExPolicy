@@ -89,6 +89,7 @@ class TrainingSample:
     reward_profile_id: str = "unknown"
     source: str = "current"
     success_roles: tuple[str, ...] = ()
+    success_latent_token: Any | None = None
 
     @property
     def is_success(self) -> bool:
@@ -471,7 +472,13 @@ def collate_training_samples(
     from transformers.feature_extraction_utils import BatchFeature
 
     batch_size = len(samples)
-    sequence_length = max(int(sample.backbone_features.shape[0]) for sample in samples)
+    has_success_token = any(
+        sample.success_latent_token is not None for sample in samples
+    )
+    sequence_length = max(
+        int(sample.backbone_features.shape[0]) + int(has_success_token)
+        for sample in samples
+    )
     feature_dim = int(samples[0].backbone_features.shape[1])
     backbone_features = torch.zeros(
         (batch_size, sequence_length, feature_dim),
@@ -502,6 +509,20 @@ def collate_training_samples(
             image_mask[index, :length].copy_(
                 sample.image_mask.to(device=device, dtype=torch.bool)
             )
+        token = sample.success_latent_token
+        if token is not None:
+            token = torch.as_tensor(token).reshape(-1)
+            if int(token.numel()) != feature_dim:
+                raise ValueError(
+                    "Success latent token dimension does not match frozen "
+                    f"backbone features: {int(token.numel())} != {feature_dim}"
+                )
+            if not bool(torch.isfinite(token).all()):
+                raise ValueError("Success latent token must be finite")
+            backbone_features[index, length].copy_(
+                token.to(device=device, dtype=dtype)
+            )
+            backbone_attention_mask[index, length] = True
 
     backbone_data = {
         "backbone_features": backbone_features,

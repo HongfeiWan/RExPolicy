@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +34,7 @@ class CachedCondition:
     image_mask: Any | None
     state: Any
     embodiment_id: int
+    success_latent_token: Any | None = None
 
 
 @dataclass(frozen=True)
@@ -67,6 +68,7 @@ class GrootFlowDitPolicy:
         vlm_model: Path,
         device: Any,
         dit_overlay: Path | None = None,
+        enable_success_conditioning: bool = False,
     ) -> None:
         root = isaac_groot_root.expanduser().resolve()
         checkpoint = checkpoint.expanduser().resolve()
@@ -87,6 +89,7 @@ class GrootFlowDitPolicy:
         # Retain the old attribute for callers while making its meaning explicit:
         # model compute remains BF16 even though DiT master parameters are FP32.
         self.dtype = self.compute_dtype
+        self.success_conditioning_enabled = bool(enable_success_conditioning)
         self.embodiment_tag = EmbodimentTag.NEW_EMBODIMENT
         self.message_type = MessageType
         self.vla_step_data = VLAStepData
@@ -130,6 +133,11 @@ class GrootFlowDitPolicy:
 
         if dit_overlay is not None:
             self.load_dit_overlay(dit_overlay)
+
+    @property
+    def success_token_dimension(self) -> int:
+        """Return the frozen-backbone width required by a success token."""
+        return int(self.model.config.backbone_embedding_dim)
 
     @staticmethod
     def _validate_layout(root: Path, checkpoint: Path, vlm_model: Path) -> None:
@@ -280,8 +288,24 @@ class GrootFlowDitPolicy:
         if not conditions:
             raise ValueError("At least one cached condition is required")
         batch_size = len(conditions)
+        provided_tokens = [
+            condition.success_latent_token is not None
+            for condition in conditions
+        ]
+        if self.success_conditioning_enabled:
+            if not all(provided_tokens):
+                raise RuntimeError(
+                    "Success-conditioned sampling requires one latent token "
+                    "for every cached condition"
+                )
+        elif any(provided_tokens):
+            raise RuntimeError(
+                "Success latent tokens require enable_success_conditioning=True"
+            )
         sequence_length = max(
-            int(condition.backbone_features.shape[0]) for condition in conditions
+            int(condition.backbone_features.shape[0])
+            + int(condition.success_latent_token is not None)
+            for condition in conditions
         )
         feature_dim = int(conditions[0].backbone_features.shape[1])
         features = self.torch.zeros(
@@ -316,6 +340,20 @@ class GrootFlowDitPolicy:
                         device=self.device, dtype=self.torch.bool
                     )
                 )
+            token = condition.success_latent_token
+            if token is not None:
+                token = self.torch.as_tensor(token).reshape(-1)
+                if int(token.numel()) != feature_dim:
+                    raise ValueError(
+                        "Success latent token dimension does not match frozen "
+                        f"backbone features: {int(token.numel())} != {feature_dim}"
+                    )
+                if not bool(self.torch.isfinite(token).all()):
+                    raise ValueError("Success latent token must be finite")
+                features[index, length].copy_(
+                    token.to(device=self.device, dtype=self.compute_dtype)
+                )
+                attention[index, length] = True
         backbone_data = {
             "backbone_features": features,
             "backbone_attention_mask": attention,
@@ -335,6 +373,31 @@ class GrootFlowDitPolicy:
             }
         )
         return BatchFeature(data=backbone_data), action_input
+
+    def attach_success_latent_tokens(
+        self,
+        conditions: list[CachedCondition],
+        tokens: Any,
+    ) -> list[CachedCondition]:
+        """Attach pre-projected manifold tokens without changing VLM output."""
+        if not self.success_conditioning_enabled:
+            raise RuntimeError("Success conditioning is disabled")
+        tensor = self.torch.as_tensor(tokens).detach().to("cpu", self.torch.float32)
+        if tensor.ndim != 2 or int(tensor.shape[0]) != len(conditions):
+            raise ValueError(
+                "Success tokens must have shape [number_of_conditions, feature_dim]"
+            )
+        if int(tensor.shape[1]) != self.success_token_dimension:
+            raise ValueError(
+                "Success token dimension does not match frozen backbone: "
+                f"{int(tensor.shape[1])} != {self.success_token_dimension}"
+            )
+        if not bool(self.torch.isfinite(tensor).all()):
+            raise ValueError("Success latent tokens must be finite")
+        return [
+            replace(condition, success_latent_token=tensor[index].clone())
+            for index, condition in enumerate(conditions)
+        ]
 
     def sample_from_conditions(
         self,
@@ -462,6 +525,7 @@ class GrootFlowDitPolicy:
             action=action,
             action_mask=action_mask,
             valid_steps=valid_steps,
+            success_latent_token=condition.success_latent_token,
         )
         if sample_metadata:
             sample.set_provenance(**sample_metadata)
