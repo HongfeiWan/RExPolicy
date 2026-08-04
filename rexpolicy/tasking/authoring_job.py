@@ -528,7 +528,7 @@ def _load_completed_attempt(
     if provider_attestation_policy is None:
         if completion["provider_receipt_fingerprint"] is not None:
             raise AuthoringJobDriftError("Unexpected provider receipt binding")
-    else:
+    elif entry.invocation.status == "completed":
         verified = verify_provider_envelope(
             entry.raw_response,
             policy=provider_attestation_policy,
@@ -538,6 +538,10 @@ def _load_completed_attempt(
         )
         if completion["provider_receipt_fingerprint"] != verified.receipt.fingerprint:
             raise AuthoringJobDriftError("Provider receipt completion binding drifted")
+    elif completion["provider_receipt_fingerprint"] is not None:
+        raise AuthoringJobDriftError(
+            "Non-completed provider invocation claims a receipt binding"
+        )
     return request, entry
 
 

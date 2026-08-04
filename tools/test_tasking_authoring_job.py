@@ -112,6 +112,7 @@ class DurableAuthoringFixture(unittest.TestCase):
         first_invalid: bool = False,
         always_invalid: bool = False,
         delay: float = 0.0,
+        exit_code: int = 0,
     ):
         request_log = directory / "requests.jsonl"
         script = directory / "durable_proposer.py"
@@ -122,6 +123,8 @@ class DurableAuthoringFixture(unittest.TestCase):
             "raw = sys.stdin.buffer.read()\n"
             "with open(sys.argv[1], 'ab') as output:\n"
             "    output.write(raw + b'\\n')\n"
+            f"if {exit_code!r}:\n"
+            f"    raise SystemExit({exit_code!r})\n"
             f"time.sleep({delay!r})\n"
             "request = json.loads(raw)\n"
             f"first_invalid = {first_invalid!r}\n"
@@ -293,6 +296,30 @@ class TestDurableAuthoringJob(DurableAuthoringFixture):
                     provider_attestation_policy=self._provider_policy(),
                 )
             self.assertFalse(request_log.exists())
+
+    def test_noncompleted_attested_provider_attempt_resumes_without_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_directory:
+            directory = Path(raw_directory)
+            command, request_log = self._prepare(
+                directory,
+                exit_code=19,
+            )
+            policy = self._provider_policy()
+            first = self._run(
+                directory,
+                command,
+                model_id=policy.model_id,
+                provider_attestation_policy=policy,
+            )
+            self.assertEqual(first.result.final_state, "exhausted")
+            repeated = self._run(
+                directory,
+                command,
+                model_id=policy.model_id,
+                provider_attestation_policy=policy,
+            )
+            self.assertEqual(repeated.result.fingerprint, first.result.fingerprint)
+            self.assertEqual(len(request_log.read_text().splitlines()), 3)
 
     def test_terminal_rerun_is_idempotent_and_does_not_reinvoke(self) -> None:
         with tempfile.TemporaryDirectory() as raw_directory:
