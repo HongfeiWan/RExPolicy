@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import copy
+import tempfile
 import unittest
 from dataclasses import replace
+from pathlib import Path
 
+from rexpolicy.flywheel.derived_views import write_derived_view
 from rexpolicy.flywheel.experience import (
     DIRECT_SUCCESS_ROLE,
     SUCCESS_PATH_ROLE,
@@ -268,6 +271,20 @@ class TestSuccessExperienceGraph(unittest.TestCase):
         changed_id["experiences"][0]["experience_id"] = "f" * 64
         with self.assertRaisesRegex(ValueError, "identity mismatch"):
             SuccessExperienceGraph.from_record(changed_id)
+
+    def test_graph_publishes_as_idempotent_derived_view(self) -> None:
+        graph = _graph()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = write_derived_view(run_dir=root, view=graph)
+            second = write_derived_view(run_dir=root, view=graph)
+            self.assertTrue(first.created)
+            self.assertFalse(second.created)
+            self.assertIn(graph.fingerprint, first.relative_path)
+            restored = SuccessExperienceGraph.from_json(
+                (root / first.relative_path).read_text(encoding="ascii")
+            )
+            self.assertEqual(restored, graph)
 
     def test_materialization_uses_ledger_not_episode_payload(self) -> None:
         graph = _graph()

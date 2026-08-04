@@ -12,6 +12,7 @@ from typing import Union
 from rexpolicy.tasking.process_label_view import ProcessLabelView
 from rexpolicy.tasking.process_reward import ProcessRewardShadowView
 from rexpolicy.tasking.reward_view import RewardView
+from rexpolicy.replay.success_graph import SuccessExperienceGraph
 
 from .quality_diversity import QualityDiversityIndex
 
@@ -21,6 +22,7 @@ _ARTIFACT_DIRECTORIES = {
     "rexpolicy_process_reward_shadow_view": "process-reward-shadow",
     "rexpolicy_reward_view": "rewards",
     "rexpolicy_qd_index": "quality-diversity",
+    "rexpolicy_success_experience_graph": "success-experience-graphs",
 }
 
 DerivedView = Union[
@@ -28,6 +30,7 @@ DerivedView = Union[
     ProcessRewardShadowView,
     QualityDiversityIndex,
     RewardView,
+    SuccessExperienceGraph,
 ]
 
 
