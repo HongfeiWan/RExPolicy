@@ -7,6 +7,14 @@ the same simulator state, and updates Flow-DiT from simulator-selected
 experience. It does not require PPO, GAE, a critic, a state-policy teacher, or
 new human demonstrations.
 
+The repository also contains a fail-closed TaskSpec v2 control plane: sealed
+task and process contracts, reward-free Event Ledgers and rebuildable views,
+sandboxed provider-attested automatic authoring to static quarantine, signed
+lifecycle persistence, and immutable quality-diversity indexes. These
+components do not silently change the active learner. A candidate needs
+independent runtime and sealed-audit evidence plus signed generation-boundary
+activation before training may consume it.
+
 ## Current system
 
 The repository contains:
@@ -24,6 +32,9 @@ The repository contains:
   unequal rank-local sample counts and 100% current-generation sample coverage;
 - an append-only, metadata-only Success Archive with deterministic
   cross-generation round-robin replay;
+- an explicit quality-balanced archive planning path, bound to immutable
+  behavior descriptors and external replay state, which is not yet wired into
+  the Phase 1 trainer checkpoint;
 - atomic full-state checkpoints, strict resume validation, per-rank logs,
   heartbeat/status files, and periodic GPU monitoring;
 - a fixed K=1 held-out non-regression gate that evaluates the raw policy without
@@ -40,7 +51,9 @@ used again.
 See [the roadmap](roadmap/README.md), the [minimum flywheel
 contract](roadmap/minimum_flywheel.md), the [DDP operations
 guide](roadmap/bootstrap_ddp.md), and the preserved [final flywheel
-design](roadmap/final_flywheel.md).
+design](roadmap/final_flywheel.md). The production-safe authoring boundary and
+remaining activation gates are documented in [automatic task
+authoring](roadmap/automatic_task_authoring.md).
 
 ## Environment
 
@@ -117,6 +130,7 @@ rexpolicy/
   ik/                   Host and Newton IK/action helpers
   policies/             GR00T action representation contract
   robots/               Newton robot runtime
+  tasking/              TaskSpec, reward/process views, authoring, lifecycle
   retargeting/          Linker L10 hand configuration
   teleop/               Coordinate-frame helpers used by RTC
 tools/                  Runtime entry points and unittest suites

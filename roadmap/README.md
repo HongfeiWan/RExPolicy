@@ -1,9 +1,14 @@
 # RExPolicy Roadmap
 
 The roadmap separates the runnable minimum flywheel from the intended
-multi-task, multi-reward system. The current implementation deliberately proves
-the smallest useful self-improvement loop before adding automatic task
-authoring.
+multi-task, multi-reward system. The repository now contains the Phase 1 Reach
+flywheel plus fail-closed control and data planes for TaskSpec v2, reward-free
+ledgers and rebuildable views, sandboxed provider-attested automatic authoring,
+signed lifecycle transitions, and offline quality-diversity replay planning.
+The active learner remains the fixed Reach path: authored candidates do not
+enter the registry or training until independent runtime and sealed-audit
+evidence, signed activation at a generation boundary, and runtime integration
+gates pass.
 
 ## Phase 0 — migrated baseline
 
@@ -46,6 +51,9 @@ node3 validation protocol.
 
 ## Phase 2 — visual-language grounding
 
+Status: **not implemented; multi-target frozen-VLM grounding remains a
+prerequisite gate**.
+
 - Add two visually distinguishable targets in the same scene.
 - Make the instruction, not simulator metadata exposed to the policy, select
   the target.
@@ -55,25 +63,58 @@ node3 validation protocol.
 
 ## Phase 3 — task and behavior expansion
 
+Status: **partial; ledger and offline replay-control infrastructure are
+implemented, but active multi-task training remains pending**.
+
 - Extend the curriculum from Reach to pre-grasp, grasp, lift, transport, and
   place.
 - Add a deliberately diverse set of reward profiles for the same canonical
   success predicate.
-- Balance replay by behavior cell, reward profile, and initial-state group
-  while keeping every valid success eligible.
+- Implemented: compile reward-free Event Ledgers into exact success behavior
+  descriptors, persist immutable quality-diversity indexes, explicitly rebase
+  their cursors, and plan deterministic Success Archive replay by behavior
+  cell, reward profile, and initial-state group without making valid successes
+  ineligible.
+- Pending: persist that quality-balanced state in trainer checkpoints and make
+  the online trainer consume it. The active Phase 1 path remains round-robin.
 - Add physics, camera, object, and scene randomization only after fixed-task
   replay remains deterministic.
 
 ## Phase 4 — autonomous task authoring
 
-- Ask GPT to generate versioned task specifications, reward-profile
-  populations, and instruction batches.
-- Compile generated rewards into deterministic simulator metrics and validate
-  reachability, visibility, reward direction, success, and safety.
-- Separate collection/training instructions from held-out promotion and sealed
-  audit instructions.
-- Add quality-diversity indexing and reward-gap discovery without deleting the
-  underlying Success Archive.
+Status: **partial; production-safe authoring to static quarantine and signed
+lifecycle primitives are implemented, but no authored candidate is active or
+consumed by training**.
+
+Implemented:
+
+- bind a public brief, curriculum snapshot, pre-authoring audit plan, allowed
+  capabilities/processes, parent contracts, provider/model policy, and all
+  compiler policies before a proposal is requested;
+- execute a pinned proposer in Bubblewrap, require an Ed25519 provider receipt,
+  persist one resumable job chain, and compile/repair only strict canonical
+  responses into `quarantined_static` candidates;
+- keep collection/training, promotion, and sealed-audit instruction
+  commitments separate;
+- persist signed admission and activation lifecycle events with CAS heads and
+  an independently located monotonic anchor;
+- rebuild reward, process-label, and quality-diversity views from immutable raw
+  ledger facts without deleting the Success Archive.
+
+Pending operational gates:
+
+- run and archive a real approved provider job rather than the local signed
+  integration fixture;
+- generate independent dynamic-runtime, capability-claim, episode-result, and
+  sealed-audit certifications for a candidate;
+- deploy independently administered lifecycle and generation-boundary signing
+  authorities, then exercise a real `ADMITTED_DORMANT` to `ACTIVE` transition;
+- integrate the active registry, authored task runtime, reward populations,
+  quality-balanced checkpoint state, and online reward-gap discovery with the
+  trainer.
+
+See [automatic_task_authoring.md](automatic_task_authoring.md) for the exact
+safety boundary and execution contract.
 
 ## Final system
 
