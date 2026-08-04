@@ -272,6 +272,16 @@ _DEFAULT_POLICY_RECORD = {
             "message": "Revise the public examples to satisfy the property policy.",
         },
         {
+            "code": "proposer_failed",
+            "allowed_paths": ["$"],
+            "message": "The configured proposer did not return a usable response.",
+        },
+        {
+            "code": "proposer_timeout",
+            "allowed_paths": ["$"],
+            "message": "The configured proposer exceeded its execution deadline.",
+        },
+        {
             "code": "response_too_large",
             "allowed_paths": ["$"],
             "message": "Keep the proposal within the response size limit.",
