@@ -5,10 +5,12 @@ from __future__ import annotations
 import math
 import re
 import unicodedata
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
 from .canonical import canonical_fingerprint, canonical_json, strict_json_loads
+from .immutable import freeze_json, thaw_json
 
 _IDENTIFIER = re.compile(r"^[a-z][a-z0-9_.-]*(?:/[a-z0-9_.-]+)*$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -72,10 +74,10 @@ def _json_value(value: Any, path: str, *, depth: int = 0) -> Any:
         _finite(value, path)
         return value
     if isinstance(value, list):
-        return [
+        return tuple(
             _json_value(item, f"{path}[{index}]", depth=depth + 1)
             for index, item in enumerate(value)
-        ]
+        )
     if isinstance(value, dict):
         output = {}
         for key, item in value.items():
@@ -86,7 +88,7 @@ def _json_value(value: Any, path: str, *, depth: int = 0) -> Any:
                 f"{path}.{key}",
                 depth=depth + 1,
             )
-        return output
+        return freeze_json(output)
     raise ValueError(f"{path} contains a non-JSON value")
 
 
@@ -166,8 +168,8 @@ class InstructionSplits:
 class EnvironmentSpec:
     adapter_id: str
     task_mode: str
-    bindings: dict[str, Any]
-    parameters: dict[str, Any]
+    bindings: Mapping[str, Any]
+    parameters: Mapping[str, Any]
     required_assets: tuple[str, ...]
 
     @classmethod
@@ -207,8 +209,8 @@ class EnvironmentSpec:
         return {
             "adapter_id": self.adapter_id,
             "task_mode": self.task_mode,
-            "bindings": self.bindings,
-            "parameters": self.parameters,
+            "bindings": thaw_json(self.bindings),
+            "parameters": thaw_json(self.parameters),
             "required_assets": list(self.required_assets),
         }
 
@@ -216,7 +218,7 @@ class EnvironmentSpec:
 @dataclass(frozen=True)
 class ExpressionSpec:
     op: str
-    payload: dict[str, Any]
+    payload: Mapping[str, Any]
 
     @classmethod
     def from_record(
@@ -259,7 +261,7 @@ class ExpressionSpec:
                     for index, argument in enumerate(args)
                 )
             }
-        return cls(op=op, payload=payload)
+        return cls(op=op, payload=freeze_json(payload))
 
     def to_record(self) -> dict[str, Any]:
         if "args" in self.payload:
@@ -360,7 +362,7 @@ class RewardProfileSpec:
     reward_profile_id: str
     terms: tuple[RewardTerm, ...]
     shaping_bounds: tuple[float, float]
-    terminal_values: dict[str, float]
+    terminal_values: Mapping[str, float]
 
     @classmethod
     def from_record(cls, value: Any, path: str) -> RewardProfileSpec:
@@ -409,7 +411,7 @@ class RewardProfileSpec:
             ),
             terms=terms,
             shaping_bounds=bounds,
-            terminal_values={
+            terminal_values=freeze_json({
                 "success": _finite(
                     terminal["success"],
                     f"{path}.terminal_values.success",
@@ -418,7 +420,7 @@ class RewardProfileSpec:
                     terminal["failure"],
                     f"{path}.terminal_values.failure",
                 ),
-            },
+            }),
         )
 
     def to_record(self) -> dict[str, Any]:
@@ -433,8 +435,8 @@ class RewardProfileSpec:
 @dataclass(frozen=True)
 class ValidationExample:
     example_id: str
-    previous_metrics: dict[str, Any]
-    current_metrics: dict[str, Any]
+    previous_metrics: Mapping[str, Any]
+    current_metrics: Mapping[str, Any]
     expected_success: bool
     expected_failure_codes: tuple[str, ...]
 
@@ -486,8 +488,8 @@ class ValidationExample:
     def to_record(self) -> dict[str, Any]:
         return {
             "example_id": self.example_id,
-            "previous_metrics": self.previous_metrics,
-            "current_metrics": self.current_metrics,
+            "previous_metrics": thaw_json(self.previous_metrics),
+            "current_metrics": thaw_json(self.current_metrics),
             "expected_success": self.expected_success,
             "expected_failure_codes": list(self.expected_failure_codes),
         }
@@ -504,7 +506,7 @@ class TaskSpecV2:
     curriculum_prerequisite_ids: tuple[str, ...]
     environment: EnvironmentSpec
     instructions: InstructionSplits
-    action_projection: dict[str, tuple[bool, ...]]
+    action_projection: Mapping[str, tuple[bool, ...]]
     goal: GoalSpec
     terminal_rules: tuple[TerminalRule, ...]
     reward_profiles: tuple[RewardProfileSpec, ...]
@@ -619,7 +621,7 @@ class TaskSpecV2:
                 record["instructions"],
                 "$.instructions",
             ),
-            action_projection=action_projection,
+            action_projection=freeze_json(action_projection),
             goal=GoalSpec.from_record(record["goal"], "$.goal"),
             terminal_rules=terminal_rules,
             reward_profiles=reward_profiles,

@@ -68,7 +68,7 @@ class TestTaskExpressionCompiler(unittest.TestCase):
             task.terminal_rules[0].predicate,
             schema=schema,
             parameters=task.environment.parameters,
-            purpose="terminal",
+            purpose="safety",
             task_spec_fingerprint=task.fingerprint,
         )
         close = _frame(schema, current=0.03)

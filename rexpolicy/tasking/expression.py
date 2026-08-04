@@ -12,7 +12,7 @@ from .model import ExpressionSpec
 
 NUMBER = "number"
 BOOLEAN = "boolean"
-BOOLEAN_PURPOSES = frozenset(("goal", "terminal"))
+BOOLEAN_PURPOSES = frozenset(("goal", "failure", "safety"))
 EXPRESSION_PURPOSES = frozenset((*BOOLEAN_PURPOSES, "reward", "process"))
 
 

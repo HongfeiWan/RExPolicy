@@ -37,7 +37,7 @@ def capability_record() -> dict:
                         "maximum": None,
                         "unit": "bool",
                         "available_at": ["current"],
-                        "allowed_purposes": ["terminal", "process"],
+                        "allowed_purposes": ["safety", "process"],
                     },
                     {
                         "name": "reach.displacement_violation",
@@ -46,7 +46,7 @@ def capability_record() -> dict:
                         "maximum": None,
                         "unit": "bool",
                         "available_at": ["current"],
-                        "allowed_purposes": ["terminal", "process"],
+                        "allowed_purposes": ["safety", "process"],
                     },
                 ],
             }
@@ -66,6 +66,7 @@ def capability_record() -> dict:
                         "value_type": "number",
                         "minimum": 0.01,
                         "maximum": 0.10,
+                        "unit": "m",
                         "required": True,
                         "vector_length": None,
                     },
@@ -74,6 +75,7 @@ def capability_record() -> dict:
                         "value_type": "number",
                         "minimum": 0.01,
                         "maximum": 0.10,
+                        "unit": "m",
                         "required": True,
                         "vector_length": None,
                     },
@@ -82,6 +84,7 @@ def capability_record() -> dict:
                         "value_type": "number_vector",
                         "minimum": -1.0,
                         "maximum": 1.0,
+                        "unit": "m",
                         "required": True,
                         "vector_length": 3,
                     },
@@ -89,6 +92,7 @@ def capability_record() -> dict:
                 "action_projection": copy.deepcopy(
                     task_record()["action_projection"]
                 ),
+                "max_episode_control_steps": 64,
             }
         ],
     }
@@ -180,6 +184,18 @@ class TestTaskCapabilities(unittest.TestCase):
         record["adapters"][0]["event_schema_id"] = "missing/events/v1"
         with self.assertRaisesRegex(ValueError, "unknown event schema"):
             CapabilityCatalog.from_record(record)
+
+    def test_capability_maps_are_copied_and_deeply_immutable(self) -> None:
+        record = capability_record()
+        catalog = CapabilityCatalog.from_record(record)
+        fingerprint = catalog.fingerprint
+        record["adapters"][0]["bindings"]["target"][0] = "red_cap"
+
+        self.assertEqual(catalog.fingerprint, fingerprint)
+        with self.assertRaises(TypeError):
+            catalog.adapters[0].bindings["target"] = ("red_cap",)
+        with self.assertRaises(TypeError):
+            catalog.adapters[0].action_projection["eef_9d"][0] = False
 
 
 if __name__ == "__main__":

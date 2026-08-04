@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
 from .canonical import canonical_fingerprint, strict_json_loads
+from .immutable import freeze_json
 from .model import TaskSpecV2
 
 
@@ -51,6 +53,12 @@ def _bound(value: Any, path: str) -> float | None:
     return output
 
 
+def _positive_integer(value: Any, path: str) -> int:
+    if type(value) is not int or value < 1:
+        raise ValueError(f"{path} must be a positive integer")
+    return value
+
+
 @dataclass(frozen=True)
 class MetricSpec:
     name: str
@@ -86,6 +94,9 @@ class MetricSpec:
             raise ValueError(f"{path} Boolean metrics cannot declare numeric bounds")
         if minimum is not None and maximum is not None and minimum > maximum:
             raise ValueError(f"{path} metric bounds are reversed")
+        unit = _string(record["unit"], f"{path}.unit")
+        if (value_type == "boolean") != (unit == "bool"):
+            raise ValueError(f"{path}.unit must match the metric value type")
         available_at = _strings(record["available_at"], f"{path}.available_at")
         if not set(available_at).issubset({"previous", "current"}):
             raise ValueError(f"{path}.available_at contains an unsupported time")
@@ -94,7 +105,7 @@ class MetricSpec:
             f"{path}.allowed_purposes",
         )
         if not set(allowed_purposes).issubset(
-            {"goal", "terminal", "reward", "process"}
+            {"goal", "failure", "safety", "reward", "process"}
         ):
             raise ValueError(f"{path}.allowed_purposes is unsupported")
         return cls(
@@ -102,7 +113,7 @@ class MetricSpec:
             value_type=value_type,
             minimum=minimum,
             maximum=maximum,
-            unit=_string(record["unit"], f"{path}.unit"),
+            unit=unit,
             available_at=available_at,
             allowed_purposes=allowed_purposes,
         )
@@ -171,6 +182,7 @@ class ParameterCapability:
     value_type: str
     minimum: float | None
     maximum: float | None
+    unit: str
     required: bool
     vector_length: int | None
 
@@ -184,6 +196,7 @@ class ParameterCapability:
                 "value_type",
                 "minimum",
                 "maximum",
+                "unit",
                 "required",
                 "vector_length",
             },
@@ -200,6 +213,9 @@ class ParameterCapability:
             raise ValueError(f"{path} Boolean parameters cannot have bounds")
         if minimum is not None and maximum is not None and minimum > maximum:
             raise ValueError(f"{path} parameter bounds are reversed")
+        unit = _string(record["unit"], f"{path}.unit")
+        if (value_type == "boolean") != (unit == "bool"):
+            raise ValueError(f"{path}.unit must match the parameter value type")
         vector_length = record["vector_length"]
         if value_type == "number_vector":
             if type(vector_length) is not int or vector_length < 1:
@@ -211,6 +227,7 @@ class ParameterCapability:
             value_type=value_type,
             minimum=minimum,
             maximum=maximum,
+            unit=unit,
             required=record["required"],
             vector_length=vector_length,
         )
@@ -223,7 +240,7 @@ class ParameterCapability:
             return
         values = value if self.value_type == "number_vector" else [value]
         if self.value_type == "number_vector" and (
-            not isinstance(value, list) or not value
+            not isinstance(value, tuple) or not value
         ):
             raise ValueError(f"{path} must be a non-empty numeric vector")
         if self.value_type == "number_vector" and len(value) != self.vector_length:
@@ -244,6 +261,7 @@ class ParameterCapability:
             "value_type": self.value_type,
             "minimum": self.minimum,
             "maximum": self.maximum,
+            "unit": self.unit,
             "required": self.required,
             "vector_length": self.vector_length,
         }
@@ -257,9 +275,10 @@ class AdapterCapability:
     process_spec_ids: tuple[str, ...]
     allowed_assets: tuple[str, ...]
     required_assets: tuple[str, ...]
-    bindings: dict[str, tuple[Any, ...]]
+    bindings: Mapping[str, tuple[Any, ...]]
     parameters: tuple[ParameterCapability, ...]
-    action_projection: dict[str, tuple[bool, ...]]
+    action_projection: Mapping[str, tuple[bool, ...]]
+    max_episode_control_steps: int
 
     @classmethod
     def from_record(cls, value: Any, path: str) -> AdapterCapability:
@@ -276,6 +295,7 @@ class AdapterCapability:
                 "bindings",
                 "parameters",
                 "action_projection",
+                "max_episode_control_steps",
             },
             path,
         )
@@ -336,9 +356,13 @@ class AdapterCapability:
             ),
             allowed_assets=allowed_assets,
             required_assets=required_assets,
-            bindings=bindings,
+            bindings=freeze_json(bindings),
             parameters=parameters,
-            action_projection=action_projection,
+            action_projection=freeze_json(action_projection),
+            max_episode_control_steps=_positive_integer(
+                record["max_episode_control_steps"],
+                f"{path}.max_episode_control_steps",
+            ),
         )
 
     def to_record(self) -> dict[str, Any]:
@@ -354,6 +378,7 @@ class AdapterCapability:
             "action_projection": {
                 key: list(mask) for key, mask in self.action_projection.items()
             },
+            "max_episode_control_steps": self.max_episode_control_steps,
         }
 
     @property

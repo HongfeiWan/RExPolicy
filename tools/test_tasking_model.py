@@ -44,8 +44,8 @@ def _expression_progress() -> dict:
 def task_record() -> dict:
     return {
         "schema_version": 2,
-        "task_id": "reach_green_cap/v1",
-        "version": 1,
+        "task_id": "reach_green_cap/v2",
+        "version": 2,
         "family_id": "reach_green_cap",
         "event_schema_id": "groot_newton/reach_events/v1",
         "process_spec_id": "reach_pregrasp/v1",
@@ -107,7 +107,7 @@ def task_record() -> dict:
         ],
         "reward_profiles": [
             {
-                "reward_profile_id": "reach_progress/v1",
+                "reward_profile_id": "reach_progress/v2",
                 "terms": [
                     {
                         "term_id": "distance_progress",
@@ -199,7 +199,7 @@ class TestTaskSpecModel(unittest.TestCase):
 
     def test_task_id_and_version_cannot_diverge(self) -> None:
         record = task_record()
-        record["version"] = 2
+        record["version"] = 3
         with self.assertRaisesRegex(ValueError, "version suffix"):
             TaskSpecV2.from_record(record)
 
@@ -208,6 +208,22 @@ class TestTaskSpecModel(unittest.TestCase):
         record["action_projection"]["eef_9d"][0] = 1
         with self.assertRaisesRegex(ValueError, "must be Boolean"):
             TaskSpecV2.from_record(record)
+
+    def test_nested_task_values_are_copied_and_deeply_immutable(self) -> None:
+        record = task_record()
+        task = TaskSpecV2.from_record(record)
+        fingerprint = task.fingerprint
+        record["environment"]["parameters"]["success_distance_m"] = 0.09
+
+        self.assertEqual(task.fingerprint, fingerprint)
+        with self.assertRaises(TypeError):
+            task.environment.parameters["success_distance_m"] = 0.09
+        with self.assertRaises(TypeError):
+            task.environment.parameters["goal_offset_world_m"][0] = 0.0
+        with self.assertRaises(TypeError):
+            task.goal.predicate.payload["args"] = ()
+        with self.assertRaises(TypeError):
+            task.reward_profiles[0].terminal_values["success"] = 2.0
 
 
 if __name__ == "__main__":
