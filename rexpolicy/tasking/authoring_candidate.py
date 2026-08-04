@@ -502,6 +502,7 @@ def _assessment(
 def validate_static_candidate(
     raw_stdout: str | bytes,
     *,
+    candidate_payload: str | bytes | None = None,
     intent: AuthoringIntent,
     brief: PublicAuthoringBrief,
     parent_task: TaskSpecV2 | None,
@@ -516,6 +517,10 @@ def validate_static_candidate(
     authoring_policy: AuthoringPolicy = DEFAULT_AUTHORING_POLICY,
 ) -> StaticCandidateAssessment:
     """Apply the complete deterministic static boundary to proposer stdout.
+
+    ``candidate_payload`` is reserved for an already-authenticated provider
+    envelope.  The static parser consumes that inner TaskSpec while every
+    provenance hash and byte count continues to bind the exact outer stdout.
 
     Candidate-caused failures return only policy-owned :class:`PublicIssue`
     values.  Drift in trusted dependencies is an operator error and therefore
@@ -583,7 +588,12 @@ def validate_static_candidate(
             issues=issues,
         )
     try:
-        text = payload.decode("utf-8")
+        proposal_payload = (
+            payload
+            if candidate_payload is None
+            else _response_bytes(candidate_payload)
+        )
+        text = proposal_payload.decode("utf-8")
         proposal_record = strict_json_loads(
             text,
             max_bytes=canonical_authoring_policy.max_response_bytes,

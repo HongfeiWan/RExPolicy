@@ -42,6 +42,11 @@ from .authoring_quarantine import (
     load_authoring_quarantine,
     write_authoring_quarantine,
 )
+from .authoring_provider import (
+    ProviderAttestationPolicy,
+    VerifiedProviderResponse,
+    verify_provider_envelope,
+)
 from .authoring_runner import (
     DEFAULT_PROPOSER_EXECUTION_POLICY,
     BubblewrapProposerCommand,
@@ -235,6 +240,33 @@ def _validate_request_size(
         raise ValueError("Proposer request exceeds the trusted size limit")
 
 
+def _with_provider_attestation_challenge(
+    request: dict[str, Any],
+    *,
+    provider_attestation_policy: ProviderAttestationPolicy | None,
+    wrapper_command_fingerprint: str,
+    session_fingerprint: str,
+) -> dict[str, Any]:
+    if provider_attestation_policy is None:
+        return request
+    output = dict(request)
+    output_contract = dict(output["output_contract"])
+    output_contract["response_envelope"] = (
+        "rexpolicy/provider_task_response/v1"
+    )
+    output["output_contract"] = output_contract
+    output["provider_attestation_challenge"] = {
+        "schema_version": 1,
+        "provider_attestation_policy": provider_attestation_policy.to_record(),
+        "provider_attestation_policy_fingerprint": (
+            provider_attestation_policy.fingerprint
+        ),
+        "wrapper_command_fingerprint": wrapper_command_fingerprint,
+        "session_fingerprint": session_fingerprint,
+    }
+    return output
+
+
 def _manifest_record(
     *,
     intent: AuthoringIntent,
@@ -255,6 +287,7 @@ def _manifest_record(
     process_policy: ProcessCompilerPolicy,
     authoring_policy: AuthoringPolicy,
     execution_policy: ProposerExecutionPolicy,
+    provider_attestation_policy: ProviderAttestationPolicy | None,
 ) -> dict[str, Any]:
     canonical_command = command.canonical()
     canonical_command.verify_executable()
@@ -333,6 +366,16 @@ def _manifest_record(
         "authoring_policy_fingerprint": authoring_policy.fingerprint,
         "execution_policy": execution_policy.to_record(),
         "execution_policy_fingerprint": execution_policy.fingerprint,
+        "provider_attestation_policy": (
+            None
+            if provider_attestation_policy is None
+            else provider_attestation_policy.to_record()
+        ),
+        "provider_attestation_policy_fingerprint": (
+            None
+            if provider_attestation_policy is None
+            else provider_attestation_policy.fingerprint
+        ),
     }
     if record["preauthoring_audit_plan_fingerprint"] is None:
         raise ValueError("Durable authoring requires a pre-authoring audit plan")
@@ -394,6 +437,7 @@ def _completion_record(
     invocation: ProposerInvocation,
     write: AuthoringQuarantineWrite,
     bundle: StaticCandidateBundle | None,
+    provider_receipt_fingerprint: str | None,
 ) -> dict[str, Any]:
     return {
         "schema_version": 1,
@@ -409,6 +453,7 @@ def _completion_record(
         "static_candidate_bundle_fingerprint": (
             None if bundle is None else bundle.fingerprint
         ),
+        "provider_receipt_fingerprint": provider_receipt_fingerprint,
     }
 
 
@@ -419,6 +464,8 @@ def _load_completed_attempt(
     ordinal: int,
     session_fingerprint: str,
     policy: AuthoringPolicy,
+    provider_attestation_policy: ProviderAttestationPolicy | None,
+    wrapper_command_fingerprint: str,
 ) -> tuple[dict[str, Any], AuthoringQuarantineEntry]:
     request = _parse_canonical(attempt_dir / _REQUEST)
     request_fingerprint = canonical_fingerprint(request)
@@ -436,6 +483,7 @@ def _load_completed_attempt(
         "attempt", "attempt_fingerprint", "invocation", "invocation_fingerprint",
         "quarantine_descriptor_sha256", "quarantine_relative_path",
         "static_candidate_bundle_fingerprint",
+        "provider_receipt_fingerprint",
     }
     if set(completion) != expected_keys or completion.get("schema_version") != 1:
         raise AuthoringJobDriftError("Authoring completion record shape drifted")
@@ -477,6 +525,19 @@ def _load_completed_attempt(
         raise AuthoringJobDriftError("Authoring terminal candidate state drifted")
     if entry.attempt.status == "rejected" and ordinal != policy.max_attempts:
         raise AuthoringJobDriftError("Authoring job rejected before exhausting its budget")
+    if provider_attestation_policy is None:
+        if completion["provider_receipt_fingerprint"] is not None:
+            raise AuthoringJobDriftError("Unexpected provider receipt binding")
+    else:
+        verified = verify_provider_envelope(
+            entry.raw_response,
+            policy=provider_attestation_policy,
+            request_sha256=request_fingerprint,
+            wrapper_command_fingerprint=wrapper_command_fingerprint,
+            session_fingerprint=session_fingerprint,
+        )
+        if completion["provider_receipt_fingerprint"] != verified.receipt.fingerprint:
+            raise AuthoringJobDriftError("Provider receipt completion binding drifted")
     return request, entry
 
 
@@ -555,6 +616,7 @@ def run_durable_automatic_authoring(
     process_policy: ProcessCompilerPolicy = DEFAULT_PROCESS_COMPILER_POLICY,
     authoring_policy: AuthoringPolicy = DEFAULT_AUTHORING_POLICY,
     execution_policy: ProposerExecutionPolicy = DEFAULT_PROPOSER_EXECUTION_POLICY,
+    provider_attestation_policy: ProviderAttestationPolicy | None = None,
 ) -> Any:
     """Run or resume exactly one immutable authoring chain in ``quarantine_dir``."""
     from .authoring_orchestrator import (
@@ -569,6 +631,10 @@ def run_durable_automatic_authoring(
         execution_policy=execution_policy,
         authoring_policy=authoring_policy,
     )
+    if provider_attestation_policy is not None:
+        provider_attestation_policy.to_record()
+        if model_id != provider_attestation_policy.model_id:
+            raise ValueError("Authoring model ID does not match provider attestation policy")
     proposer_binding, session = build_authoring_session(
         intent=intent, brief=brief, catalog=catalog, process_specs=process_specs,
         command=command, model_id=model_id, template=template,
@@ -585,6 +651,7 @@ def run_durable_automatic_authoring(
         compiler_policy=compiler_policy,
         property_policy=property_policy, process_policy=process_policy,
         authoring_policy=authoring_policy, execution_policy=execution_policy,
+        provider_attestation_policy=provider_attestation_policy,
     )
 
     with _exclusive_job_lock(Path(quarantine_dir)) as root:
@@ -631,6 +698,8 @@ def run_durable_automatic_authoring(
             persisted_request, entry = _load_completed_attempt(
                 root=root, attempt_dir=attempt_dir, ordinal=ordinal,
                 session_fingerprint=session.fingerprint, policy=authoring_policy,
+                provider_attestation_policy=provider_attestation_policy,
+                wrapper_command_fingerprint=command.fingerprint,
             )
             expected_request = build_authoring_request(
                 intent=intent,
@@ -647,6 +716,12 @@ def run_durable_automatic_authoring(
                 property_policy=property_policy,
                 process_policy=process_policy,
                 authoring_policy=authoring_policy,
+            )
+            expected_request = _with_provider_attestation_challenge(
+                expected_request,
+                provider_attestation_policy=provider_attestation_policy,
+                wrapper_command_fingerprint=command.fingerprint,
+                session_fingerprint=session.fingerprint,
             )
             if persisted_request != expected_request:
                 raise AuthoringJobDriftError("Completed authoring request drifted")
@@ -719,6 +794,12 @@ def run_durable_automatic_authoring(
                 compiler_policy=compiler_policy, property_policy=property_policy,
                 process_policy=process_policy, authoring_policy=authoring_policy,
             )
+            request = _with_provider_attestation_challenge(
+                request,
+                provider_attestation_policy=provider_attestation_policy,
+                wrapper_command_fingerprint=command.fingerprint,
+                session_fingerprint=session.fingerprint,
+            )
             _validate_request_size(request, execution_policy=execution_policy)
             request_fingerprint = canonical_fingerprint(request)
             attempt_dir = _attempt_directory(attempts_dir, ordinal)
@@ -744,9 +825,24 @@ def run_durable_automatic_authoring(
             if proposer_run.invocation.request_sha256 != request_fingerprint:
                 raise ValueError("Proposer invocation request binding mismatch")
             status = proposer_run.invocation.status
+            verified_response: VerifiedProviderResponse | None = None
             if status == "completed":
+                if provider_attestation_policy is not None:
+                    verified_response = verify_provider_envelope(
+                        proposer_run.stdout,
+                        policy=provider_attestation_policy,
+                        request_sha256=request_fingerprint,
+                        wrapper_command_fingerprint=command.fingerprint,
+                        session_fingerprint=session.fingerprint,
+                    )
                 assessment = validate_static_candidate(
-                    proposer_run.stdout, intent=intent, brief=brief,
+                    proposer_run.stdout,
+                    candidate_payload=(
+                        None
+                        if verified_response is None
+                        else verified_response.task_spec_bytes
+                    ),
+                    intent=intent, brief=brief,
                     parent_task=parent_task, parent_contract=parent_contract,
                     catalog=catalog, process_specs=process_specs,
                     compiler_policy=compiler_policy, property_policy=property_policy,
@@ -787,6 +883,11 @@ def run_durable_automatic_authoring(
                 ordinal=ordinal, request_fingerprint=request_fingerprint,
                 launch_fingerprint=canonical_fingerprint(launch), attempt=attempt,
                 invocation=proposer_run.invocation, write=write, bundle=bundle,
+                provider_receipt_fingerprint=(
+                    None
+                    if verified_response is None
+                    else verified_response.receipt.fingerprint
+                ),
             )
             _publish_once(attempt_dir / _COMPLETION, completion)
             attempts.append(attempt)

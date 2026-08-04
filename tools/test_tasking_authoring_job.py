@@ -18,6 +18,11 @@ from rexpolicy.tasking.authoring_job import (
     AmbiguousAuthoringAttemptError,
     AuthoringJobDriftError,
 )
+from rexpolicy.tasking.authoring_provider import (
+    HMACSHA256Verifier,
+    ProviderAttestationError,
+    ProviderAttestationPolicy,
+)
 from rexpolicy.tasking.authoring_orchestrator import run_automatic_authoring
 from rexpolicy.tasking.authoring_runner import (
     DEFAULT_BUBBLEWRAP_SANDBOX_PROFILE,
@@ -141,6 +146,7 @@ class DurableAuthoringFixture(unittest.TestCase):
         model_id: str = "openai/fake-task-model/v1",
         environment=None,
         execution_policy=DEFAULT_PROPOSER_EXECUTION_POLICY,
+        provider_attestation_policy=None,
     ):
         return run_automatic_authoring(
             intent=self.intent,
@@ -155,10 +161,139 @@ class DurableAuthoringFixture(unittest.TestCase):
             quarantine_dir=directory / "run",
             environment=environment,
             execution_policy=execution_policy,
+            provider_attestation_policy=provider_attestation_policy,
         )
 
 
 class TestDurableAuthoringJob(DurableAuthoringFixture):
+    def _provider_policy(self):
+        return ProviderAttestationPolicy(
+            schema_version=1,
+            policy_id="rexpolicy/provider_attestation/v1",
+            provider_id="local/fake_provider/v1",
+            model_id="local/fake_model/v1",
+            model_version="local/fake_model_build/v1",
+            signature_verifier=HMACSHA256Verifier(
+                verifier_id="rexpolicy/local_provider_verifier/v1",
+                secret_key=b"local-test-provider-key-32-bytes!!",
+            ),
+        )
+
+    def _prepare_signed_provider(self, directory: Path):
+        secret = b"local-test-provider-key-32-bytes!!"
+        request_log = directory / "signed-requests.jsonl"
+        script = directory / "signed_provider.py"
+        script.write_text(
+            "import base64\n"
+            "import hashlib\n"
+            "import hmac\n"
+            "import json\n"
+            "import sys\n"
+            "raw = sys.stdin.buffer.read()\n"
+            "with open(sys.argv[1], 'ab') as output:\n"
+            "    output.write(raw + b'\\n')\n"
+            "request = json.loads(raw)\n"
+            "challenge = request['provider_attestation_challenge']\n"
+            "policy = challenge['provider_attestation_policy']\n"
+            f"task = json.loads({canonical_json(self.candidate)!r})\n"
+            "encode = lambda value: json.dumps(value, sort_keys=True, "
+            "separators=(',', ':'), ensure_ascii=True, allow_nan=False)\n"
+            "receipt = {\n"
+            "    'schema_version': 1,\n"
+            "    'provider_id': policy['provider_id'],\n"
+            "    'model_id': policy['model_id'],\n"
+            "    'model_version': policy['model_version'],\n"
+            "    'request_id': 'req-local-signed-0001',\n"
+            "    'request_sha256': hashlib.sha256(raw).hexdigest(),\n"
+            "    'response_sha256': hashlib.sha256(encode(task).encode('ascii')).hexdigest(),\n"
+            "    'wrapper_command_fingerprint': challenge['wrapper_command_fingerprint'],\n"
+            "    'session_fingerprint': challenge['session_fingerprint'],\n"
+            "    'verifier_id': policy['signature_verifier']['verifier_id'],\n"
+            "    'signature_algorithm': policy['signature_verifier']['algorithm_id'],\n"
+            "}\n"
+            "message = encode({'domain': 'rexpolicy.provider_receipt_signature/v1', "
+            "'receipt': receipt}).encode('ascii')\n"
+            f"signature = hmac.new({secret!r}, message, hashlib.sha256).digest()\n"
+            "envelope = {'schema_version': 1, 'task_spec': task, "
+            "'provider_receipt': {**receipt, 'signature': "
+            "base64.b64encode(signature).decode('ascii')}}\n"
+            "sys.stdout.write(encode(envelope))\n",
+            encoding="utf-8",
+        )
+        return (
+            ProposerCommand.bind(
+                command_id="rexpolicy/local_signed_provider/v1",
+                argv=(sys.executable, str(script), str(request_log)),
+            ),
+            request_log,
+        )
+
+    def test_signed_provider_envelope_is_required_and_hash_bound(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_directory:
+            directory = Path(raw_directory)
+            command, request_log = self._prepare_signed_provider(directory)
+            policy = self._provider_policy()
+            run = self._run(
+                directory,
+                command,
+                model_id=policy.model_id,
+                provider_attestation_policy=policy,
+            )
+            self.assertEqual(run.result.final_state, "quarantined_static")
+            self.assertEqual(len(request_log.read_text().splitlines()), 1)
+            self.assertEqual(
+                run.static_candidate_bundle.raw_response_sha256,
+                run.attempts[0].raw_response_sha256,
+            )
+            completion = json.loads(
+                (
+                    directory / "run" / "authoring-job" / "attempts"
+                    / "attempt-001" / "completion.json"
+                ).read_text(encoding="ascii")
+            )
+            self.assertIsNotNone(completion["provider_receipt_fingerprint"])
+            repeated = self._run(
+                directory,
+                command,
+                model_id=policy.model_id,
+                provider_attestation_policy=policy,
+            )
+            self.assertEqual(repeated.result.fingerprint, run.result.fingerprint)
+            self.assertEqual(len(request_log.read_text().splitlines()), 1)
+
+    def test_missing_attestation_and_caller_model_drift_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_directory:
+            directory = Path(raw_directory)
+            command, request_log = self._prepare(directory)
+            policy = self._provider_policy()
+            with self.assertRaises(ProviderAttestationError):
+                self._run(
+                    directory,
+                    command,
+                    model_id=policy.model_id,
+                    provider_attestation_policy=policy,
+                )
+            with self.assertRaises(AmbiguousAuthoringAttemptError):
+                self._run(
+                    directory,
+                    command,
+                    model_id=policy.model_id,
+                    provider_attestation_policy=policy,
+                )
+            self.assertEqual(len(request_log.read_text().splitlines()), 1)
+
+        with tempfile.TemporaryDirectory() as raw_directory:
+            directory = Path(raw_directory)
+            command, request_log = self._prepare(directory)
+            with self.assertRaisesRegex(ValueError, "model ID"):
+                self._run(
+                    directory,
+                    command,
+                    model_id="local/caller_lie/v1",
+                    provider_attestation_policy=self._provider_policy(),
+                )
+            self.assertFalse(request_log.exists())
+
     def test_terminal_rerun_is_idempotent_and_does_not_reinvoke(self) -> None:
         with tempfile.TemporaryDirectory() as raw_directory:
             directory = Path(raw_directory)

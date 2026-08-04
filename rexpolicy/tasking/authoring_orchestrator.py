@@ -33,6 +33,7 @@ from .authoring_quarantine import (
     AuthoringQuarantineWrite,
     write_authoring_quarantine,
 )
+from .authoring_provider import ProviderAttestationPolicy
 from .authoring_runner import (
     DEFAULT_PROPOSER_EXECUTION_POLICY,
     BubblewrapProposerCommand,
@@ -806,6 +807,7 @@ def run_automatic_authoring(
     process_policy: ProcessCompilerPolicy = DEFAULT_PROCESS_COMPILER_POLICY,
     authoring_policy: AuthoringPolicy = DEFAULT_AUTHORING_POLICY,
     execution_policy: ProposerExecutionPolicy = DEFAULT_PROPOSER_EXECUTION_POLICY,
+    provider_attestation_policy: ProviderAttestationPolicy | None = None,
 ) -> AuthoringJobRun:
     """Run or resume the unique durable authoring job in ``quarantine_dir``."""
     # Lazy import avoids a module cycle: the durable layer reuses the public
@@ -830,4 +832,5 @@ def run_automatic_authoring(
         process_policy=process_policy,
         authoring_policy=authoring_policy,
         execution_policy=execution_policy,
+        provider_attestation_policy=provider_attestation_policy,
     )
