@@ -47,6 +47,7 @@ from .contract import (
     CompiledTaskContract,
     TaskCompilerPolicy,
 )
+from .curriculum import CurriculumSnapshot
 from .model import TaskSpecV2
 from .property_validation import (
     DEFAULT_PROPERTY_VALIDATION_POLICY,
@@ -460,6 +461,7 @@ def validate_authoring_attempt_chain(
     attempts: tuple[ProposalAttempt, ...],
     invocations: tuple[ProposerInvocation, ...],
     authoring_policy: AuthoringPolicy = DEFAULT_AUTHORING_POLICY,
+    require_terminal: bool = True,
 ) -> None:
     """Validate one complete, single-child authoring retry chain."""
     if not attempts or len(attempts) != len(invocations):
@@ -512,7 +514,7 @@ def validate_authoring_attempt_chain(
             raise ValueError("Authoring attempt chain repeats an attempt")
         fingerprints.add(canonical_attempt.fingerprint)
         previous = canonical_attempt
-    if attempts[-1].status not in {"candidate", "rejected"}:
+    if require_terminal and attempts[-1].status not in {"candidate", "rejected"}:
         raise ValueError("Authoring attempt chain has no terminal decision")
 
 
@@ -594,7 +596,7 @@ class AuthoringJobRun:
     static_candidate_bundle: StaticCandidateBundle | None
 
 
-def run_automatic_authoring(
+def _run_automatic_authoring_ephemeral(
     *,
     intent: AuthoringIntent,
     brief: PublicAuthoringBrief,
@@ -781,3 +783,49 @@ def run_automatic_authoring(
         parent = attempt
 
     raise AssertionError("Authoring policy attempt loop did not terminate")
+
+
+def run_automatic_authoring(
+    *,
+    intent: AuthoringIntent,
+    brief: PublicAuthoringBrief,
+    curriculum_snapshot: CurriculumSnapshot,
+    catalog: CapabilityCatalog,
+    process_specs: Mapping[str, ProcessSpecV1],
+    parent_task: TaskSpecV2 | None,
+    parent_contract: CompiledTaskContract | None,
+    command: ProposerCommand,
+    model_id: str,
+    quarantine_dir: Path,
+    environment: Mapping[str, str] | None = None,
+    template: AuthoringPromptTemplate = DEFAULT_AUTHORING_TEMPLATE,
+    compiler_policy: TaskCompilerPolicy = DEFAULT_TASK_COMPILER_POLICY,
+    property_policy: PropertyValidationPolicy = DEFAULT_PROPERTY_VALIDATION_POLICY,
+    process_policy: ProcessCompilerPolicy = DEFAULT_PROCESS_COMPILER_POLICY,
+    authoring_policy: AuthoringPolicy = DEFAULT_AUTHORING_POLICY,
+    execution_policy: ProposerExecutionPolicy = DEFAULT_PROPOSER_EXECUTION_POLICY,
+) -> AuthoringJobRun:
+    """Run or resume the unique durable authoring job in ``quarantine_dir``."""
+    # Lazy import avoids a module cycle: the durable layer reuses the public
+    # request/session validators defined above.
+    from .authoring_job import run_durable_automatic_authoring
+
+    return run_durable_automatic_authoring(
+        intent=intent,
+        brief=brief,
+        curriculum_snapshot=curriculum_snapshot,
+        catalog=catalog,
+        process_specs=process_specs,
+        parent_task=parent_task,
+        parent_contract=parent_contract,
+        command=command,
+        model_id=model_id,
+        quarantine_dir=quarantine_dir,
+        environment=environment,
+        template=template,
+        compiler_policy=compiler_policy,
+        property_policy=property_policy,
+        process_policy=process_policy,
+        authoring_policy=authoring_policy,
+        execution_policy=execution_policy,
+    )

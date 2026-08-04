@@ -30,6 +30,7 @@ from rexpolicy.tasking.repository import (
     load_capability_catalog,
     load_production_reach_artifacts,
 )
+from tools.test_tasking_authoring_brief import _snapshot
 
 _PROCESS_V2_PATH = (
     PRODUCTION_REACH_TASK_PATH.parents[1]
@@ -47,19 +48,20 @@ def _candidate_record() -> dict:
     return record
 
 
-def _brief_record(parent) -> dict:
+def _brief_record(parent, snapshot) -> dict:
+    frontier = snapshot.assessments[0]
     return {
         "schema_version": 1,
         "brief_id": "reach_green_cap/v3/brief/v1",
         "task_id": "reach_green_cap/v3",
         "family_id": "reach_green_cap",
         "objective": "Author the next safe reach curriculum task from the public gap.",
-        "source_curriculum_snapshot_fingerprint": "8" * 64,
+        "source_curriculum_snapshot_fingerprint": snapshot.fingerprint,
         "gap_targets": [
             {
                 "unit_id": "reach_green_cap/frontier/v1",
-                "assessment_fingerprint": "7" * 64,
-                "status": "frontier",
+                "assessment_fingerprint": frontier.fingerprint,
+                "status": frontier.status,
                 "gap_code": "instruction_robustness",
             }
         ],
@@ -129,7 +131,10 @@ class TestAutomaticAuthoringOrchestrator(unittest.TestCase):
             _PROCESS_V2_PATH.read_text(encoding="utf-8")
         )
         self.process_specs = {self.process_spec.process_spec_id: self.process_spec}
-        self.brief = PublicAuthoringBrief.from_record(_brief_record(self.parent))
+        self.curriculum_snapshot = _snapshot((("frontier", 51),))
+        self.brief = PublicAuthoringBrief.from_record(
+            _brief_record(self.parent, self.curriculum_snapshot)
+        )
         self.intent = AuthoringIntent.from_record(
             {
                 "schema_version": 2,
@@ -177,6 +182,7 @@ class TestAutomaticAuthoringOrchestrator(unittest.TestCase):
         run = run_automatic_authoring(
             intent=self.intent,
             brief=self.brief,
+            curriculum_snapshot=self.curriculum_snapshot,
             catalog=self.catalog,
             process_specs=self.process_specs,
             parent_task=self.parent.task,
@@ -297,6 +303,7 @@ class TestAutomaticAuthoringOrchestrator(unittest.TestCase):
                 run_automatic_authoring(
                     intent=legacy,
                     brief=self.brief,
+                    curriculum_snapshot=self.curriculum_snapshot,
                     catalog=self.catalog,
                     process_specs=self.process_specs,
                     parent_task=self.parent.task,
