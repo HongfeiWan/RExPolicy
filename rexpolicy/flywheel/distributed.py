@@ -39,7 +39,7 @@ class DistributedContext:
         torch.cuda.set_device(local_rank)
         device = torch.device("cuda", local_rank)
         initialized = False
-        if world_size > 1 or "RANK" in os.environ:
+        if world_size > 1:
             if not dist.is_initialized():
                 dist.init_process_group(
                     backend="nccl",

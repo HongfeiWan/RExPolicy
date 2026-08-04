@@ -177,6 +177,25 @@ class TestFlywheelExperience(unittest.TestCase):
 
 
 class TestDistributedContext(unittest.TestCase):
+    def test_initialize_skips_singleton_nccl(self) -> None:
+        environment = {"RANK": "0", "LOCAL_RANK": "0", "WORLD_SIZE": "1"}
+        with (
+            mock.patch.dict(os.environ, environment, clear=True),
+            mock.patch("torch.cuda.is_available", return_value=True),
+            mock.patch("torch.cuda.device_count", return_value=1),
+            mock.patch("torch.cuda.set_device") as set_device,
+            mock.patch("torch.distributed.init_process_group") as initialize,
+        ):
+            context = DistributedContext.initialize(timeout_minutes=7)
+
+        set_device.assert_called_once_with(0)
+        initialize.assert_not_called()
+        self.assertEqual(context.rank, 0)
+        self.assertEqual(context.local_rank, 0)
+        self.assertEqual(context.world_size, 1)
+        self.assertEqual(context.device, torch.device("cuda", 0))
+        self.assertFalse(context.initialized)
+
     def test_initialize_registers_local_cuda_device_with_nccl(self) -> None:
         environment = {"RANK": "1", "LOCAL_RANK": "1", "WORLD_SIZE": "2"}
         with (
