@@ -1,0 +1,87 @@
+{
+  "schema_version": 1,
+  "template_id": "reach_pregrasp/v1",
+  "family_id": "reach_green_cap",
+  "event_schema_id": "groot_newton/reach_events/v1",
+  "default_stage": {
+    "stage_id": "far",
+    "kind": "progress",
+    "ordinal": 0,
+    "description": "The hand remains outside the certified approach region."
+  },
+  "stages": [
+    {
+      "stage_id": "unsafe",
+      "kind": "unsafe",
+      "ordinal": null,
+      "description": "Contact or object displacement violates the task safety contract.",
+      "predicate": {
+        "op": "any",
+        "args": [
+          {
+            "op": "metric",
+            "name": "reach.contact_violation",
+            "at": "current"
+          },
+          {
+            "op": "metric",
+            "name": "reach.displacement_violation",
+            "at": "current"
+          }
+        ]
+      }
+    },
+    {
+      "stage_id": "goal_zone",
+      "kind": "progress",
+      "ordinal": 2,
+      "description": "The hand is inside the goal region; task success still requires the configured hold.",
+      "predicate": {
+        "op": "le",
+        "args": [
+          {
+            "op": "metric",
+            "name": "reach.distance_m",
+            "at": "current"
+          },
+          {
+            "op": "parameter",
+            "name": "success_distance_m"
+          }
+        ]
+      }
+    },
+    {
+      "stage_id": "approach",
+      "kind": "progress",
+      "ordinal": 1,
+      "description": "The hand is inside the approach region but outside the goal region.",
+      "predicate": {
+        "op": "le",
+        "args": [
+          {
+            "op": "metric",
+            "name": "reach.distance_m",
+            "at": "current"
+          },
+          {
+            "op": "mul",
+            "args": [
+              {
+                "op": "const",
+                "value": 2.5
+              },
+              {
+                "op": "parameter",
+                "name": "success_distance_m"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "segmentation": {
+    "max_segment_steps": 4
+  }
+}
