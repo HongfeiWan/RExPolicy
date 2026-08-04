@@ -2770,10 +2770,17 @@ def main() -> None:
                 episode_archive=archive_pair.episode_path,
                 event_archive=archive_pair.event_path,
                 archive_pair_descriptor=archive_pair.pair_descriptor_path,
-                success_experience_graphs=[
-                    item.relative_path for item in success_graph_writes
-                ],
                 historical_replay_samples=len(historical_samples),
+                **(
+                    {
+                        "success_experience_graphs": [
+                            item.relative_path
+                            for item in success_graph_writes
+                        ]
+                    }
+                    if args.success_experience_graph
+                    else {}
+                ),
                 **metrics,
             )
             operations.log(
