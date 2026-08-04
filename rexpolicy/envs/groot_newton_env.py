@@ -3653,6 +3653,31 @@ class GrootNewtonEnv:
             fingerprint["images"] = images
         return self._to_torch_tree(fingerprint)
 
+    def dynamics_fingerprint_torch(self) -> dict[str, Any]:
+        """Return reward-free physical/control state for Event Ledger v1."""
+        replay = self.replay_fingerprint_torch()
+        physical_task_fields = (
+            "obj_pose",
+            "initial_obj_pose",
+            "tcp_pose",
+            "goal_pos_world",
+            "reach_goal_pos_base",
+            "reach_reset_xy_offset",
+            "reach_eef_pos_world",
+            "reach_eef_pos_base",
+            "reach_distance",
+            "reach_bottle_displacement",
+            "reach_max_bottle_displacement",
+        )
+        return {
+            "joint": replay["joint"],
+            "body": replay["body"],
+            "control": replay["control"],
+            "task": {
+                name: replay["task"][name] for name in physical_task_fields
+            },
+        }
+
     def canonicalize_branch_state_torch(self, source_world: int = 0) -> None:
         """Make every branch start from one exact canonical simulator state.
 

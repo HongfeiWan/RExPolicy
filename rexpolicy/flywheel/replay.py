@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 from dataclasses import dataclass
 from typing import Any, Iterator
 
@@ -213,6 +214,50 @@ def fingerprint_world_zero(
         world_count=world_count,
         float_tolerance=float_tolerance,
     ).digest
+
+
+def fingerprint_each_world(
+    tree: dict[str, Any],
+    *,
+    world_count: int,
+    float_tolerance: float,
+) -> tuple[str, ...]:
+    """Hash each branch independently with the replay digest encoding."""
+    if world_count < 1:
+        raise ValueError("world_count must be positive")
+    if not math.isfinite(float_tolerance) or float_tolerance <= 0.0:
+        raise ValueError("float_tolerance must be positive and finite")
+    digests = [hashlib.sha256() for _ in range(world_count)]
+    fields = 0
+    for name, value in _flatten(tree):
+        array = _to_numpy(value)
+        if array.ndim < 1 or int(array.shape[0]) != world_count:
+            raise ValueError(
+                f"Replay fingerprint field {name!r} must start with "
+                f"world dimension {world_count}, got {array.shape}"
+            )
+        fields += 1
+        if np.issubdtype(array.dtype, np.floating) and not np.isfinite(array).all():
+            raise FloatingPointError(
+                f"Replay fingerprint field {name!r} is non-finite"
+            )
+        for world, digest in enumerate(digests):
+            row = array[world]
+            digest.update(name.encode())
+            digest.update(str(row.shape).encode())
+            if np.issubdtype(array.dtype, np.floating):
+                quantized = np.rint(
+                    row.astype(np.float64) / float_tolerance
+                ).astype(np.int64)
+                digest.update(b"quantized-float64")
+                digest.update(quantized.tobytes(order="C"))
+            else:
+                contiguous = np.ascontiguousarray(row)
+                digest.update(str(contiguous.dtype).encode())
+                digest.update(contiguous.tobytes(order="C"))
+    if fields == 0:
+        raise ValueError("Replay fingerprint tree is empty")
+    return tuple(digest.hexdigest() for digest in digests)
 
 
 def _flatten(tree: Any, prefix: str = "") -> Iterator[tuple[str, Any]]:
