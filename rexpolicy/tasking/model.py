@@ -435,10 +435,12 @@ class RewardProfileSpec:
 @dataclass(frozen=True)
 class ValidationExample:
     example_id: str
-    previous_metrics: Mapping[str, Any]
-    current_metrics: Mapping[str, Any]
-    expected_success: bool
+    initial_metrics: Mapping[str, Any]
+    steps: tuple[Mapping[str, Any], ...]
+    reward_profile_id: str
+    expected_status: str
     expected_failure_codes: tuple[str, ...]
+    expected_safety_codes: tuple[str, ...]
 
     @classmethod
     def from_record(cls, value: Any, path: str) -> ValidationExample:
@@ -447,51 +449,74 @@ class ValidationExample:
             record,
             required={
                 "example_id",
-                "previous_metrics",
-                "current_metrics",
-                "expected_success",
+                "initial_metrics",
+                "steps",
+                "reward_profile_id",
+                "expected_status",
                 "expected_failure_codes",
+                "expected_safety_codes",
             },
             path=path,
         )
-        if type(record["expected_success"]) is not bool:
-            raise ValueError(f"{path}.expected_success must be Boolean")
-        raw_codes = record["expected_failure_codes"]
-        if not isinstance(raw_codes, list):
-            raise ValueError(f"{path}.expected_failure_codes must be an array")
-        codes = tuple(
-            _identifier(code, f"{path}.expected_failure_codes[{index}]")
-            for index, code in enumerate(raw_codes)
+        raw_steps = record["steps"]
+        if not isinstance(raw_steps, list) or not raw_steps:
+            raise ValueError(f"{path}.steps must be a non-empty array")
+        steps = tuple(
+            _json_value(
+                _expect_mapping(item, f"{path}.steps[{index}]"),
+                f"{path}.steps[{index}]",
+            )
+            for index, item in enumerate(raw_steps)
         )
-        if len(set(codes)) != len(codes):
-            raise ValueError("Expected failure codes must be unique")
+        expected_status = _identifier(
+            record["expected_status"],
+            f"{path}.expected_status",
+        )
+        if expected_status not in {"active", "success", "failure", "truncated"}:
+            raise ValueError(f"{path}.expected_status is unsupported")
+        parsed_codes = []
+        for field in ("expected_failure_codes", "expected_safety_codes"):
+            raw_codes = record[field]
+            if not isinstance(raw_codes, list):
+                raise ValueError(f"{path}.{field} must be an array")
+            codes = tuple(
+                _identifier(code, f"{path}.{field}[{index}]")
+                for index, code in enumerate(raw_codes)
+            )
+            if len(set(codes)) != len(codes) or codes != tuple(sorted(codes)):
+                raise ValueError(f"{path}.{field} must be sorted and unique")
+            parsed_codes.append(codes)
+        failure_codes, safety_codes = parsed_codes
+        if not set(safety_codes).issubset(failure_codes):
+            raise ValueError("Expected safety codes must also be failure codes")
         return cls(
             example_id=_identifier(record["example_id"], f"{path}.example_id"),
-            previous_metrics=_json_value(
+            initial_metrics=_json_value(
                 _expect_mapping(
-                    record["previous_metrics"],
-                    f"{path}.previous_metrics",
+                    record["initial_metrics"],
+                    f"{path}.initial_metrics",
                 ),
-                f"{path}.previous_metrics",
+                f"{path}.initial_metrics",
             ),
-            current_metrics=_json_value(
-                _expect_mapping(
-                    record["current_metrics"],
-                    f"{path}.current_metrics",
-                ),
-                f"{path}.current_metrics",
+            steps=steps,
+            reward_profile_id=_identifier(
+                record["reward_profile_id"],
+                f"{path}.reward_profile_id",
             ),
-            expected_success=record["expected_success"],
-            expected_failure_codes=codes,
+            expected_status=expected_status,
+            expected_failure_codes=failure_codes,
+            expected_safety_codes=safety_codes,
         )
 
     def to_record(self) -> dict[str, Any]:
         return {
             "example_id": self.example_id,
-            "previous_metrics": thaw_json(self.previous_metrics),
-            "current_metrics": thaw_json(self.current_metrics),
-            "expected_success": self.expected_success,
+            "initial_metrics": thaw_json(self.initial_metrics),
+            "steps": [thaw_json(item) for item in self.steps],
+            "reward_profile_id": self.reward_profile_id,
+            "expected_status": self.expected_status,
             "expected_failure_codes": list(self.expected_failure_codes),
+            "expected_safety_codes": list(self.expected_safety_codes),
         }
 
 

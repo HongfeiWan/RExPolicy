@@ -121,20 +121,70 @@ def task_record() -> dict:
         ],
         "validation_examples": [
             {
-                "example_id": "safe_progress",
-                "previous_metrics": {
-                    "reach.distance_m": 0.10,
-                    "reach.contact_violation": False,
-                    "reach.displacement_violation": False,
-                },
-                "current_metrics": {
-                    "reach.distance_m": 0.08,
-                    "reach.contact_violation": False,
-                    "reach.displacement_violation": False,
-                },
-                "expected_success": False,
+                "example_id": "active_progress",
+                "initial_metrics": {"reach.distance_m": 0.10},
+                "steps": [
+                    {
+                        "reach.distance_m": 0.08,
+                        "reach.contact_violation": False,
+                        "reach.displacement_violation": False,
+                    }
+                ],
+                "reward_profile_id": "reach_progress/v2",
+                "expected_status": "active",
                 "expected_failure_codes": [],
-            }
+                "expected_safety_codes": [],
+            },
+            {
+                "example_id": "safe_success",
+                "initial_metrics": {"reach.distance_m": 0.05},
+                "steps": [
+                    {
+                        "reach.distance_m": 0.03,
+                        "reach.contact_violation": False,
+                        "reach.displacement_violation": False,
+                    },
+                    {
+                        "reach.distance_m": 0.03,
+                        "reach.contact_violation": False,
+                        "reach.displacement_violation": False,
+                    },
+                ],
+                "reward_profile_id": "reach_progress/v2",
+                "expected_status": "success",
+                "expected_failure_codes": [],
+                "expected_safety_codes": [],
+            },
+            {
+                "example_id": "contact_precedence",
+                "initial_metrics": {"reach.distance_m": 0.05},
+                "steps": [
+                    {
+                        "reach.distance_m": 0.03,
+                        "reach.contact_violation": True,
+                        "reach.displacement_violation": False,
+                    }
+                ],
+                "reward_profile_id": "reach_progress/v2",
+                "expected_status": "failure",
+                "expected_failure_codes": ["forbidden_contact"],
+                "expected_safety_codes": ["forbidden_contact"],
+            },
+            {
+                "example_id": "displacement_failure",
+                "initial_metrics": {"reach.distance_m": 0.10},
+                "steps": [
+                    {
+                        "reach.distance_m": 0.08,
+                        "reach.contact_violation": False,
+                        "reach.displacement_violation": True,
+                    }
+                ],
+                "reward_profile_id": "reach_progress/v2",
+                "expected_status": "failure",
+                "expected_failure_codes": ["bottle_displacement"],
+                "expected_safety_codes": ["bottle_displacement"],
+            },
         ],
     }
 
@@ -224,6 +274,26 @@ class TestTaskSpecModel(unittest.TestCase):
             task.goal.predicate.payload["args"] = ()
         with self.assertRaises(TypeError):
             task.reward_profiles[0].terminal_values["success"] = 2.0
+        with self.assertRaises(TypeError):
+            task.validation_examples[0].steps[0]["reach.distance_m"] = 0.0
+
+    def test_validation_examples_are_bounded_replay_traces(self) -> None:
+        empty = task_record()
+        empty["validation_examples"][0]["steps"] = []
+        with self.assertRaisesRegex(ValueError, "non-empty array"):
+            TaskSpecV2.from_record(empty)
+
+        status = task_record()
+        status["validation_examples"][0]["expected_status"] = "maybe"
+        with self.assertRaisesRegex(ValueError, "unsupported"):
+            TaskSpecV2.from_record(status)
+
+        codes = task_record()
+        codes["validation_examples"][2]["expected_safety_codes"] = [
+            "made_up_rule"
+        ]
+        with self.assertRaisesRegex(ValueError, "also be failure"):
+            TaskSpecV2.from_record(codes)
 
 
 if __name__ == "__main__":
