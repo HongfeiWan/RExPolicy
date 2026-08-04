@@ -1,0 +1,169 @@
+{
+  "schema_version": 2,
+  "task_id": "reach_green_cap/v2",
+  "version": 2,
+  "family_id": "reach_green_cap",
+  "event_schema_id": "groot_newton/reach_events/v1",
+  "process_spec_id": "reach_pregrasp/v1",
+  "curriculum_prerequisite_ids": [],
+  "environment": {
+    "adapter_id": "groot_newton/reach/v1",
+    "task_mode": "reach_green_cap",
+    "episode_control_steps": 8,
+    "bindings": {"target": "green_cap"},
+    "parameters": {
+      "goal_offset_world_m": [0.18, 0.08, 0.05],
+      "success_distance_m": 0.04,
+      "reward_distance_scale_m": 0.03
+    },
+    "required_assets": ["nero_bottle/v1"]
+  },
+  "instructions": {
+    "train": [
+      "move the open right hand to the safe pre-grasp position beside the green bottle cap without moving the bottle",
+      "Move the open right hand toward the safe pre-grasp pose beside the green cap."
+    ],
+    "promotion": [
+      "Approach the green bottle cap without touching or moving the bottle."
+    ],
+    "audit": {
+      "count": 8,
+      "sha256": "f31e536a090d4cb2c60048d36d182cfc9093c47b932e823708f359879cc6162f"
+    }
+  },
+  "action_projection": {
+    "eef_9d": [true, true, true, false, false, false, false, false, false],
+    "hand_joint_target": [false, false, false, false, false, false, false, false, false, false],
+    "arm_joint_target": [false, false, false, false, false, false, false]
+  },
+  "goal": {
+    "hold_steps": 2,
+    "predicate": {
+      "op": "le",
+      "args": [
+        {"op": "metric", "name": "reach.distance_m", "at": "current"},
+        {"op": "parameter", "name": "success_distance_m"}
+      ]
+    }
+  },
+  "terminal_rules": [
+    {
+      "code": "forbidden_contact",
+      "kind": "safety",
+      "predicate": {
+        "op": "metric",
+        "name": "reach.contact_violation",
+        "at": "current"
+      }
+    },
+    {
+      "code": "bottle_displacement",
+      "kind": "safety",
+      "predicate": {
+        "op": "metric",
+        "name": "reach.displacement_violation",
+        "at": "current"
+      }
+    }
+  ],
+  "reward_profiles": [
+    {
+      "reward_profile_id": "reach_progress/v2",
+      "terms": [
+        {
+          "term_id": "distance_progress",
+          "weight": 1.0,
+          "expression": {
+            "op": "clip",
+            "args": [
+              {
+                "op": "div",
+                "args": [
+                  {
+                    "op": "sub",
+                    "args": [
+                      {"op": "metric", "name": "reach.distance_m", "at": "previous"},
+                      {"op": "metric", "name": "reach.distance_m", "at": "current"}
+                    ]
+                  },
+                  {"op": "parameter", "name": "reward_distance_scale_m"}
+                ]
+              },
+              {"op": "const", "value": -1.0},
+              {"op": "const", "value": 1.0}
+            ]
+          }
+        }
+      ],
+      "shaping_bounds": [-1.0, 1.0],
+      "terminal_values": {"success": 1.0, "failure": -1.0}
+    }
+  ],
+  "validation_examples": [
+    {
+      "example_id": "active_progress",
+      "initial_metrics": {"reach.distance_m": 0.1},
+      "steps": [
+        {
+          "reach.distance_m": 0.08,
+          "reach.contact_violation": false,
+          "reach.displacement_violation": false
+        }
+      ],
+      "reward_profile_id": "reach_progress/v2",
+      "expected_status": "active",
+      "expected_failure_codes": [],
+      "expected_safety_codes": []
+    },
+    {
+      "example_id": "safe_success",
+      "initial_metrics": {"reach.distance_m": 0.05},
+      "steps": [
+        {
+          "reach.distance_m": 0.03,
+          "reach.contact_violation": false,
+          "reach.displacement_violation": false
+        },
+        {
+          "reach.distance_m": 0.03,
+          "reach.contact_violation": false,
+          "reach.displacement_violation": false
+        }
+      ],
+      "reward_profile_id": "reach_progress/v2",
+      "expected_status": "success",
+      "expected_failure_codes": [],
+      "expected_safety_codes": []
+    },
+    {
+      "example_id": "contact_precedence",
+      "initial_metrics": {"reach.distance_m": 0.05},
+      "steps": [
+        {
+          "reach.distance_m": 0.03,
+          "reach.contact_violation": true,
+          "reach.displacement_violation": false
+        }
+      ],
+      "reward_profile_id": "reach_progress/v2",
+      "expected_status": "failure",
+      "expected_failure_codes": ["forbidden_contact"],
+      "expected_safety_codes": ["forbidden_contact"]
+    },
+    {
+      "example_id": "displacement_failure",
+      "initial_metrics": {"reach.distance_m": 0.1},
+      "steps": [
+        {
+          "reach.distance_m": 0.08,
+          "reach.contact_violation": false,
+          "reach.displacement_violation": true
+        }
+      ],
+      "reward_profile_id": "reach_progress/v2",
+      "expected_status": "failure",
+      "expected_failure_codes": ["bottle_displacement"],
+      "expected_safety_codes": ["bottle_displacement"]
+    }
+  ]
+}

@@ -1,0 +1,84 @@
+{
+  "schema_version": 1,
+  "event_schemas": [
+    {
+      "schema_version": 1,
+      "event_schema_id": "groot_newton/reach_events/v1",
+      "metrics": [
+        {
+          "name": "reach.distance_m",
+          "value_type": "number",
+          "minimum": 0.0,
+          "maximum": 2.0,
+          "unit": "m",
+          "available_at": ["previous", "current"],
+          "allowed_purposes": ["goal", "reward", "process"]
+        },
+        {
+          "name": "reach.contact_violation",
+          "value_type": "boolean",
+          "minimum": null,
+          "maximum": null,
+          "unit": "bool",
+          "available_at": ["current"],
+          "allowed_purposes": ["safety", "process"]
+        },
+        {
+          "name": "reach.displacement_violation",
+          "value_type": "boolean",
+          "minimum": null,
+          "maximum": null,
+          "unit": "bool",
+          "available_at": ["current"],
+          "allowed_purposes": ["safety", "process"]
+        }
+      ]
+    }
+  ],
+  "adapters": [
+    {
+      "adapter_id": "groot_newton/reach/v1",
+      "task_modes": ["reach_green_cap"],
+      "event_schema_id": "groot_newton/reach_events/v1",
+      "process_spec_ids": ["reach_pregrasp/v1"],
+      "allowed_assets": ["nero_bottle/v1"],
+      "required_assets": ["nero_bottle/v1"],
+      "bindings": {"target": ["green_cap"]},
+      "parameters": [
+        {
+          "name": "success_distance_m",
+          "value_type": "number",
+          "minimum": 0.01,
+          "maximum": 0.1,
+          "unit": "m",
+          "required": true,
+          "vector_length": null
+        },
+        {
+          "name": "reward_distance_scale_m",
+          "value_type": "number",
+          "minimum": 0.01,
+          "maximum": 0.1,
+          "unit": "m",
+          "required": true,
+          "vector_length": null
+        },
+        {
+          "name": "goal_offset_world_m",
+          "value_type": "number_vector",
+          "minimum": -1.0,
+          "maximum": 1.0,
+          "unit": "m",
+          "required": true,
+          "vector_length": 3
+        }
+      ],
+      "action_projection": {
+        "eef_9d": [true, true, true, false, false, false, false, false, false],
+        "hand_joint_target": [false, false, false, false, false, false, false, false, false, false],
+        "arm_joint_target": [false, false, false, false, false, false, false]
+      },
+      "max_episode_control_steps": 64
+    }
+  ]
+}
