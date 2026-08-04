@@ -22,6 +22,7 @@ def production_ledger_bindings(
     *,
     task_contract_id: str,
     task_contract_sha256: str,
+    task_oracle_sha256: str,
     observation_contract_sha256: str,
     event_schema: EventSchema,
 ) -> LedgerBindings:
@@ -30,6 +31,7 @@ def production_ledger_bindings(
         {
             "task_contract_id": task_contract_id,
             "task_contract_sha256": task_contract_sha256,
+            "task_oracle_sha256": task_oracle_sha256,
             "dynamics_contract_sha256": DYNAMICS_CONTRACT_V1_SHA256,
             "observation_contract_sha256": observation_contract_sha256,
             "event_schema_id": event_schema.event_schema_id,

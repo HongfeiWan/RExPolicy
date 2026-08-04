@@ -20,6 +20,9 @@ def _inputs(*, unsafe_goal: bool = False):
     record = ledger_record()
     record["bindings"]["task_contract_id"] = tasks.contract.task_contract_id
     record["bindings"]["task_contract_sha256"] = tasks.contract.fingerprint
+    record["bindings"]["task_oracle_sha256"] = (
+        tasks.contract.oracle_fingerprint
+    )
     record["events"][0]["signals"]["reach.distance_m"] = 0.12
     if unsafe_goal:
         record["events"][5]["post_signals"]["reach.contact_violation"] = True
@@ -103,6 +106,9 @@ class TestProcessLabelView(unittest.TestCase):
         record = ledger_record()
         record["bindings"]["task_contract_id"] = tasks.contract.task_contract_id
         record["bindings"]["task_contract_sha256"] = tasks.contract.fingerprint
+        record["bindings"]["task_oracle_sha256"] = (
+            tasks.contract.oracle_fingerprint
+        )
         root = record["events"][0]
         root["signals"]["reach.distance_m"] = 0.08
         sample_id = "g000001-r00000-e00000-d00000-w00000"

@@ -76,6 +76,7 @@ def _signals(value: Any, path: str, schema: EventSchema) -> SignalFrame:
 class LedgerBindings:
     task_contract_id: str
     task_contract_sha256: str
+    task_oracle_sha256: str
     dynamics_contract_sha256: str
     observation_contract_sha256: str
     event_schema_id: str
@@ -90,6 +91,7 @@ class LedgerBindings:
             {
                 "task_contract_id",
                 "task_contract_sha256",
+                "task_oracle_sha256",
                 "dynamics_contract_sha256",
                 "observation_contract_sha256",
                 "event_schema_id",
@@ -105,6 +107,10 @@ class LedgerBindings:
             task_contract_sha256=_sha256(
                 record["task_contract_sha256"],
                 f"{path}.task_contract_sha256",
+            ),
+            task_oracle_sha256=_sha256(
+                record["task_oracle_sha256"],
+                f"{path}.task_oracle_sha256",
             ),
             dynamics_contract_sha256=_sha256(
                 record["dynamics_contract_sha256"],
@@ -128,6 +134,7 @@ class LedgerBindings:
         return {
             "task_contract_id": self.task_contract_id,
             "task_contract_sha256": self.task_contract_sha256,
+            "task_oracle_sha256": self.task_oracle_sha256,
             "dynamics_contract_sha256": self.dynamics_contract_sha256,
             "observation_contract_sha256": self.observation_contract_sha256,
             "event_schema_id": self.event_schema_id,

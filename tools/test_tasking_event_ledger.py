@@ -31,6 +31,7 @@ def ledger_record() -> dict:
         "bindings": {
             "task_contract_id": "reach_green_cap/v2",
             "task_contract_sha256": "a" * 64,
+            "task_oracle_sha256": "f" * 64,
             "dynamics_contract_sha256": "b" * 64,
             "observation_contract_sha256": "c" * 64,
             "event_schema_id": schema.event_schema_id,

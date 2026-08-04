@@ -33,6 +33,7 @@ def _builder():
     bindings = production_ledger_bindings(
         task_contract_id=artifacts.contract.task_contract_id,
         task_contract_sha256=artifacts.contract.fingerprint,
+        task_oracle_sha256=artifacts.contract.oracle_fingerprint,
         observation_contract_sha256="c" * 64,
         event_schema=schema,
     )

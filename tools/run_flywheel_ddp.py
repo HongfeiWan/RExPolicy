@@ -600,6 +600,7 @@ def _collect_episode(
         bindings=production_ledger_bindings(
             task_contract_id=task_artifacts.contract.task_contract_id,
             task_contract_sha256=task_artifacts.contract.fingerprint,
+            task_oracle_sha256=task_artifacts.contract.oracle_fingerprint,
             observation_contract_sha256=observation_contract_sha256,
             event_schema=event_schema,
         ),
@@ -1679,6 +1680,7 @@ def _build_run_manifest(
         "task_v2": {
             "task_contract_id": task_artifacts.contract.task_contract_id,
             "task_contract_sha256": task_artifacts.contract.fingerprint,
+            "task_oracle_sha256": task_artifacts.contract.oracle_fingerprint,
             "task_spec_sha256": task_artifacts.task.fingerprint,
             "compiler_policy_sha256": (
                 task_artifacts.contract.compiler_policy_fingerprint
@@ -2201,6 +2203,9 @@ def main() -> None:
                 "simulator_fingerprint": simulator_fingerprint,
                 "observation_contract_sha256": observation_contract_sha256,
                 "task_contract_sha256": task_artifacts.contract.fingerprint,
+                "task_oracle_sha256": (
+                    task_artifacts.contract.oracle_fingerprint
+                ),
             },
             repo_root=REPO_ROOT,
         )
