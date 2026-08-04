@@ -418,6 +418,38 @@ class ResolvedTaskCapabilities:
     adapter: AdapterCapability
 
 
+def validate_event_values(
+    values: dict[str, Any],
+    *,
+    schema: EventSchema,
+    at: str,
+) -> None:
+    """Validate one exact reward-agnostic EventSchema frame."""
+    if at not in {"previous", "current"}:
+        raise ValueError(f"Unsupported event time {at!r}")
+    expected = {
+        metric.name for metric in schema.metrics if at in metric.available_at
+    }
+    if set(values) != expected:
+        raise ValueError(f"Event {at} fields do not match EventSchema")
+    for name, value in values.items():
+        metric = schema.by_name[name]
+        path = f"{at}.{name}"
+        if metric.value_type == "boolean":
+            if type(value) is not bool:
+                raise ValueError(f"{path} must be Boolean")
+            continue
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"{path} must be numeric")
+        number = float(value)
+        if not math.isfinite(number):
+            raise ValueError(f"{path} must be finite")
+        if metric.minimum is not None and number < metric.minimum:
+            raise ValueError(f"{path} is below the EventSchema minimum")
+        if metric.maximum is not None and number > metric.maximum:
+            raise ValueError(f"{path} exceeds the EventSchema maximum")
+
+
 def validate_task_capabilities(
     task: TaskSpecV2,
     catalog: CapabilityCatalog,
