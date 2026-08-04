@@ -13,9 +13,9 @@ import subprocess
 import sys
 import time
 import uuid
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 import numpy as np
 
@@ -102,6 +102,7 @@ from rexpolicy.replay.success_graph import (
     SuccessExperienceGraph,
     compile_success_experience_graph,
 )
+from rexpolicy.tasking.capabilities import EventSchema
 from rexpolicy.tasking.canonical import canonical_fingerprint
 from rexpolicy.tasking.event_ledger import (
     CollectionProvenance,
@@ -113,6 +114,17 @@ from rexpolicy.tasking.runtime import initial_runtime_state
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 REACH_BOTTLE_DISPLACEMENT_LIMIT_M = 0.010
+
+
+@dataclass(frozen=True)
+class _CanonicalDecisionRoot:
+    """One reset-and-replayed root cached for exactly the next decision."""
+
+    observation: dict[str, Any]
+    physical_replay_gate_record: dict[str, Any]
+    dynamics_digest_sha256: str
+    evaluation: dict[str, Any]
+    metrics: Mapping[str, Any]
 
 
 def _first_existing(*paths: Path) -> Path:
@@ -622,6 +634,84 @@ def _reset_and_replay(
     return env.observation_torch(), False
 
 
+def _capture_canonical_decision_root(
+    *,
+    args: argparse.Namespace,
+    env: GrootNewtonEnv,
+    observation: dict[str, Any],
+    simulator_fingerprint: str,
+    observation_contract_sha256: str,
+    event_schema: EventSchema,
+) -> _CanonicalDecisionRoot:
+    """Capture the exact root witness and observation without another replay."""
+    physical_replay_gate = validate_physical_replay_gate(
+        env.physical_replay_gate_torch(),
+        world_count=env.num_envs,
+        float_tolerance=args.same_state_tolerance,
+    )
+    physical_replay_gate_record = build_physical_replay_gate_record(
+        physical_replay_gate,
+        same_state_tolerance=args.same_state_tolerance,
+        historical_replay_state_tolerance=(
+            args.historical_replay_state_tolerance
+        ),
+        simulator_fingerprint_sha256=simulator_fingerprint,
+        observation_contract_sha256=observation_contract_sha256,
+        render_contract=env.observation_render_contract(),
+    )
+    dynamics_fingerprint = validate_replay_fingerprint(
+        env.dynamics_fingerprint_torch(),
+        world_count=env.num_envs,
+        float_tolerance=args.same_state_tolerance,
+    )
+    evaluation = env.evaluate()
+    metric_rows = extract_groot_reach_metric_rows(
+        evaluation,
+        event_schema=event_schema,
+    )
+    metrics = require_identical_root_rows(metric_rows)
+    return _CanonicalDecisionRoot(
+        observation=observation,
+        physical_replay_gate_record=physical_replay_gate_record,
+        dynamics_digest_sha256=dynamics_fingerprint.digest,
+        evaluation=evaluation,
+        metrics=metrics,
+    )
+
+
+def _replay_canonical_continuation(
+    *,
+    args: argparse.Namespace,
+    env: GrootNewtonEnv,
+    context: DistributedContext,
+    reset_seed: int,
+    root_actions: list[np.ndarray],
+    simulator_fingerprint: str,
+    observation_contract_sha256: str,
+    event_schema: EventSchema,
+) -> _CanonicalDecisionRoot:
+    """Replay one selected path once and return its cached next root."""
+    observation, replay_ended = _reset_and_replay(
+        env=env,
+        context=context,
+        reset_seed=reset_seed,
+        root_actions=root_actions,
+    )
+    if replay_ended:
+        raise RuntimeError(
+            "Canonical continuation replay terminated despite a "
+            "non-terminal selected branch"
+        )
+    return _capture_canonical_decision_root(
+        args=args,
+        env=env,
+        observation=observation,
+        simulator_fingerprint=simulator_fingerprint,
+        observation_contract_sha256=observation_contract_sha256,
+        event_schema=event_schema,
+    )
+
+
 def _normalized_action_diversity(
     candidates: list[ChunkCandidate],
 ) -> tuple[float, float]:
@@ -749,45 +839,22 @@ def _collect_episode(
         ),
         event_schema=event_schema,
     )
+    current_root = _capture_canonical_decision_root(
+        args=args,
+        env=env,
+        observation=observation,
+        simulator_fingerprint=simulator_fingerprint,
+        observation_contract_sha256=observation_contract_sha256,
+        event_schema=event_schema,
+    )
 
     while len(root_actions) < args.episode_control_steps and not episode_done:
-        if decision_index > 0:
-            observation, replay_ended = _reset_and_replay(
-                env=env,
-                context=context,
-                reset_seed=reset_seed,
-                root_actions=root_actions,
-            )
-            if replay_ended:
-                raise RuntimeError(
-                    "Root replay terminated before a previously reached decision"
-                )
-        physical_replay_gate = validate_physical_replay_gate(
-            env.physical_replay_gate_torch(),
-            world_count=env.num_envs,
-            float_tolerance=args.same_state_tolerance,
+        observation = current_root.observation
+        physical_replay_gate_record = (
+            current_root.physical_replay_gate_record
         )
-        physical_replay_gate_record = build_physical_replay_gate_record(
-            physical_replay_gate,
-            same_state_tolerance=args.same_state_tolerance,
-            historical_replay_state_tolerance=(
-                args.historical_replay_state_tolerance
-            ),
-            simulator_fingerprint_sha256=simulator_fingerprint,
-            observation_contract_sha256=observation_contract_sha256,
-            render_contract=env.observation_render_contract(),
-        )
-        dynamics_fingerprint = validate_replay_fingerprint(
-            env.dynamics_fingerprint_torch(),
-            world_count=env.num_envs,
-            float_tolerance=args.same_state_tolerance,
-        )
-        root_evaluation = env.evaluate()
-        root_metric_rows = extract_groot_reach_metric_rows(
-            root_evaluation,
-            event_schema=event_schema,
-        )
-        root_metrics = require_identical_root_rows(root_metric_rows)
+        root_evaluation = current_root.evaluation
+        root_metrics = current_root.metrics
         shadow_branch = begin_shadow_decision(
             root_state=task_state,
             root_source=root_evaluation,
@@ -796,7 +863,9 @@ def _collect_episode(
         ledger_builder.open_decision(
             decision_index=decision_index,
             root_control_step=len(root_actions),
-            dynamics_digest_sha256=dynamics_fingerprint.digest,
+            dynamics_digest_sha256=(
+                current_root.dynamics_digest_sha256
+            ),
             current_metrics=root_metrics,
         )
         raw = _raw_observations(observation, instruction=task.instruction)
@@ -1033,13 +1102,11 @@ def _collect_episode(
         diversity_mean, diversity_max = _normalized_action_diversity(candidates)
         selected_samples.extend(candidate.sample for candidate in selection.selected)
         continuation = selection.continuation
-        ledger_builder.close_decision(
-            decision_index=decision_index,
-            root_continuation_sample_id=(
-                None if continuation is None else continuation.sample.sample_id
-            ),
-        )
         if continuation is None:
+            ledger_builder.close_decision(
+                decision_index=decision_index,
+                root_continuation_sample_id=None,
+            )
             decisions.append(
                 {
                     "decision_index": decision_index,
@@ -1060,14 +1127,41 @@ def _collect_episode(
             episode_done = True
             decision_index += 1
             continue
-        task_state = shadow_branch.world_states[continuation.world]
-        path_samples.append(continuation.sample)
-        selected_return += continuation.score
-        root_rewards.extend(continuation.rewards)
         continuation_actions = np.asarray(
             continuation.action["action_19d"],
             dtype=np.float32,
         )
+        next_root: _CanonicalDecisionRoot | None = None
+        if not continuation.terminated and not continuation.truncated:
+            replay_actions = root_actions + [
+                row.copy() for row in continuation_actions
+            ]
+            next_root = _replay_canonical_continuation(
+                args=args,
+                env=env,
+                context=context,
+                reset_seed=reset_seed,
+                root_actions=replay_actions,
+                simulator_fingerprint=simulator_fingerprint,
+                observation_contract_sha256=observation_contract_sha256,
+                event_schema=event_schema,
+            )
+            ledger_builder.commit_continuation_witness(
+                decision_index=decision_index,
+                sample_id=continuation.sample.sample_id,
+                post_dynamics_digest_sha256=(
+                    next_root.dynamics_digest_sha256
+                ),
+                current_metrics=next_root.metrics,
+            )
+        ledger_builder.close_decision(
+            decision_index=decision_index,
+            root_continuation_sample_id=continuation.sample.sample_id,
+        )
+        task_state = shadow_branch.world_states[continuation.world]
+        path_samples.append(continuation.sample)
+        selected_return += continuation.score
+        root_rewards.extend(continuation.rewards)
         root_actions.extend(row.copy() for row in continuation_actions)
         selected_actions.append(
             {
@@ -1105,6 +1199,12 @@ def _collect_episode(
             or continuation.truncated
             or len(root_actions) >= args.episode_control_steps
         )
+        if not episode_done:
+            if next_root is None:
+                raise RuntimeError(
+                    "Non-terminal continuation has no cached canonical root"
+                )
+            current_root = next_root
         decision_index += 1
 
     episode = EpisodeExperience(

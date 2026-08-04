@@ -97,6 +97,12 @@ class TestFlywheelEventLedgerBuilder(unittest.TestCase):
             terminated=False,
             truncated=False,
         )
+        builder.commit_continuation_witness(
+            decision_index=0,
+            sample_id=sample_0,
+            post_dynamics_digest_sha256="e" * 64,
+            current_metrics=_signals(0.08),
+        )
         builder.close_decision(
             decision_index=0,
             root_continuation_sample_id=sample_0,
@@ -137,6 +143,119 @@ class TestFlywheelEventLedgerBuilder(unittest.TestCase):
             DYNAMICS_CONTRACT_V1_SHA256,
         )
         ledger.assert_reward_agnostic()
+
+    def test_world_one_canonical_handoff_is_the_next_root_witness(self) -> None:
+        builder, _ = _builder()
+        builder.open_decision(
+            decision_index=0,
+            root_control_step=0,
+            dynamics_digest_sha256="d" * 64,
+            current_metrics=_signals(0.10),
+        )
+        sample_0 = builder.append_transition(
+            decision_index=0,
+            world=0,
+            branch_step=0,
+            effective_action_19d=[0.0] * 19,
+            post_dynamics_digest_sha256="e" * 64,
+            current_metrics=_signals(0.08),
+            terminated=False,
+            truncated=False,
+        )
+        sample_1 = builder.append_transition(
+            decision_index=0,
+            world=1,
+            branch_step=0,
+            effective_action_19d=[0.1] * 19,
+            post_dynamics_digest_sha256="f" * 64,
+            current_metrics=_signals(0.075),
+            terminated=False,
+            truncated=False,
+        )
+        builder.append_transition(
+            decision_index=0,
+            world=1,
+            branch_step=1,
+            effective_action_19d=[0.2] * 19,
+            post_dynamics_digest_sha256="1" * 64,
+            current_metrics=_signals(0.07),
+            terminated=False,
+            truncated=False,
+        )
+
+        builder.commit_continuation_witness(
+            decision_index=0,
+            sample_id=sample_1,
+            post_dynamics_digest_sha256="a" * 64,
+            current_metrics=_signals(0.069),
+        )
+        builder.close_decision(
+            decision_index=0,
+            root_continuation_sample_id=sample_1,
+        )
+        builder.open_decision(
+            decision_index=1,
+            root_control_step=2,
+            dynamics_digest_sha256="a" * 64,
+            current_metrics=_signals(0.069),
+        )
+        terminal = builder.append_transition(
+            decision_index=1,
+            world=0,
+            branch_step=0,
+            effective_action_19d=[0.3] * 19,
+            post_dynamics_digest_sha256="2" * 64,
+            current_metrics=_signals(0.02),
+            terminated=True,
+            truncated=False,
+        )
+        builder.close_decision(
+            decision_index=1,
+            root_continuation_sample_id=terminal,
+        )
+        ledger = builder.finish()
+
+        transitions = [
+            event for event in ledger.events if event.kind == "transition"
+        ]
+        roots = [
+            event for event in ledger.events if event.kind == "decision_root"
+        ]
+        self.assertEqual(transitions[0].sample_id, sample_0)
+        self.assertEqual(transitions[0].post_dynamics_digest_sha256, "e" * 64)
+        selected_final = next(
+            event
+            for event in transitions
+            if event.sample_id == sample_1 and event.branch_step == 1
+        )
+        self.assertEqual(selected_final.post_dynamics_digest_sha256, "a" * 64)
+        self.assertEqual(dict(selected_final.post_signals), _signals(0.069))
+        self.assertEqual(roots[1].dynamics_digest_sha256, "a" * 64)
+        self.assertEqual(dict(roots[1].signals), _signals(0.069))
+
+    def test_non_terminal_continuation_requires_canonical_witness(self) -> None:
+        builder, _ = _builder()
+        builder.open_decision(
+            decision_index=0,
+            root_control_step=0,
+            dynamics_digest_sha256="d" * 64,
+            current_metrics=_signals(0.10),
+        )
+        sample_id = builder.append_transition(
+            decision_index=0,
+            world=0,
+            branch_step=0,
+            effective_action_19d=[0.0] * 19,
+            post_dynamics_digest_sha256="e" * 64,
+            current_metrics=_signals(0.08),
+            terminated=False,
+            truncated=False,
+        )
+        with self.assertRaisesRegex(ValueError, "lacks a canonical witness"):
+            builder.close_decision(
+                decision_index=0,
+                root_continuation_sample_id=sample_id,
+            )
 
     def test_sample_identity_matches_training_sample_provenance(self) -> None:
         sample = TrainingSample(

@@ -58,6 +58,7 @@ class EpisodeEventLedgerBuilder:
         self._events: list[dict[str, Any]] = []
         self._open_root: dict[str, Any] | None = None
         self._transitions: dict[int, list[dict[str, Any]]] = {}
+        self._continuation_witness_sample_id: str | None = None
         self._next_decision = 0
         self._closed_terminal = False
         self._finished = False
@@ -99,6 +100,7 @@ class EpisodeEventLedgerBuilder:
             "signals": metrics,
         }
         self._transitions = {}
+        self._continuation_witness_sample_id = None
 
     def append_transition(
         self,
@@ -162,6 +164,64 @@ class EpisodeEventLedgerBuilder:
         )
         return sample_id
 
+    def commit_continuation_witness(
+        self,
+        *,
+        decision_index: int,
+        sample_id: str,
+        post_dynamics_digest_sha256: str,
+        current_metrics: Mapping[str, Any],
+    ) -> None:
+        """Promote one canonical replay result to the actual-path witness.
+
+        Parallel candidate execution is speculative.  A non-terminal selected
+        branch must be reset-and-replayed through the canonical world before it
+        can become the next decision root.  The replay result therefore owns
+        the selected transition's final post-state witness; all unselected
+        candidate facts remain untouched.
+        """
+        self._require_writable()
+        if self._open_root is None:
+            raise ValueError(
+                "Event Ledger continuation witness requires an open decision"
+            )
+        if decision_index != self._next_decision:
+            raise ValueError(
+                "Event Ledger continuation witness decision index mismatch"
+            )
+        if self._continuation_witness_sample_id is not None:
+            raise ValueError(
+                "Event Ledger decision already has a continuation witness"
+            )
+        selected_events = next(
+            (
+                events
+                for events in self._transitions.values()
+                if events and events[0]["sample_id"] == sample_id
+            ),
+            None,
+        )
+        if selected_events is None:
+            raise ValueError(
+                "Event Ledger continuation witness is not a candidate"
+            )
+        selected = selected_events[-1]
+        if selected["terminated"] or selected["truncated"]:
+            raise ValueError(
+                "Event Ledger terminal candidate cannot have a continuation witness"
+            )
+        metrics = dict(current_metrics)
+        validate_event_values(
+            metrics,
+            schema=self._event_schema,
+            at="current",
+        )
+        selected["post_dynamics_digest_sha256"] = (
+            post_dynamics_digest_sha256
+        )
+        selected["post_signals"] = metrics
+        self._continuation_witness_sample_id = sample_id
+
     def close_decision(
         self,
         *,
@@ -183,6 +243,30 @@ class EpisodeEventLedgerBuilder:
             and root_continuation_sample_id not in candidate_ids
         ):
             raise ValueError("Event Ledger continuation is not a candidate")
+        selected = None
+        if root_continuation_sample_id is not None:
+            selected = next(
+                events[-1]
+                for events in self._transitions.values()
+                if events[0]["sample_id"] == root_continuation_sample_id
+            )
+            if (
+                not selected["terminated"]
+                and not selected["truncated"]
+                and self._continuation_witness_sample_id
+                != root_continuation_sample_id
+            ):
+                raise ValueError(
+                    "Event Ledger non-terminal continuation lacks a canonical witness"
+                )
+        if (
+            self._continuation_witness_sample_id is not None
+            and self._continuation_witness_sample_id
+            != root_continuation_sample_id
+        ):
+            raise ValueError(
+                "Event Ledger continuation differs from its canonical witness"
+            )
         self._append(self._open_root)
         for world in sorted(self._transitions):
             for transition in self._transitions[world]:
@@ -197,16 +281,13 @@ class EpisodeEventLedgerBuilder:
         if root_continuation_sample_id is None:
             self._closed_terminal = True
         else:
-            selected = next(
-                events[-1]
-                for events in self._transitions.values()
-                if events[0]["sample_id"] == root_continuation_sample_id
-            )
+            assert selected is not None
             self._closed_terminal = bool(
                 selected["terminated"] or selected["truncated"]
             )
         self._open_root = None
         self._transitions = {}
+        self._continuation_witness_sample_id = None
         self._next_decision += 1
 
     def _append(self, record: dict[str, Any]) -> None:
