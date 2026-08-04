@@ -1686,19 +1686,7 @@ def _git_source_descriptor(path: Path) -> dict[str, Any]:
     """Fingerprint committed and dirty source without copying the repository."""
     path = path.expanduser().resolve()
 
-    def run_at(base: Path, *arguments: str) -> bytes:
-        return subprocess.run(
-            ["git", "-C", str(base), *arguments],
-            check=True,
-            capture_output=True,
-        ).stdout
-
-    root_probe = subprocess.run(
-        ["git", "-C", str(path), "rev-parse", "--show-toplevel"],
-        check=False,
-        capture_output=True,
-    )
-    if root_probe.returncode != 0:
+    def source_tree_descriptor() -> dict[str, Any]:
         files = _source_tree_descriptors(path)
         digest_payload = [
             (item["relative_path"], item["size"], item["sha256"])
@@ -1719,6 +1707,21 @@ def _git_source_descriptor(path: Path) -> dict[str, Any]:
             "clean": None,
         }
 
+    def run_at(base: Path, *arguments: str) -> bytes:
+        return subprocess.run(
+            ["git", "-C", str(base), *arguments],
+            check=True,
+            capture_output=True,
+        ).stdout
+
+    root_probe = subprocess.run(
+        ["git", "-C", str(path), "rev-parse", "--show-toplevel"],
+        check=False,
+        capture_output=True,
+    )
+    if root_probe.returncode != 0:
+        return source_tree_descriptor()
+
     root = Path(root_probe.stdout.decode("utf-8").strip()).resolve()
     try:
         source_scope = path.relative_to(root)
@@ -1727,6 +1730,15 @@ def _git_source_descriptor(path: Path) -> dict[str, Any]:
             f"Source path {path} is outside its Git root {root}"
         ) from error
     scope_argument = source_scope.as_posix() or "."
+    tracked = run_at(
+        root,
+        "ls-files",
+        "-z",
+        "--",
+        scope_argument,
+    )
+    if not tracked:
+        return source_tree_descriptor()
     commit = run_at(root, "rev-parse", "HEAD").decode("ascii").strip()
     diff = run_at(
         root,

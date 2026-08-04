@@ -271,6 +271,86 @@ class TestRunnerConfiguration(unittest.TestCase):
                 first_hash,
             )
 
+    def test_ignored_source_inside_git_uses_content_fingerprint(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runtime = root / ".venv/site-packages/newton"
+            runtime.mkdir(parents=True)
+            source = runtime / "__init__.py"
+            source.write_text("VERSION = 1\n", encoding="utf-8")
+            (root / ".gitignore").write_text(".venv/\n", encoding="utf-8")
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            subprocess.run(
+                ["git", "-C", str(root), "add", ".gitignore"],
+                check=True,
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(root),
+                    "-c",
+                    "user.name=RExPolicy Test",
+                    "-c",
+                    "user.email=rexpolicy@example.invalid",
+                    "commit",
+                    "-qm",
+                    "initial",
+                ],
+                check=True,
+            )
+
+            descriptor = _git_source_descriptor(runtime)
+
+            self.assertFalse(descriptor["git_available"])
+            self.assertEqual(
+                [item["relative_path"] for item in descriptor["files"]],
+                ["__init__.py"],
+            )
+            first_hash = descriptor["source_tree_sha256"]
+            source.write_text("VERSION = 2\n", encoding="utf-8")
+            self.assertNotEqual(
+                _git_source_descriptor(runtime)["source_tree_sha256"],
+                first_hash,
+            )
+
+    def test_untracked_only_source_inside_git_uses_content_fingerprint(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runtime = root / "installed/newton"
+            runtime.mkdir(parents=True)
+            (runtime / "runtime.py").write_text("VALUE = 1\n", encoding="utf-8")
+            tracked = root / "README.md"
+            tracked.write_text("host repository\n", encoding="utf-8")
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            subprocess.run(
+                ["git", "-C", str(root), "add", "README.md"],
+                check=True,
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(root),
+                    "-c",
+                    "user.name=RExPolicy Test",
+                    "-c",
+                    "user.email=rexpolicy@example.invalid",
+                    "commit",
+                    "-qm",
+                    "initial",
+                ],
+                check=True,
+            )
+
+            descriptor = _git_source_descriptor(runtime)
+
+            self.assertFalse(descriptor["git_available"])
+            self.assertEqual(
+                [item["relative_path"] for item in descriptor["files"]],
+                ["runtime.py"],
+            )
+
     def test_git_source_descriptor_scopes_dirty_state_to_runtime_tree(
         self,
     ) -> None:
