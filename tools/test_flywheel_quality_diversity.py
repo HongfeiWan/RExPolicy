@@ -6,7 +6,10 @@ import copy
 import hashlib
 import math
 import unittest
+import tempfile
+from pathlib import Path
 
+from rexpolicy.flywheel.derived_views import write_derived_view
 from rexpolicy.flywheel.quality_diversity import (
     BalancedReplayState,
     BehaviorDimension,
@@ -123,6 +126,23 @@ class TestQualityDiversityIndex(unittest.TestCase):
         )
         self.assertEqual(same_cell.elite_descriptor_sha256, high.fingerprint)
         self.assertGreater(first.coverage, 0.0)
+        self.assertEqual(len(first.event_ledger_set_sha256), 64)
+
+        with tempfile.TemporaryDirectory() as raw_directory:
+            first_write = write_derived_view(
+                run_dir=Path(raw_directory),
+                view=first,
+            )
+            second_write = write_derived_view(
+                run_dir=Path(raw_directory),
+                view=first,
+            )
+            self.assertTrue(first_write.created)
+            self.assertFalse(second_write.created)
+            self.assertEqual(
+                first_write.event_ledger_sha256,
+                first.event_ledger_set_sha256,
+            )
 
     def test_round_trip_recomputes_cells_and_rejects_tampering(self) -> None:
         index = build_quality_diversity_index(

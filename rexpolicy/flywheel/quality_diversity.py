@@ -441,6 +441,7 @@ class QualityDiversityIndex:
     artifact_type: str
     policy: QualityDiversityPolicy
     policy_sha256: str
+    event_ledger_set_sha256: str
     source_success_set_sha256: str
     descriptors: tuple[SuccessBehaviorDescriptor, ...]
     cells: tuple[QualityDiversityCell, ...]
@@ -463,6 +464,18 @@ class QualityDiversityIndex:
         object.__setattr__(self, "policy_sha256", canonical_policy.fingerprint)
         object.__setattr__(
             self,
+            "event_ledger_set_sha256",
+            canonical_fingerprint(
+                sorted(
+                    {
+                        item.event_ledger_sha256
+                        for item in canonical_descriptors
+                    }
+                )
+            ),
+        )
+        object.__setattr__(
+            self,
             "source_success_set_sha256",
             canonical_fingerprint(
                 [item.to_record() for item in canonical_descriptors]
@@ -482,6 +495,7 @@ class QualityDiversityIndex:
                 "artifact_type",
                 "policy",
                 "policy_sha256",
+                "event_ledger_set_sha256",
                 "source_success_set_sha256",
                 "descriptors",
                 "cells",
@@ -516,6 +530,7 @@ class QualityDiversityIndex:
             "artifact_type": self.artifact_type,
             "policy": self.policy.to_record(),
             "policy_sha256": self.policy_sha256,
+            "event_ledger_set_sha256": self.event_ledger_set_sha256,
             "source_success_set_sha256": self.source_success_set_sha256,
             "descriptors": [item.to_record() for item in self.descriptors],
             "cells": [item.to_record() for item in self.cells],
@@ -527,6 +542,11 @@ class QualityDiversityIndex:
     @property
     def fingerprint(self) -> str:
         return canonical_fingerprint(self.to_record())
+
+    @property
+    def event_ledger_sha256(self) -> str:
+        """Expose the exact ledger-set binding expected by derived-view storage."""
+        return self.event_ledger_set_sha256
 
     @property
     def coverage(self) -> float:

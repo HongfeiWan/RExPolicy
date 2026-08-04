@@ -13,14 +13,22 @@ from rexpolicy.tasking.process_label_view import ProcessLabelView
 from rexpolicy.tasking.process_reward import ProcessRewardShadowView
 from rexpolicy.tasking.reward_view import RewardView
 
+from .quality_diversity import QualityDiversityIndex
+
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _ARTIFACT_DIRECTORIES = {
     "rexpolicy_process_label_view": "process-labels",
     "rexpolicy_process_reward_shadow_view": "process-reward-shadow",
     "rexpolicy_reward_view": "rewards",
+    "rexpolicy_qd_index": "quality-diversity",
 }
 
-DerivedView = Union[ProcessLabelView, ProcessRewardShadowView, RewardView]
+DerivedView = Union[
+    ProcessLabelView,
+    ProcessRewardShadowView,
+    QualityDiversityIndex,
+    RewardView,
+]
 
 
 @dataclass(frozen=True)
