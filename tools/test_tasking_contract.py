@@ -64,7 +64,7 @@ class TestCompiledTaskContract(unittest.TestCase):
 
     def test_goal_hold_must_fit_the_trusted_horizon(self) -> None:
         record = task_record()
-        record["goal"]["hold_steps"] = 65
+        record["goal"]["hold_steps"] = 9
         with self.assertRaisesRegex(ValueError, "episode horizon"):
             compile_task_contract(
                 TaskSpecV2.from_record(record),

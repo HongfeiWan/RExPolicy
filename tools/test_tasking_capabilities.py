@@ -172,6 +172,15 @@ class TestTaskCapabilities(unittest.TestCase):
                 CapabilityCatalog.from_record(capability_record()),
             )
 
+    def test_task_horizon_cannot_exceed_adapter_capability(self) -> None:
+        record = task_record()
+        record["environment"]["episode_control_steps"] = 65
+        with self.assertRaisesRegex(ValueError, "episode horizon"):
+            validate_task_capabilities(
+                TaskSpecV2.from_record(record),
+                CapabilityCatalog.from_record(capability_record()),
+            )
+
     def test_duplicate_metric_and_unknown_schema_are_rejected(self) -> None:
         record = capability_record()
         record["event_schemas"][0]["metrics"].append(

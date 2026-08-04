@@ -190,6 +190,7 @@ class TestTaskRuntime(unittest.TestCase):
     def test_horizon_truncates_after_failure_and_success_checks(self) -> None:
         task = task_record()
         task["goal"]["hold_steps"] = 1
+        task["environment"]["episode_control_steps"] = 1
         capability = capability_record()
         capability["adapters"][0]["max_episode_control_steps"] = 1
         contract, catalog, state = _context(

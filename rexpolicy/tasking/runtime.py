@@ -206,7 +206,7 @@ def _validate_state(
     if (
         type(state.control_step) is not int
         or state.control_step < 0
-        or state.control_step >= contract.max_episode_control_steps
+        or state.control_step >= contract.episode_control_steps
     ):
         raise TaskEvaluationError("Runtime control step is outside the horizon")
     if (
@@ -305,7 +305,7 @@ def evaluate_task_step(
             reward_terms = tuple(term_results)
             status = (
                 TRUNCATED
-                if next_control_step >= contract.max_episode_control_steps
+                if next_control_step >= contract.episode_control_steps
                 else ACTIVE
             )
 

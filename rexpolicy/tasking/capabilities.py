@@ -487,6 +487,8 @@ def validate_task_capabilities(
         raise ValueError("Task selects an unknown environment adapter") from error
     if task.environment.task_mode not in adapter.task_modes:
         raise ValueError("Task mode is not allowed by the environment adapter")
+    if task.environment.episode_control_steps > adapter.max_episode_control_steps:
+        raise ValueError("Task episode horizon exceeds the adapter capability")
     if task.event_schema_id != adapter.event_schema_id:
         raise ValueError("Task EventSchema does not match its adapter")
     if task.process_spec_id not in adapter.process_spec_ids:

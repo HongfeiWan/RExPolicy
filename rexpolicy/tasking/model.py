@@ -168,6 +168,7 @@ class InstructionSplits:
 class EnvironmentSpec:
     adapter_id: str
     task_mode: str
+    episode_control_steps: int
     bindings: Mapping[str, Any]
     parameters: Mapping[str, Any]
     required_assets: tuple[str, ...]
@@ -180,6 +181,7 @@ class EnvironmentSpec:
             required={
                 "adapter_id",
                 "task_mode",
+                "episode_control_steps",
                 "bindings",
                 "parameters",
                 "required_assets",
@@ -200,6 +202,10 @@ class EnvironmentSpec:
         return cls(
             adapter_id=_identifier(record["adapter_id"], f"{path}.adapter_id"),
             task_mode=_identifier(record["task_mode"], f"{path}.task_mode"),
+            episode_control_steps=_positive_int(
+                record["episode_control_steps"],
+                f"{path}.episode_control_steps",
+            ),
             bindings=_json_value(bindings, f"{path}.bindings"),
             parameters=_json_value(parameters, f"{path}.parameters"),
             required_assets=required_assets,
@@ -209,6 +215,7 @@ class EnvironmentSpec:
         return {
             "adapter_id": self.adapter_id,
             "task_mode": self.task_mode,
+            "episode_control_steps": self.episode_control_steps,
             "bindings": thaw_json(self.bindings),
             "parameters": thaw_json(self.parameters),
             "required_assets": list(self.required_assets),

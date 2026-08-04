@@ -220,7 +220,7 @@ class CompiledTaskContract:
     environment_parameters: tuple[tuple[str, Any], ...]
     required_assets: tuple[str, ...]
     action_projection: tuple[tuple[str, tuple[bool, ...]], ...]
-    max_episode_control_steps: int
+    episode_control_steps: int
     goal_hold_steps: int
     goal_program: ExpressionProgram
     goal_program_fingerprint: str
@@ -256,7 +256,7 @@ class CompiledTaskContract:
             "action_projection": {
                 name: list(mask) for name, mask in self.action_projection
             },
-            "max_episode_control_steps": self.max_episode_control_steps,
+            "episode_control_steps": self.episode_control_steps,
             "goal_hold_steps": self.goal_hold_steps,
             "goal_program_fingerprint": self.goal_program_fingerprint,
             "goal_program": self.goal_program.to_record(),
@@ -326,7 +326,7 @@ def compile_task_contract(
     if canonical_task.task_id.startswith("rexpolicy_taskspec_"):
         raise ValueError("Task ID uses a reserved contract namespace")
     if canonical_task.goal.hold_steps > min(
-        adapter.max_episode_control_steps,
+        canonical_task.environment.episode_control_steps,
         policy.max_goal_hold_steps,
     ):
         raise ValueError("Goal hold_steps exceeds the trusted episode horizon")
@@ -440,7 +440,7 @@ def compile_task_contract(
             (name, tuple(mask))
             for name, mask in sorted(canonical_task.action_projection.items())
         ),
-        max_episode_control_steps=adapter.max_episode_control_steps,
+        episode_control_steps=canonical_task.environment.episode_control_steps,
         goal_hold_steps=canonical_task.goal.hold_steps,
         goal_program=goal_program,
         goal_program_fingerprint=goal_program.fingerprint,
@@ -543,7 +543,7 @@ def validate_compiled_task_contract(
         or adapter.event_schema_id != schema.event_schema_id
     ):
         raise ValueError("Compiled task capability fingerprint mismatch")
-    if contract.max_episode_control_steps != adapter.max_episode_control_steps:
+    if not 1 <= contract.episode_control_steps <= adapter.max_episode_control_steps:
         raise ValueError("Compiled task episode horizon mismatch")
     if contract.process_spec_id not in adapter.process_spec_ids:
         raise ValueError("Compiled task process binding mismatch")
@@ -592,7 +592,7 @@ def validate_compiled_task_contract(
         raise ValueError("Compiled required assets mismatch")
     if not 1 <= contract.goal_hold_steps <= min(
         policy.max_goal_hold_steps,
-        contract.max_episode_control_steps,
+        contract.episode_control_steps,
     ):
         raise ValueError("Compiled task goal hold is outside trusted bounds")
     _validate_program_binding(

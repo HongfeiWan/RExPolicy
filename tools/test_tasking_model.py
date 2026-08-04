@@ -53,6 +53,7 @@ def task_record() -> dict:
         "environment": {
             "adapter_id": "groot_newton/reach/v1",
             "task_mode": "reach_green_cap",
+            "episode_control_steps": 8,
             "bindings": {"target": "green_cap"},
             "parameters": {
                 "success_distance_m": 0.04,
