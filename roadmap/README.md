@@ -10,6 +10,13 @@ enter the registry or training until independent runtime and sealed-audit
 evidence, signed activation at a generation boundary, and runtime integration
 gates pass.
 
+An additional, default-off v2 track now implements the first Success Manifold
+MVP: successful-future graph construction, representation learning, a
+state-conditioned mode selector, diagnostic latent projection, Flow-DiT token
+conditioning, and bounded online latent-memory expansion. It is intentionally
+isolated from the v1 learner until a trained bundle is checksum-pinned at
+launch. See [success_manifold_v2.md](success_manifold_v2.md).
+
 ## Phase 0 — migrated baseline
 
 Status: **complete**.
@@ -115,6 +122,28 @@ Pending operational gates:
 
 See [automatic_task_authoring.md](automatic_task_authoring.md) for the exact
 safety boundary and execution contract.
+
+## RExPolicy v2 — Success Manifold Guided Flow-DiT
+
+Status: **MVP phases 1–5 implemented behind strict opt-in flags; corpus-scale
+training and node3 acceptance remain runtime gates**.
+
+- compile multiple verified terminal paths into metadata-only
+  SuccessExperience graphs and fixed-offset future windows;
+- train a Transformer future encoder with masked reconstruction,
+  multi-positive InfoNCE, variance, and covariance objectives;
+- train a Gaussian state-to-success-mode selector and export a checksum-pinned
+  frozen runtime bundle;
+- inspect the learned geometry with deterministic PCA or optional UMAP/t-SNE,
+  explicitly marked diagnostic-only;
+- append one projected success token to Flow-DiT context and preserve mixed
+  historical v1 samples;
+- sample selector and bounded-memory modes online, admit only simulator-verified
+  successful modes, and checkpoint per-rank memory state.
+
+Diversity/progress reward shaping and successor representation are deferred
+until the representation and selector pass held-out real-corpus gates. This is
+an explicit staging boundary, not an implicit activation of new rewards.
 
 ## Final system
 

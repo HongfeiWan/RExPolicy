@@ -7,6 +7,12 @@ the same simulator state, and updates Flow-DiT from simulator-selected
 experience. It does not require PPO, GAE, a critic, a state-policy teacher, or
 new human demonstrations.
 
+RExPolicy v2 adds an opt-in Success Manifold path to that flywheel. It derives
+future windows from simulator-verified successes, learns a compact family of
+successful futures, samples a reachable success mode from the current state,
+and conditions the existing Flow-DiT with one success token. The v1 path is
+unchanged when the feature flags are absent.
+
 The repository also contains a fail-closed TaskSpec v2 control plane: sealed
 task and process contracts, reward-free Event Ledgers and rebuildable views,
 sandboxed provider-attested automatic authoring to static quarantine, signed
@@ -32,6 +38,11 @@ The repository contains:
   unequal rank-local sample counts and 100% current-generation sample coverage;
 - an append-only, metadata-only Success Archive with deterministic
   cross-generation round-robin replay;
+- metadata-only SuccessExperience graphs whose future windows are rebuilt from
+  fingerprint-bound Event Ledgers instead of storing observations or actions;
+- an optional Success Manifold encoder, state-conditioned mode selector,
+  bounded successful-latent memory, and checksum-pinned deployment bundle;
+- optional Flow-DiT success-token conditioning with mixed v1/v2 batch support;
 - an explicit quality-balanced archive planning path, bound to immutable
   behavior descriptors and external replay state, which is not yet wired into
   the Phase 1 trainer checkpoint;
@@ -53,7 +64,9 @@ contract](roadmap/minimum_flywheel.md), the [DDP operations
 guide](roadmap/bootstrap_ddp.md), and the preserved [final flywheel
 design](roadmap/final_flywheel.md). The production-safe authoring boundary and
 remaining activation gates are documented in [automatic task
-authoring](roadmap/automatic_task_authoring.md).
+authoring](roadmap/automatic_task_authoring.md). The v2 architecture, rollout
+flags, staged training contract, and deliberately deferred work are documented
+in [Success Manifold v2](roadmap/success_manifold_v2.md).
 
 ## Environment
 
@@ -128,7 +141,9 @@ rexpolicy/
   envs/                 Newton batched environments and task contracts
   flywheel/             Collection, replay, FP32/DDP training, evaluation, ops
   ik/                   Host and Newton IK/action helpers
+  manifold/             Optional success representation, selector, and runtime
   policies/             GR00T action representation contract
+  replay/               Metadata-only successful-future graph views
   robots/               Newton robot runtime
   tasking/              TaskSpec, reward/process views, authoring, lifecycle
   retargeting/          Linker L10 hand configuration
