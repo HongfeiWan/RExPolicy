@@ -34,6 +34,7 @@ class CachedCondition:
     image_mask: Any | None
     state: Any
     embodiment_id: int
+    success_latent: Any | None = None
     success_latent_token: Any | None = None
 
 
@@ -43,6 +44,8 @@ class PolicyBatch:
 
     decoded_action: dict[str, np.ndarray]
     conditions: list[CachedCondition]
+    success_latents: Any | None = None
+    latent_sources: tuple[str, ...] = ()
 
 
 def _processor_path(model_path: Path) -> Path:
@@ -378,6 +381,8 @@ class GrootFlowDitPolicy:
         self,
         conditions: list[CachedCondition],
         tokens: Any,
+        *,
+        latents: Any | None = None,
     ) -> list[CachedCondition]:
         """Attach pre-projected manifold tokens without changing VLM output."""
         if not self.success_conditioning_enabled:
@@ -394,8 +399,32 @@ class GrootFlowDitPolicy:
             )
         if not bool(self.torch.isfinite(tensor).all()):
             raise ValueError("Success latent tokens must be finite")
+        latent_tensor = None
+        if latents is not None:
+            latent_tensor = (
+                self.torch.as_tensor(latents)
+                .detach()
+                .to("cpu", self.torch.float32)
+            )
+            if latent_tensor.ndim != 2 or int(latent_tensor.shape[0]) != len(
+                conditions
+            ):
+                raise ValueError(
+                    "Success latents must have shape "
+                    "[number_of_conditions, latent_dim]"
+                )
+            if not bool(self.torch.isfinite(latent_tensor).all()):
+                raise ValueError("Success latents must be finite")
         return [
-            replace(condition, success_latent_token=tensor[index].clone())
+            replace(
+                condition,
+                success_latent=(
+                    None
+                    if latent_tensor is None
+                    else latent_tensor[index].clone()
+                ),
+                success_latent_token=tensor[index].clone(),
+            )
             for index, condition in enumerate(conditions)
         ]
 
@@ -444,6 +473,20 @@ class GrootFlowDitPolicy:
         conditions = self.encode_conditions(observations)
         return self.sample_from_conditions(
             conditions=conditions,
+            observations=observations,
+        )
+
+    def sample_with_success_latent_tokens(
+        self,
+        *,
+        observations: list[RawPolicyObservation],
+        tokens: Any,
+    ) -> PolicyBatch:
+        """Encode once, attach selector-produced tokens, and sample actions."""
+        conditions = self.encode_conditions(observations)
+        conditioned = self.attach_success_latent_tokens(conditions, tokens)
+        return self.sample_from_conditions(
+            conditions=conditioned,
             observations=observations,
         )
 
@@ -525,6 +568,7 @@ class GrootFlowDitPolicy:
             action=action,
             action_mask=action_mask,
             valid_steps=valid_steps,
+            success_latent=condition.success_latent,
             success_latent_token=condition.success_latent_token,
         )
         if sample_metadata:

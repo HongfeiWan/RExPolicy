@@ -13,7 +13,7 @@ import subprocess
 import sys
 import time
 import uuid
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +29,7 @@ from rexpolicy.flywheel.checkpoint import (
     restore_rng_state,
 )
 from rexpolicy.flywheel.distributed import DistributedContext
+from rexpolicy.flywheel.derived_views import write_derived_view
 from rexpolicy.flywheel.evaluation import (
     TRAIN_RESET_SEED_DOMAIN,
     HeldOutEpisodeResult,
@@ -95,6 +96,12 @@ from rexpolicy.flywheel.task_shadow import (
     require_identical_root_rows,
 )
 from rexpolicy.flywheel.trainer import DitDdpTrainer, UpdateMetrics
+from rexpolicy.manifold.runtime import SuccessManifoldRuntime
+from rexpolicy.replay.success_graph import (
+    FutureWindowPolicy,
+    SuccessExperienceGraph,
+    compile_success_experience_graph,
+)
 from rexpolicy.tasking.canonical import canonical_fingerprint
 from rexpolicy.tasking.event_ledger import (
     CollectionProvenance,
@@ -146,6 +153,17 @@ def create_parser() -> argparse.ArgumentParser:
         default=_environment_path("GROOT_VLM_MODEL", DEFAULT_VLM),
     )
     parser.add_argument("--dit-overlay", type=Path)
+    parser.add_argument("--success-manifold-bundle", type=Path)
+    parser.add_argument("--expected-success-manifold-bundle-sha256")
+    parser.add_argument(
+        "--manifold-memory-candidates",
+        type=int,
+        default=0,
+        help=(
+            "Maximum same-state worlds conditioned from discovered latent "
+            "memory; remaining worlds sample the state-conditioned selector."
+        ),
+    )
     parser.add_argument("--run-dir", "--output-dir", dest="run_dir", type=Path)
     parser.add_argument("--task-id", default=REACH_GREEN_CAP_V1.task_id)
     parser.add_argument("--instruction")
@@ -200,6 +218,15 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument("--parameter-probe-size", type=int, default=65_536)
     parser.add_argument("--parameter-sync-tolerance", type=float, default=0.0)
     parser.add_argument("--success-replay-per-rank", type=int, default=4)
+    parser.add_argument(
+        "--success-experience-graph",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Publish rebuildable future-window graphs for successful episodes.",
+    )
+    parser.add_argument("--success-future-horizon", type=int, default=8)
+    parser.add_argument("--success-action-horizon", type=int, default=2)
+    parser.add_argument("--success-window-stride", type=int, default=1)
     parser.add_argument("--seed", type=int, default=20260722)
 
     parser.add_argument(
@@ -323,6 +350,42 @@ def _validate_args(
         raise ValueError("parameter-sync-tolerance cannot be negative")
     if args.success_replay_per_rank < 0:
         raise ValueError("success-replay-per-rank cannot be negative")
+    if min(
+        args.success_future_horizon,
+        args.success_action_horizon,
+        args.success_window_stride,
+    ) < 1:
+        raise ValueError("Success graph horizons and stride must be positive")
+    if args.success_action_horizon > args.success_future_horizon:
+        raise ValueError(
+            "success-action-horizon cannot exceed success-future-horizon"
+        )
+    has_manifold = args.success_manifold_bundle is not None
+    has_manifold_hash = (
+        args.expected_success_manifold_bundle_sha256 is not None
+    )
+    if has_manifold != has_manifold_hash:
+        raise ValueError(
+            "--success-manifold-bundle and its expected SHA-256 are required together"
+        )
+    if has_manifold_hash and (
+        len(args.expected_success_manifold_bundle_sha256) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in args.expected_success_manifold_bundle_sha256
+        )
+    ):
+        raise ValueError(
+            "expected-success-manifold-bundle-sha256 must be lowercase SHA-256"
+        )
+    if not 0 <= args.manifold_memory_candidates <= args.candidates_per_state:
+        raise ValueError(
+            "manifold-memory-candidates must be between zero and candidates-per-state"
+        )
+    if not has_manifold and args.manifold_memory_candidates:
+        raise ValueError(
+            "manifold-memory-candidates requires a success-manifold bundle"
+        )
     if args.checkpoint_every < 1:
         raise ValueError("checkpoint-every must be positive")
     if args.eval_every < 0:
@@ -354,6 +417,19 @@ def _validate_artifacts(args: argparse.Namespace) -> None:
         args.policy_checkpoint.expanduser().resolve(),
         args.vlm_model.expanduser().resolve(),
     )
+    if args.success_manifold_bundle is not None:
+        bundle = args.success_manifold_bundle.expanduser().resolve()
+        if not bundle.is_file():
+            raise FileNotFoundError(
+                f"Success-manifold bundle is missing: {bundle}"
+            )
+        actual = file_sha256(bundle)
+        if actual != args.expected_success_manifold_bundle_sha256:
+            raise ValueError(
+                "Success-manifold bundle checksum mismatch: "
+                f"expected={args.expected_success_manifold_bundle_sha256}, "
+                f"actual={actual}"
+            )
 
 
 def _raw_observations(
@@ -567,6 +643,33 @@ def _normalized_action_diversity(
     return float(np.mean(pairwise_rms)), max(pairwise_rms)
 
 
+def _sample_policy_batch(
+    *,
+    policy: GrootFlowDitPolicy,
+    observations: list[RawPolicyObservation],
+    manifold: SuccessManifoldRuntime | None,
+    memory_candidates: int,
+):
+    """Keep v1 sampling exact or add selector/memory latents in v2."""
+    if manifold is None:
+        return policy.sample(observations)
+    conditions = policy.encode_conditions(observations)
+    conditioned = manifold.condition(
+        policy=policy,
+        conditions=conditions,
+        memory_candidates=memory_candidates,
+    )
+    sampled = policy.sample_from_conditions(
+        conditions=list(conditioned.conditions),
+        observations=observations,
+    )
+    return replace(
+        sampled,
+        success_latents=conditioned.latents,
+        latent_sources=conditioned.sources,
+    )
+
+
 def _collect_episode(
     *,
     args: argparse.Namespace,
@@ -580,6 +683,7 @@ def _collect_episode(
     task_artifacts: TaskArtifacts,
     runtime_binding: RuntimeTaskBinding,
     observation_contract_sha256: str,
+    manifold: SuccessManifoldRuntime | None,
 ) -> CollectedEpisode:
     """Build one root path while retaining all selected branch chunks."""
     import torch
@@ -696,7 +800,12 @@ def _collect_episode(
             current_metrics=root_metrics,
         )
         raw = _raw_observations(observation, instruction=task.instruction)
-        sampled = policy.sample(raw)
+        sampled = _sample_policy_batch(
+            policy=policy,
+            observations=raw,
+            manifold=manifold,
+            memory_candidates=args.manifold_memory_candidates,
+        )
         decoded = sampled.decoded_action
         horizon = min(
             args.execution_horizon,
@@ -1026,6 +1135,34 @@ def _collect_episode(
                 candidate["sample_id"],
                 candidate.get("success_roles", []),
             )
+    if manifold is not None and episode.success_samples:
+        missing_latents = [
+            sample.sample_id
+            for sample in episode.success_samples
+            if sample.success_latent is None
+        ]
+        if missing_latents:
+            raise RuntimeError(
+                "Success-conditioned samples lost their latent provenance: "
+                + ", ".join(missing_latents)
+            )
+        manifold.record_successes(
+            sample_ids=[sample.sample_id for sample in episode.success_samples],
+            latents=torch.stack(
+                [sample.success_latent for sample in episode.success_samples]
+            ),
+            metadata=[
+                {
+                    "generation": sample.generation,
+                    "rank": sample.rank,
+                    "episode": sample.episode,
+                    "decision": sample.decision,
+                    "world": sample.world,
+                    "task_id": sample.task_id,
+                }
+                for sample in episode.success_samples
+            ],
+        )
     return CollectedEpisode(
         experience=episode,
         event_ledger=ledger_builder.finish(),
@@ -1044,6 +1181,7 @@ def _collect_generation(
     task_artifacts: TaskArtifacts,
     runtime_binding: RuntimeTaskBinding,
     observation_contract_sha256: str,
+    manifold: SuccessManifoldRuntime | None,
 ) -> list[CollectedEpisode]:
     return [
         _collect_episode(
@@ -1058,6 +1196,7 @@ def _collect_generation(
             task_artifacts=task_artifacts,
             runtime_binding=runtime_binding,
             observation_contract_sha256=observation_contract_sha256,
+            manifold=manifold,
         )
         for episode_index in range(args.episodes_per_generation)
     ]
@@ -1071,7 +1210,12 @@ def _write_generation_archive(
     rank: int,
     episodes: list[EpisodeExperience],
     event_ledgers: list[EpisodeEventLedger],
-) -> tuple[PairedArchiveWrite, list[SuccessReference]]:
+    window_policy: FutureWindowPolicy | None = None,
+) -> tuple[
+    PairedArchiveWrite,
+    list[SuccessReference],
+    list[SuccessExperienceGraph],
+]:
     pair = write_generation_archive_pair(
         run_dir=run_dir,
         attempt_id=attempt_id,
@@ -1081,18 +1225,39 @@ def _write_generation_archive(
         event_ledgers=event_ledgers,
     )
     references = []
+    references_by_episode: dict[int, list[SuccessReference]] = {}
     for record_index, episode in enumerate(episodes):
         for sample in episode.success_samples:
-            references.append(
-                SuccessReference.from_sample(
-                    sample,
-                    episode_path=pair.episode_path,
-                    episode_sha256=pair.episode_sha256,
-                    episode_record_index=record_index,
-                    simulator_fingerprint=episode.simulator_fingerprint,
-                )
+            reference = SuccessReference.from_sample(
+                sample,
+                episode_path=pair.episode_path,
+                episode_sha256=pair.episode_sha256,
+                episode_record_index=record_index,
+                simulator_fingerprint=episode.simulator_fingerprint,
             )
-    return pair, references
+            references.append(reference)
+            references_by_episode.setdefault(record_index, []).append(reference)
+
+    graphs = []
+    if window_policy is not None:
+        for record_index, (episode, event_ledger) in enumerate(
+            zip(episodes, event_ledgers)
+        ):
+            episode_references = references_by_episode.get(record_index, [])
+            if not episode.success:
+                if episode_references:
+                    raise RuntimeError(
+                        "Unsuccessful episode unexpectedly produced success references"
+                    )
+                continue
+            graph = compile_success_experience_graph(
+                episode_record=episode.archive_record(),
+                event_ledger=event_ledger,
+                success_references=episode_references,
+                window_policy=window_policy,
+            )
+            graphs.append(graph)
+    return pair, references, graphs
 
 
 def _materialize_historical_samples(
@@ -1335,6 +1500,7 @@ def _evaluate_held_out(
     policy: GrootFlowDitPolicy,
     task: FlywheelTaskSpec,
     generation: int,
+    manifold: SuccessManifoldRuntime | None,
 ) -> HeldOutMetrics:
     """Run the fixed paired suite with exactly one action sample per state."""
     import torch
@@ -1364,7 +1530,12 @@ def _evaluate_held_out(
                     observation,
                     instruction=task.instruction,
                 )
-                sampled = policy.sample(raw)
+                sampled = _sample_policy_batch(
+                    policy=policy,
+                    observations=raw,
+                    manifold=manifold,
+                    memory_candidates=0,
+                )
                 decoded = sampled.decoded_action
                 horizon = min(
                     args.execution_horizon,
@@ -1650,7 +1821,7 @@ def _newton_source_root() -> Path:
 def _artifact_descriptor(args: argparse.Namespace) -> dict[str, Any]:
     checkpoint = args.policy_checkpoint.expanduser().resolve()
     vlm = args.vlm_model.expanduser().resolve()
-    return {
+    descriptor = {
         "policy_directory": _directory_descriptors(checkpoint),
         "vlm_directory": _directory_descriptors(vlm),
         "initial_dit_overlay": (
@@ -1667,6 +1838,11 @@ def _artifact_descriptor(args: argparse.Namespace) -> dict[str, Any]:
         },
         "simulator_assets": _asset_descriptors(args),
     }
+    if args.success_manifold_bundle is not None:
+        descriptor["success_manifold_bundle"] = _file_descriptor(
+            args.success_manifold_bundle
+        )
+    return descriptor
 
 
 def _git_commit() -> str:
@@ -1695,7 +1871,7 @@ def _build_run_manifest(
     evaluation_hash = hashlib.sha256(
         json.dumps(evaluation_suite, separators=(",", ":")).encode()
     ).hexdigest()
-    return {
+    manifest = {
         "schema_version": 1,
         "code_commit": _git_commit(),
         "world_size": context.world_size,
@@ -1785,6 +1961,29 @@ def _build_run_manifest(
             "gpu_monitor_interval_seconds": args.gpu_monitor_seconds,
         },
     }
+    if args.success_manifold_bundle is not None:
+        manifest["success_manifold"] = {
+            "schema_version": 1,
+            "mode": "selector_with_bounded_latent_memory",
+            "bundle_sha256": (
+                args.expected_success_manifold_bundle_sha256
+            ),
+            "memory_candidates_per_state": args.manifold_memory_candidates,
+            "oracle_authority": "none",
+        }
+    if args.success_experience_graph:
+        policy = FutureWindowPolicy(
+            action_horizon=args.success_action_horizon,
+            future_horizon=args.success_future_horizon,
+            stride=args.success_window_stride,
+        )
+        manifest["success_experience_graph"] = {
+            "schema_version": 1,
+            "mode": "derived_metadata_only",
+            "window_policy": policy.to_record(),
+            "window_policy_sha256": policy.fingerprint,
+        }
+    return manifest
 
 
 def _simulator_fingerprint(
@@ -2081,6 +2280,7 @@ def _checkpoint(
     policy: GrootFlowDitPolicy,
     trainer: DitDdpTrainer,
     archive: SuccessArchive,
+    manifold: SuccessManifoldRuntime | None,
     generation: int,
     manifest: dict[str, Any],
     last_good: HeldOutMetrics | None,
@@ -2103,7 +2303,14 @@ def _checkpoint(
         global_optimizer_step=trainer.global_optimizer_step,
         run_manifest=manifest,
         replay_cursor=archive.cursor,
-        extra_rank_state={"success_archive": archive.state_dict()},
+        extra_rank_state={
+            "success_archive": archive.state_dict(),
+            **(
+                {"success_manifold": manifold.state_dict()}
+                if manifold is not None
+                else {}
+            ),
+        },
         extra_state=extra_state,
         cuda_device=context.device,
         update_latest=accepted,
@@ -2256,8 +2463,25 @@ def main() -> None:
             vlm_model=args.vlm_model,
             device=context.device,
             dit_overlay=args.dit_overlay,
+            enable_success_conditioning=(
+                args.success_manifold_bundle is not None
+            ),
         )
         policy.assert_precision_contract()
+        manifold = None
+        if args.success_manifold_bundle is not None:
+            manifold = SuccessManifoldRuntime.load(
+                args.success_manifold_bundle,
+                expected_sha256=(
+                    args.expected_success_manifold_bundle_sha256
+                ),
+                device=context.device,
+            )
+            if manifold.config.condition_dim != policy.success_token_dimension:
+                raise ValueError(
+                    "Success-manifold condition_dim does not match frozen "
+                    "GR00T backbone width"
+                )
         trainer = DitDdpTrainer(
             action_head=policy.action_head,
             context=context,
@@ -2306,6 +2530,13 @@ def main() -> None:
                 attempt_id=attempt_id,
                 state=archive_state,
             )
+            if manifold is not None:
+                manifold_state = resume.rank_state.get("success_manifold")
+                if manifold_state is None:
+                    raise RuntimeError(
+                        "Checkpoint is missing Success Manifold runtime state"
+                    )
+                manifold.load_state_dict(manifold_state)
             if resume.replay_cursor != archive.cursor:
                 raise RuntimeError(
                     "Checkpoint replay cursor disagrees with Success Archive "
@@ -2347,6 +2578,7 @@ def main() -> None:
                     policy=policy,
                     task=task,
                     generation=0,
+                    manifold=manifold,
                 )
                 operations.metric("held_out_evaluation", **last_good.to_record())
             if args.save:
@@ -2357,6 +2589,7 @@ def main() -> None:
                     policy=policy,
                     trainer=trainer,
                     archive=archive,
+                    manifold=manifold,
                     generation=0,
                     manifest=manifest,
                     last_good=last_good,
@@ -2445,18 +2678,32 @@ def main() -> None:
                 task_artifacts=task_artifacts,
                 runtime_binding=runtime_binding,
                 observation_contract_sha256=observation_contract_sha256,
+                manifold=manifold,
             )
             episodes = [item.experience for item in collected_episodes]
             event_ledgers = [item.event_ledger for item in collected_episodes]
             collect_seconds = time.perf_counter() - collect_started
             archive_started = time.perf_counter()
-            archive_pair, success_references = _write_generation_archive(
+            (
+                archive_pair,
+                success_references,
+                success_graphs,
+            ) = _write_generation_archive(
                 run_dir=run_dir,
                 attempt_id=attempt_id,
                 generation=generation,
                 rank=context.rank,
                 episodes=episodes,
                 event_ledgers=event_ledgers,
+                window_policy=(
+                    FutureWindowPolicy(
+                        action_horizon=args.success_action_horizon,
+                        future_horizon=args.success_future_horizon,
+                        stride=args.success_window_stride,
+                    )
+                    if args.success_experience_graph
+                    else None
+                ),
             )
             pending_success_shard = archive.write_generation(
                 generation=generation,
@@ -2490,6 +2737,10 @@ def main() -> None:
             archive_commit_started = time.perf_counter()
             if pending_success_shard is not None:
                 archive.commit_shard(pending_success_shard)
+            success_graph_writes = [
+                write_derived_view(run_dir=run_dir, view=graph)
+                for graph in success_graphs
+            ]
             archive_commit_seconds = (
                 time.perf_counter() - archive_commit_started
             )
@@ -2519,6 +2770,9 @@ def main() -> None:
                 episode_archive=archive_pair.episode_path,
                 event_archive=archive_pair.event_path,
                 archive_pair_descriptor=archive_pair.pair_descriptor_path,
+                success_experience_graphs=[
+                    item.relative_path for item in success_graph_writes
+                ],
                 historical_replay_samples=len(historical_samples),
                 **metrics,
             )
@@ -2556,6 +2810,7 @@ def main() -> None:
                     policy=policy,
                     task=task,
                     generation=generation,
+                    manifold=manifold,
                 )
                 operations.metric(
                     "held_out_evaluation",
@@ -2609,6 +2864,7 @@ def main() -> None:
                     policy=policy,
                     trainer=trainer,
                     archive=archive,
+                    manifold=manifold,
                     generation=generation,
                     manifest=manifest,
                     last_good=last_good,

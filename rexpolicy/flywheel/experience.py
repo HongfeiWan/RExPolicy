@@ -89,6 +89,7 @@ class TrainingSample:
     reward_profile_id: str = "unknown"
     source: str = "current"
     success_roles: tuple[str, ...] = ()
+    success_latent: Any | None = None
     success_latent_token: Any | None = None
 
     @property
