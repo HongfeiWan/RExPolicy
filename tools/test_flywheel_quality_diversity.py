@@ -73,6 +73,7 @@ def _descriptor(
             "sample_id": f"sample/{name}",
             "success_reference_sha256": _hash(f"reference:{name}"),
             "event_ledger_sha256": _hash(f"event-ledger:{name}"),
+            "compilation_policy_sha256": _hash("reach-qd-compiler/v1"),
             "task_id": "reach_green_cap/v3",
             "task_oracle_sha256": _hash("reach-oracle/v3"),
             "reward_profile_id": reward,

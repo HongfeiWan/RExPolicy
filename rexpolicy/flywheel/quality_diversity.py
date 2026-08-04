@@ -214,6 +214,7 @@ class SuccessBehaviorDescriptor:
     sample_id: str
     success_reference_sha256: str
     event_ledger_sha256: str
+    compilation_policy_sha256: str
     task_id: str
     task_oracle_sha256: str
     reward_profile_id: str
@@ -233,6 +234,7 @@ class SuccessBehaviorDescriptor:
                 "sample_id",
                 "success_reference_sha256",
                 "event_ledger_sha256",
+                "compilation_policy_sha256",
                 "task_id",
                 "task_oracle_sha256",
                 "reward_profile_id",
@@ -254,6 +256,10 @@ class SuccessBehaviorDescriptor:
             event_ledger_sha256=_sha256(
                 record["event_ledger_sha256"],
                 f"{path}.event_ledger_sha256",
+            ),
+            compilation_policy_sha256=_sha256(
+                record["compilation_policy_sha256"],
+                f"{path}.compilation_policy_sha256",
             ),
             task_id=_identifier(record["task_id"], f"{path}.task_id"),
             task_oracle_sha256=_sha256(
@@ -300,6 +306,7 @@ class SuccessBehaviorDescriptor:
         _sha256(self.success_reference_sha256, "success_reference_sha256")
         for name, value in (
             ("event_ledger_sha256", self.event_ledger_sha256),
+            ("compilation_policy_sha256", self.compilation_policy_sha256),
             ("task_oracle_sha256", self.task_oracle_sha256),
             ("reward_profile_sha256", self.reward_profile_sha256),
             ("initial_state_group_sha256", self.initial_state_group_sha256),
@@ -320,6 +327,7 @@ class SuccessBehaviorDescriptor:
             "sample_id": self.sample_id,
             "success_reference_sha256": self.success_reference_sha256,
             "event_ledger_sha256": self.event_ledger_sha256,
+            "compilation_policy_sha256": self.compilation_policy_sha256,
             "task_id": self.task_id,
             "task_oracle_sha256": self.task_oracle_sha256,
             "reward_profile_id": self.reward_profile_id,
