@@ -43,8 +43,13 @@ from rexpolicy.flywheel.experience import (
     ChunkCandidate,
     EpisodeExperience,
     TrainingSample,
+    format_sample_id,
     select_advantage_chunks,
     validate_candidate_archive_record,
+)
+from rexpolicy.flywheel.event_ledger import (
+    EpisodeEventLedgerBuilder,
+    production_ledger_bindings,
 )
 from rexpolicy.flywheel.groot_policy import (
     GrootFlowDitPolicy,
@@ -57,7 +62,13 @@ from rexpolicy.flywheel.operations import (
 )
 from rexpolicy.flywheel.replay import (
     CandidateReplayResult,
+    fingerprint_each_world,
     validate_replay_fingerprint,
+)
+from rexpolicy.flywheel.paired_archive import (
+    CollectedEpisode,
+    PairedArchiveWrite,
+    write_generation_archive_pair,
 )
 from rexpolicy.flywheel.success_archive import (
     SuccessArchive,
@@ -69,7 +80,26 @@ from rexpolicy.flywheel.task_spec import (
     FlywheelTaskSpec,
     get_task_spec,
 )
+from rexpolicy.flywheel.task_runtime_adapter import (
+    RuntimeTaskBinding,
+    load_production_reach_runtime_binding,
+)
+from rexpolicy.flywheel.task_shadow import (
+    begin_shadow_decision,
+    compare_groot_step_parity,
+    evaluate_shadow_transition,
+    extract_groot_reach_metric_rows,
+    require_identical_root_rows,
+)
 from rexpolicy.flywheel.trainer import DitDdpTrainer, UpdateMetrics
+from rexpolicy.tasking.canonical import canonical_fingerprint
+from rexpolicy.tasking.event_ledger import (
+    CollectionProvenance,
+    EpisodeEventLedger,
+    ResetRecipe,
+)
+from rexpolicy.tasking.repository import TaskArtifacts
+from rexpolicy.tasking.runtime import initial_runtime_state
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 REACH_BOTTLE_DISPLACEMENT_LIMIT_M = 0.010
@@ -523,7 +553,10 @@ def _collect_episode(
     generation: int,
     episode_index: int,
     simulator_fingerprint: str,
-) -> EpisodeExperience:
+    task_artifacts: TaskArtifacts,
+    runtime_binding: RuntimeTaskBinding,
+    observation_contract_sha256: str,
+) -> CollectedEpisode:
     """Build one root path while retaining all selected branch chunks."""
     import torch
 
@@ -557,6 +590,36 @@ def _collect_episode(
     selected_success = False
     episode_done = False
     decision_index = 0
+    event_schema = task_artifacts.capabilities.event_schemas[0]
+    task_state = initial_runtime_state(
+        task_artifacts.contract,
+        reward_profile_id=runtime_binding.reward_profile_id,
+        catalog=task_artifacts.capabilities,
+    )
+    ledger_builder = EpisodeEventLedgerBuilder(
+        bindings=production_ledger_bindings(
+            task_contract_id=task_artifacts.contract.task_contract_id,
+            task_contract_sha256=task_artifacts.contract.fingerprint,
+            observation_contract_sha256=observation_contract_sha256,
+            event_schema=event_schema,
+        ),
+        collection=CollectionProvenance.from_record(
+            {
+                "data_generation": generation,
+                "sampling_policy_generation": generation - 1,
+                "rank": context.rank,
+                "episode": episode_index,
+                "instruction_variant_id": "reach_green_cap/train_00000/v2",
+            }
+        ),
+        reset_recipe=ResetRecipe.from_record(
+            {
+                "environment_adapter_id": task_artifacts.contract.adapter_id,
+                "seed": reset_seed,
+            }
+        ),
+        event_schema=event_schema,
+    )
 
     while len(root_actions) < args.episode_control_steps and not episode_done:
         if decision_index > 0:
@@ -574,6 +637,28 @@ def _collect_episode(
             env.replay_fingerprint_torch(),
             world_count=env.num_envs,
             float_tolerance=args.same_state_tolerance,
+        )
+        dynamics_fingerprint = validate_replay_fingerprint(
+            env.dynamics_fingerprint_torch(),
+            world_count=env.num_envs,
+            float_tolerance=args.same_state_tolerance,
+        )
+        root_evaluation = env.evaluate()
+        root_metric_rows = extract_groot_reach_metric_rows(
+            root_evaluation,
+            event_schema=event_schema,
+        )
+        root_metrics = require_identical_root_rows(root_metric_rows)
+        shadow_branch = begin_shadow_decision(
+            root_state=task_state,
+            root_source=root_evaluation,
+            event_schema=event_schema,
+        )
+        ledger_builder.open_decision(
+            decision_index=decision_index,
+            root_control_step=len(root_actions),
+            dynamics_digest_sha256=dynamics_fingerprint.digest,
+            current_metrics=root_metrics,
         )
         raw = _raw_observations(observation, instruction=task.instruction)
         sampled = policy.sample(raw)
@@ -639,6 +724,22 @@ def _collect_episode(
                 .cpu()
                 .tolist()
             )
+            success_step = info["success"].detach().cpu().tolist()
+            terminated_step = terminated.detach().cpu().tolist()
+            truncated_step = truncated.detach().cpu().tolist()
+            post_dynamics_digests = fingerprint_each_world(
+                env.dynamics_fingerprint_torch(),
+                world_count=env.num_envs,
+                float_tolerance=args.same_state_tolerance,
+            )
+            shadow_batch = evaluate_shadow_transition(
+                shadow_branch,
+                transition_source=info,
+                active_before=tuple(bool(value) for value in active_cpu),
+                contract=task_artifacts.contract,
+                catalog=task_artifacts.capabilities,
+            )
+            shadow_branch = shadow_batch.next_branch
             chunk_scores.add_(reward * active_before)
             for world, was_active in enumerate(active_cpu):
                 branch_outcomes[world].observe(
@@ -648,6 +749,34 @@ def _collect_episode(
                     displacement_violation=bool(displacement_step[world]),
                 )
                 if was_active:
+                    shadow_result = shadow_batch.results[world]
+                    if shadow_result is None:
+                        raise RuntimeError("Active world has no TaskSpec shadow result")
+                    parity = compare_groot_step_parity(
+                        shadow_result,
+                        environment_reward=float(reward_values[world]),
+                        environment_success=bool(success_step[world]),
+                        environment_failure=bool(failure_step[world]),
+                        environment_terminated=bool(terminated_step[world]),
+                        environment_truncated=bool(truncated_step[world]),
+                    )
+                    if not parity.accepted:
+                        raise RuntimeError(
+                            "TaskSpec v2 shadow mismatch for world "
+                            f"{world}: {', '.join(parity.mismatches)}"
+                        )
+                    ledger_builder.append_transition(
+                        decision_index=decision_index,
+                        world=world,
+                        branch_step=valid_steps[world],
+                        effective_action_19d=executed[world],
+                        post_dynamics_digest_sha256=(
+                            post_dynamics_digests[world]
+                        ),
+                        current_metrics=shadow_batch.current_rows[world],
+                        terminated=bool(terminated_step[world]),
+                        truncated=bool(truncated_step[world]),
+                    )
                     valid_steps[world] += 1
                     chunk_rewards[world].append(float(reward_values[world]))
                     executed_steps[world].append(executed[world])
@@ -708,6 +837,18 @@ def _collect_episode(
                     "source": "current",
                 },
             )
+            expected_sample_id = format_sample_id(
+                generation,
+                context.rank,
+                episode_index,
+                decision_index,
+                world,
+            )
+            if training_sample.sample_id != expected_sample_id:
+                raise RuntimeError(
+                    "Training/Event Ledger sample identity mismatch: "
+                    f"{training_sample.sample_id!r} != {expected_sample_id!r}"
+                )
             if bool(success_values[world]):
                 training_sample.add_success_role(DIRECT_SUCCESS_ROLE)
             failure_reasons = []
@@ -748,6 +889,12 @@ def _collect_episode(
         diversity_mean, diversity_max = _normalized_action_diversity(candidates)
         selected_samples.extend(candidate.sample for candidate in selection.selected)
         continuation = selection.continuation
+        ledger_builder.close_decision(
+            decision_index=decision_index,
+            root_continuation_sample_id=(
+                None if continuation is None else continuation.sample.sample_id
+            ),
+        )
         if continuation is None:
             decisions.append(
                 {
@@ -773,6 +920,7 @@ def _collect_episode(
             episode_done = True
             decision_index += 1
             continue
+        task_state = shadow_branch.world_states[continuation.world]
         path_samples.append(continuation.sample)
         selected_return += continuation.score
         root_rewards.extend(continuation.rewards)
@@ -851,7 +999,10 @@ def _collect_episode(
                 candidate["sample_id"],
                 candidate.get("success_roles", []),
             )
-    return episode
+    return CollectedEpisode(
+        experience=episode,
+        event_ledger=ledger_builder.finish(),
+    )
 
 
 def _collect_generation(
@@ -863,7 +1014,10 @@ def _collect_generation(
     task: FlywheelTaskSpec,
     generation: int,
     simulator_fingerprint: str,
-) -> list[EpisodeExperience]:
+    task_artifacts: TaskArtifacts,
+    runtime_binding: RuntimeTaskBinding,
+    observation_contract_sha256: str,
+) -> list[CollectedEpisode]:
     return [
         _collect_episode(
             args=args,
@@ -874,30 +1028,12 @@ def _collect_generation(
             generation=generation,
             episode_index=episode_index,
             simulator_fingerprint=simulator_fingerprint,
+            task_artifacts=task_artifacts,
+            runtime_binding=runtime_binding,
+            observation_contract_sha256=observation_contract_sha256,
         )
         for episode_index in range(args.episodes_per_generation)
     ]
-
-
-def _atomic_write_jsonl(path: Path, records: list[dict[str, Any]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists():
-        raise FileExistsError(f"Refusing to overwrite archive shard {path}")
-    temporary = path.with_name(f".{path.name}.partial-{uuid.uuid4().hex}")
-    try:
-        with temporary.open("x", encoding="utf-8") as file:
-            for record in records:
-                file.write(json.dumps(record, separators=(",", ":")) + "\n")
-            file.flush()
-            os.fsync(file.fileno())
-        os.replace(temporary, path)
-        descriptor = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
-    finally:
-        temporary.unlink(missing_ok=True)
 
 
 def _write_generation_archive(
@@ -907,28 +1043,29 @@ def _write_generation_archive(
     generation: int,
     rank: int,
     episodes: list[EpisodeExperience],
-) -> tuple[str, list[SuccessReference]]:
-    relative = Path("archive") / "attempts" / attempt_id
-    relative /= f"generation-{generation:06d}"
-    relative /= f"rank-{rank:05d}.episodes.jsonl"
-    _atomic_write_jsonl(
-        run_dir / relative,
-        [episode.archive_record() for episode in episodes],
+    event_ledgers: list[EpisodeEventLedger],
+) -> tuple[PairedArchiveWrite, list[SuccessReference]]:
+    pair = write_generation_archive_pair(
+        run_dir=run_dir,
+        attempt_id=attempt_id,
+        generation=generation,
+        rank=rank,
+        episodes=episodes,
+        event_ledgers=event_ledgers,
     )
-    episode_sha256 = file_sha256(run_dir / relative)
     references = []
     for record_index, episode in enumerate(episodes):
         for sample in episode.success_samples:
             references.append(
                 SuccessReference.from_sample(
                     sample,
-                    episode_path=relative.as_posix(),
-                    episode_sha256=episode_sha256,
+                    episode_path=pair.episode_path,
+                    episode_sha256=pair.episode_sha256,
                     episode_record_index=record_index,
                     simulator_fingerprint=episode.simulator_fingerprint,
                 )
             )
-    return relative.as_posix(), references
+    return pair, references
 
 
 def _materialize_historical_samples(
@@ -1512,6 +1649,8 @@ def _build_run_manifest(
     args: argparse.Namespace,
     context: DistributedContext,
     task: FlywheelTaskSpec,
+    task_artifacts: TaskArtifacts,
+    runtime_binding: RuntimeTaskBinding,
 ) -> dict[str, Any]:
     evaluation_suite = fixed_evaluation_suite(
         base_seed=args.seed,
@@ -1536,6 +1675,32 @@ def _build_run_manifest(
                 "reward_distance_scale_m": 0.030,
                 "reset_xy_jitter_m": 0.010,
             },
+        },
+        "task_v2": {
+            "task_contract_id": task_artifacts.contract.task_contract_id,
+            "task_contract_sha256": task_artifacts.contract.fingerprint,
+            "task_spec_sha256": task_artifacts.task.fingerprint,
+            "compiler_policy_sha256": (
+                task_artifacts.contract.compiler_policy_fingerprint
+            ),
+            "capability_catalog_sha256": (
+                task_artifacts.capabilities.fingerprint
+            ),
+            "adapter_id": task_artifacts.contract.adapter_id,
+            "adapter_sha256": task_artifacts.contract.adapter_fingerprint,
+            "event_schema_id": task_artifacts.contract.event_schema_id,
+            "event_schema_sha256": (
+                task_artifacts.contract.event_schema_fingerprint
+            ),
+            "process_spec_id": task_artifacts.contract.process_spec_id,
+            "reward_profile_id": runtime_binding.reward_profile_id,
+            "reward_profile_sha256": (
+                runtime_binding.reward_profile_fingerprint
+            ),
+            "property_report_sha256": (
+                task_artifacts.property_report.fingerprint
+            ),
+            "legacy_binding_sha256": runtime_binding.fingerprint,
         },
         "precision_contract": "fp32_dit_master_bf16_autocast_v1",
         "update_rule": "global_advantage_weighted_flow_matching_v1",
@@ -1607,6 +1772,29 @@ def _simulator_fingerprint(
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
+
+
+def _observation_contract_fingerprint(manifest: dict[str, Any]) -> str:
+    """Bind policy-visible modalities separately from physics and reward."""
+    return canonical_fingerprint(
+        {
+            "schema_version": 1,
+            "observation_contract_id": "groot/reach_observation/v1",
+            "modalities": ["state_dict", "ego_rgb", "wrist_rgb", "language"],
+            "action_conditioning": [
+                "eef_9d",
+                "hand_joint_pos",
+                "arm_joint_pos",
+            ],
+            "camera_textures": manifest["config"]["camera_textures"],
+            "scene_visuals": manifest["config"]["scene_visuals"],
+            "vlm_artifacts": manifest["artifacts"]["vlm_directory"],
+            "policy_artifacts": manifest["artifacts"]["policy_directory"],
+            "isaac_groot_source": manifest["artifacts"]["sources"][
+                "isaac_groot"
+            ],
+        }
+    )
 
 
 def _physical_gpu_token(local_rank: int) -> str | int:
@@ -1931,7 +2119,13 @@ def _initialize_operations(
 def main() -> None:
     args = create_parser().parse_args()
     task = get_task_spec(args.task_id)
+    task_artifacts, runtime_binding = load_production_reach_runtime_binding()
     _validate_args(args, task)
+    if args.episode_control_steps != task_artifacts.contract.episode_control_steps:
+        raise ValueError(
+            "episode-control-steps must match the TaskSpec v2 contract: "
+            f"{task_artifacts.contract.episode_control_steps}"
+        )
     _early_gpu_preflight(args)
     context = DistributedContext.initialize()
     operations: RunOperations | None = None
@@ -1983,18 +2177,31 @@ def main() -> None:
 
         manifest = context.broadcast_object(
             (
-                _build_run_manifest(args=args, context=context, task=task)
+                _build_run_manifest(
+                    args=args,
+                    context=context,
+                    task=task,
+                    task_artifacts=task_artifacts,
+                    runtime_binding=runtime_binding,
+                )
                 if context.is_main
                 else None
             ),
             source=0,
         )
         simulator_fingerprint = _simulator_fingerprint(manifest)
+        observation_contract_sha256 = _observation_contract_fingerprint(
+            manifest
+        )
         operations.write_manifest(
             config=manifest,
             command=sys.argv,
             environment=os.environ,
-            extra={"simulator_fingerprint": simulator_fingerprint},
+            extra={
+                "simulator_fingerprint": simulator_fingerprint,
+                "observation_contract_sha256": observation_contract_sha256,
+                "task_contract_sha256": task_artifacts.contract.fingerprint,
+            },
             repo_root=REPO_ROOT,
         )
         operations.log(
@@ -2186,7 +2393,7 @@ def main() -> None:
                 )
             historical_seconds = time.perf_counter() - historical_started
             collect_started = time.perf_counter()
-            episodes = _collect_generation(
+            collected_episodes = _collect_generation(
                 args=args,
                 context=context,
                 policy=policy,
@@ -2194,15 +2401,21 @@ def main() -> None:
                 task=task,
                 generation=generation,
                 simulator_fingerprint=simulator_fingerprint,
+                task_artifacts=task_artifacts,
+                runtime_binding=runtime_binding,
+                observation_contract_sha256=observation_contract_sha256,
             )
+            episodes = [item.experience for item in collected_episodes]
+            event_ledgers = [item.event_ledger for item in collected_episodes]
             collect_seconds = time.perf_counter() - collect_started
             archive_started = time.perf_counter()
-            episode_path, success_references = _write_generation_archive(
+            archive_pair, success_references = _write_generation_archive(
                 run_dir=run_dir,
                 attempt_id=attempt_id,
                 generation=generation,
                 rank=context.rank,
                 episodes=episodes,
+                event_ledgers=event_ledgers,
             )
             pending_success_shard = archive.write_generation(
                 generation=generation,
@@ -2262,7 +2475,9 @@ def main() -> None:
             operations.metric(
                 "generation",
                 generation=generation,
-                episode_archive=episode_path,
+                episode_archive=archive_pair.episode_path,
+                event_archive=archive_pair.event_path,
+                archive_pair_descriptor=archive_pair.pair_descriptor_path,
                 historical_replay_samples=len(historical_samples),
                 **metrics,
             )

@@ -25,6 +25,12 @@ class PairedArchiveWrite:
     record_count: int
 
 
+@dataclass(frozen=True)
+class CollectedEpisode:
+    experience: EpisodeExperience
+    event_ledger: EpisodeEventLedger
+
+
 def _atomic_write_jsonl(path: Path, records: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
