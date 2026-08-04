@@ -11,7 +11,7 @@ import re
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Union
 
 from .authoring import (
     DEFAULT_AUTHORING_POLICY,
@@ -35,6 +35,7 @@ from .authoring_quarantine import (
 )
 from .authoring_runner import (
     DEFAULT_PROPOSER_EXECUTION_POLICY,
+    BubblewrapProposerCommand,
     ProposerCommand,
     ProposerExecutionPolicy,
     ProposerInvocation,
@@ -59,6 +60,7 @@ from .process_contract import (
     ProcessCompilerPolicy,
 )
 
+_ProposerRuntimeCommand = Union[ProposerCommand, BubblewrapProposerCommand]
 _IDENTIFIER = re.compile(r"^[a-z][a-z0-9_.-]*(?:/[a-z0-9_.-]+)*$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _FINAL_STATES = frozenset(("exhausted", "quarantined_static"))
@@ -253,7 +255,7 @@ def build_authoring_session(
     brief: PublicAuthoringBrief,
     catalog: CapabilityCatalog,
     process_specs: Mapping[str, ProcessSpecV1],
-    command: ProposerCommand,
+    command: _ProposerRuntimeCommand,
     model_id: str,
     template: AuthoringPromptTemplate,
     compiler_policy: TaskCompilerPolicy,
@@ -604,7 +606,7 @@ def _run_automatic_authoring_ephemeral(
     process_specs: Mapping[str, ProcessSpecV1],
     parent_task: TaskSpecV2 | None,
     parent_contract: CompiledTaskContract | None,
-    command: ProposerCommand,
+    command: _ProposerRuntimeCommand,
     model_id: str,
     quarantine_dir: Path,
     environment: Mapping[str, str] | None = None,
@@ -794,7 +796,7 @@ def run_automatic_authoring(
     process_specs: Mapping[str, ProcessSpecV1],
     parent_task: TaskSpecV2 | None,
     parent_contract: CompiledTaskContract | None,
-    command: ProposerCommand,
+    command: _ProposerRuntimeCommand,
     model_id: str,
     quarantine_dir: Path,
     environment: Mapping[str, str] | None = None,

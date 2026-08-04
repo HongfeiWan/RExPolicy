@@ -22,7 +22,7 @@ import stat
 import uuid
 from collections.abc import Iterator, Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, Union
 
 from .authoring import (
     DEFAULT_AUTHORING_POLICY,
@@ -44,6 +44,7 @@ from .authoring_quarantine import (
 )
 from .authoring_runner import (
     DEFAULT_PROPOSER_EXECUTION_POLICY,
+    BubblewrapProposerCommand,
     ProposerCommand,
     ProposerExecutionPolicy,
     ProposerInvocation,
@@ -75,6 +76,7 @@ _REQUEST = "request.json"
 _LAUNCH = "launch.json"
 _COMPLETION = "completion.json"
 _MAX_JOB_JSON_BYTES = 4_000_000
+_ProposerRuntimeCommand = Union[ProposerCommand, BubblewrapProposerCommand]
 
 
 class AmbiguousAuthoringAttemptError(RuntimeError):
@@ -205,6 +207,34 @@ def _environment_binding(environment: Mapping[str, str] | None) -> dict[str, Any
     }
 
 
+def _validated_execution_environment(
+    environment: Mapping[str, str] | None,
+    *,
+    execution_policy: ProposerExecutionPolicy,
+    authoring_policy: AuthoringPolicy,
+) -> dict[str, str]:
+    """Reject deterministic launch configuration errors before journaling."""
+    execution_policy.validate(authoring_policy=authoring_policy)
+    supplied = dict(environment or {})
+    if set(supplied) != set(execution_policy.allowed_environment_names):
+        raise ValueError("Proposer environment does not match the trusted allowlist")
+    if any(
+        not isinstance(value, str) or "\x00" in value
+        for value in supplied.values()
+    ):
+        raise ValueError("Proposer environment value is invalid")
+    return supplied
+
+
+def _validate_request_size(
+    request: Mapping[str, Any],
+    *,
+    execution_policy: ProposerExecutionPolicy,
+) -> None:
+    if len(_canonical_payload(request)) > execution_policy.max_request_bytes:
+        raise ValueError("Proposer request exceeds the trusted size limit")
+
+
 def _manifest_record(
     *,
     intent: AuthoringIntent,
@@ -214,7 +244,7 @@ def _manifest_record(
     process_specs: Mapping[str, ProcessSpecV1],
     parent_task: TaskSpecV2 | None,
     parent_contract: CompiledTaskContract | None,
-    command: ProposerCommand,
+    command: _ProposerRuntimeCommand,
     model_id: str,
     proposer_binding: Any,
     session: Any,
@@ -454,7 +484,7 @@ def _result_record(
     *,
     intent: AuthoringIntent,
     brief: PublicAuthoringBrief,
-    command: ProposerCommand,
+    command: _ProposerRuntimeCommand,
     execution_policy: ProposerExecutionPolicy,
     session: Any,
     attempts: list[ProposalAttempt],
@@ -515,7 +545,7 @@ def run_durable_automatic_authoring(
     process_specs: Mapping[str, ProcessSpecV1],
     parent_task: TaskSpecV2 | None,
     parent_contract: CompiledTaskContract | None,
-    command: ProposerCommand,
+    command: _ProposerRuntimeCommand,
     model_id: str,
     quarantine_dir: Path,
     environment: Mapping[str, str] | None = None,
@@ -534,6 +564,11 @@ def run_durable_automatic_authoring(
         validate_authoring_attempt_chain,
     )
 
+    supplied_environment = _validated_execution_environment(
+        environment,
+        execution_policy=execution_policy,
+        authoring_policy=authoring_policy,
+    )
     proposer_binding, session = build_authoring_session(
         intent=intent, brief=brief, catalog=catalog, process_specs=process_specs,
         command=command, model_id=model_id, template=template,
@@ -546,7 +581,8 @@ def run_durable_automatic_authoring(
         catalog=catalog, process_specs=process_specs,
         parent_task=parent_task, parent_contract=parent_contract, command=command,
         model_id=model_id, proposer_binding=proposer_binding, session=session,
-        environment=environment, template=template, compiler_policy=compiler_policy,
+        environment=supplied_environment, template=template,
+        compiler_policy=compiler_policy,
         property_policy=property_policy, process_policy=process_policy,
         authoring_policy=authoring_policy, execution_policy=execution_policy,
     )
@@ -683,6 +719,7 @@ def run_durable_automatic_authoring(
                 compiler_policy=compiler_policy, property_policy=property_policy,
                 process_policy=process_policy, authoring_policy=authoring_policy,
             )
+            _validate_request_size(request, execution_policy=execution_policy)
             request_fingerprint = canonical_fingerprint(request)
             attempt_dir = _attempt_directory(attempts_dir, ordinal)
             request_path = attempt_dir / _REQUEST
@@ -701,7 +738,7 @@ def run_durable_automatic_authoring(
             _publish_once(launch_path, launch)
 
             proposer_run = run_proposer(
-                command=command, request=request, environment=environment,
+                command=command, request=request, environment=supplied_environment,
                 execution_policy=execution_policy, authoring_policy=authoring_policy,
             )
             if proposer_run.invocation.request_sha256 != request_fingerprint:

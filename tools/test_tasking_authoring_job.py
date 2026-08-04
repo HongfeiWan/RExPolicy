@@ -9,6 +9,7 @@ import tempfile
 import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
@@ -18,7 +19,12 @@ from rexpolicy.tasking.authoring_job import (
     AuthoringJobDriftError,
 )
 from rexpolicy.tasking.authoring_orchestrator import run_automatic_authoring
-from rexpolicy.tasking.authoring_runner import ProposerCommand
+from rexpolicy.tasking.authoring_runner import (
+    DEFAULT_BUBBLEWRAP_SANDBOX_PROFILE,
+    DEFAULT_PROPOSER_EXECUTION_POLICY,
+    BubblewrapProposerCommand,
+    ProposerCommand,
+)
 from rexpolicy.tasking.canonical import canonical_json
 from rexpolicy.tasking.contract import DEFAULT_TASK_COMPILER_POLICY
 from rexpolicy.tasking.process import ProcessSpecV1
@@ -42,6 +48,9 @@ _PROCESS_V2_PATH = (
     / "process_specs"
     / "reach_pregrasp.v2.json"
 )
+_BUBBLEWRAP_AVAILABLE = sys.platform.startswith("linux") and Path(
+    "/usr/bin/bwrap"
+).is_file()
 
 
 class DurableAuthoringFixture(unittest.TestCase):
@@ -127,9 +136,11 @@ class DurableAuthoringFixture(unittest.TestCase):
     def _run(
         self,
         directory: Path,
-        command: ProposerCommand,
+        command: ProposerCommand | BubblewrapProposerCommand,
         *,
         model_id: str = "openai/fake-task-model/v1",
+        environment=None,
+        execution_policy=DEFAULT_PROPOSER_EXECUTION_POLICY,
     ):
         return run_automatic_authoring(
             intent=self.intent,
@@ -142,6 +153,8 @@ class DurableAuthoringFixture(unittest.TestCase):
             command=command,
             model_id=model_id,
             quarantine_dir=directory / "run",
+            environment=environment,
+            execution_policy=execution_policy,
         )
 
 
@@ -168,6 +181,128 @@ class TestDurableAuthoringJob(DurableAuthoringFixture):
                 self.curriculum_snapshot.to_record(),
             )
             self.assertEqual(manifest_record["public_brief"], self.brief.to_record())
+
+    @unittest.skipUnless(
+        _BUBBLEWRAP_AVAILABLE,
+        "Durable sandbox test requires Linux and /usr/bin/bwrap",
+    )
+    def test_durable_sandbox_cannot_read_its_sealed_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_directory:
+            directory = Path(raw_directory)
+            manifest_path = (
+                directory / "run" / "authoring-job" / "manifest.json"
+            )
+            script = directory / "sandboxed_durable_proposer.py"
+            script.write_text(
+                "import os\n"
+                "import sys\n"
+                "manifest = os.environ['SEALED_MANIFEST_PATH']\n"
+                "try:\n"
+                "    leaked = open(manifest, 'rb').read()\n"
+                "except OSError:\n"
+                f"    sys.stdout.write({canonical_json(self.candidate)!r})\n"
+                "else:\n"
+                "    sys.stderr.buffer.write(b'MANIFEST_LEAK:' + leaked)\n"
+                "    sys.stdout.write('not-json')\n",
+                encoding="utf-8",
+            )
+            trusted_wrapper = ProposerCommand.bind(
+                command_id="rexpolicy/sandboxed_durable_fake_proposer/v1",
+                argv=(sys.executable, str(script)),
+            )
+            command = BubblewrapProposerCommand.bind(
+                proposer_command=trusted_wrapper,
+                sandbox_profile=DEFAULT_BUBBLEWRAP_SANDBOX_PROFILE,
+            )
+            execution_policy = replace(
+                DEFAULT_PROPOSER_EXECUTION_POLICY,
+                allowed_environment_names=("SEALED_MANIFEST_PATH",),
+            )
+            run = self._run(
+                directory,
+                command,
+                environment={"SEALED_MANIFEST_PATH": str(manifest_path)},
+                execution_policy=execution_policy,
+            )
+
+            self.assertEqual(run.result.final_state, "quarantined_static")
+            self.assertEqual(run.invocations[0].status, "completed")
+            self.assertEqual(
+                run.invocations[0].command_sha256,
+                command.fingerprint,
+            )
+            manifest_record = json.loads(manifest_path.read_text(encoding="ascii"))
+            self.assertEqual(
+                manifest_record["curriculum_snapshot"],
+                self.curriculum_snapshot.to_record(),
+            )
+            self.assertEqual(
+                manifest_record["source_curriculum_snapshot_fingerprint"],
+                self.curriculum_snapshot.fingerprint,
+            )
+            self.assertEqual(manifest_record["command"], command.to_record())
+            self.assertEqual(
+                manifest_record["command_fingerprint"],
+                command.fingerprint,
+            )
+            self.assertEqual(
+                manifest_record["proposer_binding"]["command_fingerprint"],
+                command.fingerprint,
+            )
+            self.assertEqual(
+                manifest_record["command"]["sandbox_profile_sha256"],
+                command.sandbox_profile.fingerprint,
+            )
+            self.assertEqual(
+                manifest_record["command"]["sandbox_profile"]["network_policy"],
+                "deny",
+            )
+            self.assertNotIn(str(manifest_path), canonical_json(manifest_record))
+
+    def test_invalid_environment_fails_before_any_journal_record(self) -> None:
+        cases = (
+            ({"WRONG_ENV": "value"}, "allowlist"),
+            ({"EXPECTED_ENV": "invalid\x00value"}, "value is invalid"),
+        )
+        for environment, message in cases:
+            with self.subTest(message=message), tempfile.TemporaryDirectory() as raw:
+                directory = Path(raw)
+                command, _ = self._prepare(directory)
+                execution_policy = replace(
+                    DEFAULT_PROPOSER_EXECUTION_POLICY,
+                    allowed_environment_names=("EXPECTED_ENV",),
+                )
+                with self.assertRaisesRegex(ValueError, message):
+                    self._run(
+                        directory,
+                        command,
+                        environment=environment,
+                        execution_policy=execution_policy,
+                    )
+                run_dir = directory / "run"
+                self.assertFalse((run_dir / "authoring-job" / "manifest.json").exists())
+                self.assertEqual(list(run_dir.rglob("launch.json")), [])
+
+    def test_oversized_request_fails_before_launch_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_directory:
+            directory = Path(raw_directory)
+            command, _ = self._prepare(directory)
+            execution_policy = replace(
+                DEFAULT_PROPOSER_EXECUTION_POLICY,
+                max_request_bytes=1,
+            )
+            for _ in range(2):
+                with self.assertRaisesRegex(ValueError, "request exceeds"):
+                    self._run(
+                        directory,
+                        command,
+                        execution_policy=execution_policy,
+                    )
+            run_dir = directory / "run"
+            self.assertTrue(
+                (run_dir / "authoring-job" / "manifest.json").is_file()
+            )
+            self.assertEqual(list(run_dir.rglob("launch.json")), [])
 
     def test_unrelated_curriculum_snapshot_is_rejected_before_launch(self) -> None:
         with tempfile.TemporaryDirectory() as raw_directory:
