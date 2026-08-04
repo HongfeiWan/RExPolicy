@@ -14,9 +14,11 @@ from rexpolicy.tasking.curriculum import (
     PREREQUISITE_BLOCKED,
     SAFETY_EXCLUDED,
     CurriculumPolicy,
+    CurriculumSnapshot,
     CurriculumTaskUnit,
     SealedEvaluationEvidence,
     assess_curriculum,
+    build_curriculum_snapshot,
     build_curriculum_schedule,
     frontier_weight,
 )
@@ -298,6 +300,110 @@ class TestCurriculumArtifacts(unittest.TestCase):
             CurriculumPolicy.from_json(policy.to_json()).fingerprint,
             policy.fingerprint,
         )
+
+    def test_snapshot_round_trip_binds_sorted_exact_inputs_and_assessments(self) -> None:
+        alpha = _unit("snapshot_alpha")
+        beta = _unit("snapshot_beta")
+        snapshot = build_curriculum_snapshot(
+            units=(beta, alpha),
+            evidence=(
+                _evidence(beta, episodes=100, successes=100),
+                _evidence(alpha, episodes=100, successes=50),
+            ),
+            candidate_policy_sha256=_CANDIDATE,
+            curriculum_policy=_policy(),
+        )
+
+        self.assertEqual(
+            tuple(item.unit_id for item in snapshot.units),
+            (alpha.unit_id, beta.unit_id),
+        )
+        self.assertEqual(
+            tuple(item.unit_id for item in snapshot.evidence),
+            (alpha.unit_id, beta.unit_id),
+        )
+        self.assertEqual(
+            tuple(item.unit_id for item in snapshot.assessments),
+            (alpha.unit_id, beta.unit_id),
+        )
+        restored = CurriculumSnapshot.from_json(snapshot.to_json())
+        self.assertEqual(restored, snapshot)
+        self.assertEqual(restored.fingerprint, snapshot.fingerprint)
+        self.assertEqual(
+            restored.curriculum_policy_sha256,
+            restored.curriculum_policy.fingerprint,
+        )
+
+        with self.assertRaises(TypeError):
+            CurriculumSnapshot(
+                units=(alpha, beta),
+                evidence=snapshot.evidence,
+                candidate_policy_sha256=_CANDIDATE,
+                curriculum_policy=_policy(),
+                assessments=snapshot.assessments,
+            )
+
+    def test_snapshot_rejects_unknown_duplicate_and_out_of_order_content(self) -> None:
+        alpha = _unit("strict_alpha")
+        beta = _unit("strict_beta")
+        snapshot = CurriculumSnapshot.create(
+            units=(alpha, beta),
+            evidence=(
+                _evidence(alpha, episodes=100, successes=50),
+                _evidence(beta, episodes=100, successes=100),
+            ),
+            candidate_policy_sha256=_CANDIDATE,
+            curriculum_policy=_policy(),
+        )
+        record = snapshot.to_record()
+        record["unexpected"] = True
+        with self.assertRaisesRegex(ValueError, "unknown fields: unexpected"):
+            CurriculumSnapshot.from_record(record)
+
+        duplicate = snapshot.to_record()
+        duplicate["units"] = [duplicate["units"][0], duplicate["units"][0]]
+        with self.assertRaisesRegex(ValueError, "sorted and unique"):
+            CurriculumSnapshot.from_record(duplicate)
+
+        out_of_order = snapshot.to_record()
+        out_of_order["evidence"] = list(reversed(out_of_order["evidence"]))
+        with self.assertRaisesRegex(ValueError, "evidence must be sorted"):
+            CurriculumSnapshot.from_record(out_of_order)
+
+        duplicate_key_json = snapshot.to_json()[:-1] + ',"schema_version":1}'
+        with self.assertRaisesRegex(ValueError, "Duplicate JSON key"):
+            CurriculumSnapshot.from_json(duplicate_key_json)
+
+    def test_snapshot_recomputes_and_rejects_float_or_status_tampering(self) -> None:
+        unit = _unit("tamper")
+        snapshot = CurriculumSnapshot.create(
+            units=(unit,),
+            evidence=(_evidence(unit, episodes=100, successes=50),),
+            candidate_policy_sha256=_CANDIDATE,
+            curriculum_policy=_policy(),
+        )
+
+        changed_float = snapshot.to_record()
+        changed_float["assessments"][0]["success_probability"] = 0.5000001
+        with self.assertRaisesRegex(ValueError, "do not match sealed inputs"):
+            CurriculumSnapshot.from_record(changed_float)
+
+        changed_float_type = snapshot.to_record()
+        changed_float_type["assessments"][0]["frontier_mass"] = 1
+        with self.assertRaisesRegex(ValueError, "finite JSON float"):
+            CurriculumSnapshot.from_record(changed_float_type)
+
+        changed_status = snapshot.to_record()
+        changed_status["assessments"][0]["status"] = HARD
+        with self.assertRaisesRegex(ValueError, "do not match sealed inputs"):
+            CurriculumSnapshot.from_record(changed_status)
+
+        changed_policy_fingerprint = snapshot.to_record()
+        changed_policy_fingerprint["curriculum_policy_sha256"] = _hash(
+            "different-policy"
+        )
+        with self.assertRaisesRegex(ValueError, "policy fingerprint mismatch"):
+            CurriculumSnapshot.from_record(changed_policy_fingerprint)
 
     def test_confidence_bounds_define_hard_and_mastered_groups(self) -> None:
         hard = _unit("classified_hard")

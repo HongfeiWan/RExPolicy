@@ -14,7 +14,7 @@ from .curriculum import (
     FRONTIER,
     HARD,
     PREREQUISITE_BLOCKED,
-    CurriculumAssessment,
+    CurriculumSnapshot,
 )
 from .model import TaskSpecV2
 
@@ -356,8 +356,7 @@ def derive_public_authoring_brief(
     task_id: str,
     family_id: str,
     objective: str,
-    source_curriculum_snapshot_fingerprint: str,
-    assessments: Iterable[CurriculumAssessment],
+    curriculum_snapshot: CurriculumSnapshot,
     gap_codes_by_unit: Mapping[str, str],
     parent_task: TaskSpecV2 | None,
     parent_contract: CompiledTaskContract | None,
@@ -366,10 +365,17 @@ def derive_public_authoring_brief(
     public_constraints: Iterable[str],
 ) -> PublicAuthoringBrief:
     """Declassify curriculum gaps without copying quantitative evidence."""
+    if not isinstance(curriculum_snapshot, CurriculumSnapshot):
+        raise ValueError("curriculum_snapshot must be one exact CurriculumSnapshot")
+    snapshot = CurriculumSnapshot.from_record(curriculum_snapshot.to_record())
     allowed_statuses = {HARD, FRONTIER, PREREQUISITE_BLOCKED}
     selected = tuple(
         sorted(
-            (item for item in assessments if item.status in allowed_statuses),
+            (
+                item
+                for item in snapshot.assessments
+                if item.status in allowed_statuses
+            ),
             key=lambda item: (item.unit_id, item.fingerprint),
         )
     )
@@ -398,7 +404,7 @@ def derive_public_authoring_brief(
         "family_id": family_id,
         "objective": objective,
         "source_curriculum_snapshot_fingerprint": (
-            source_curriculum_snapshot_fingerprint
+            snapshot.fingerprint
         ),
         "gap_targets": [
             {

@@ -28,6 +28,24 @@ MASTERED = "mastered"
 HARD = "hard"
 FRONTIER = "frontier"
 
+_ASSESSMENT_STATUSES = frozenset(
+    (
+        INSUFFICIENT_EVIDENCE,
+        SAFETY_EXCLUDED,
+        PREREQUISITE_BLOCKED,
+        MASTERED,
+        HARD,
+        FRONTIER,
+    )
+)
+_CURRICULUM_POLICY_FLOAT_FIELDS = (
+    "target_success_probability",
+    "frontier_bandwidth",
+    "confidence_z",
+    "hard_success_upper_bound",
+    "mastered_success_lower_bound",
+)
+
 
 def _mapping(value: Any, path: str) -> dict[str, Any]:
     if not isinstance(value, dict):
@@ -87,6 +105,21 @@ def _positive_float(value: Any, path: str) -> float:
     return result
 
 
+def _exact_finite_float(value: Any, path: str) -> float:
+    if type(value) is not float or not math.isfinite(value):
+        raise ValueError(f"{path} must be one finite JSON float")
+    return value
+
+
+def _exact_optional_probability(value: Any, path: str) -> float | None:
+    if value is None:
+        return None
+    result = _exact_finite_float(value, path)
+    if not 0.0 <= result <= 1.0:
+        raise ValueError(f"{path} must be a probability")
+    return result
+
+
 def _instruction(value: Any, path: str) -> str:
     if not isinstance(value, str) or not value:
         raise ValueError(f"{path} must be non-empty text")
@@ -113,7 +146,7 @@ class CurriculumTaskUnit:
     prerequisite_unit_ids: tuple[str, ...]
 
     def validate(self) -> None:
-        if self.schema_version != 1:
+        if type(self.schema_version) is not int or self.schema_version != 1:
             raise ValueError("Unsupported curriculum task-unit schema")
         _identifier(self.unit_id, "unit_id")
         _identifier(self.task_contract_id, "task_contract_id")
@@ -205,7 +238,7 @@ class SealedEvaluationEvidence:
     invalid_action_count: int
 
     def validate(self) -> None:
-        if self.schema_version != 1:
+        if type(self.schema_version) is not int or self.schema_version != 1:
             raise ValueError("Unsupported sealed curriculum-evidence schema")
         _identifier(self.evidence_id, "evidence_id")
         _identifier(self.unit_id, "unit_id")
@@ -216,7 +249,10 @@ class SealedEvaluationEvidence:
             ("evaluation_report_sha256", self.evaluation_report_sha256),
         ):
             _sha256(value, name)
-        if self.candidate_count != 1:
+        if (
+            type(self.candidate_count) is not int
+            or self.candidate_count != 1
+        ):
             raise ValueError("Curriculum evidence must use K=1 evaluation")
         episodes = _positive_int(self.episode_count, "episode_count")
         for name, value in (
@@ -314,7 +350,7 @@ class CurriculumPolicy:
         )
 
     def validate(self) -> None:
-        if self.schema_version != 1:
+        if type(self.schema_version) is not int or self.schema_version != 1:
             raise ValueError("Unsupported curriculum policy schema")
         _identifier(self.policy_id, "policy_id")
         target = _probability(
@@ -474,7 +510,116 @@ class CurriculumAssessment:
     def eligible(self) -> bool:
         return self.status in {MASTERED, HARD, FRONTIER}
 
+    def validate(self) -> None:
+        _identifier(self.unit_id, "unit_id")
+        _sha256(self.unit_sha256, "unit_sha256")
+        if self.evidence_sha256 is not None:
+            _sha256(self.evidence_sha256, "evidence_sha256")
+        for name, value in (
+            ("episode_count", self.episode_count),
+            ("success_count", self.success_count),
+            ("safety_failure_count", self.safety_failure_count),
+            ("invalid_action_count", self.invalid_action_count),
+        ):
+            _non_negative_int(value, name)
+        if self.success_count > self.episode_count:
+            raise ValueError("success_count cannot exceed episode_count")
+        if self.safety_failure_count > self.episode_count:
+            raise ValueError("safety_failure_count cannot exceed episode_count")
+        if self.invalid_action_count > self.episode_count:
+            raise ValueError("invalid_action_count cannot exceed episode_count")
+        estimates = (
+            self.success_probability,
+            self.confidence_lower_bound,
+            self.confidence_upper_bound,
+        )
+        parsed_estimates = tuple(
+            _exact_optional_probability(value, name)
+            for name, value in zip(
+                (
+                    "success_probability",
+                    "confidence_lower_bound",
+                    "confidence_upper_bound",
+                ),
+                estimates,
+            )
+        )
+        if any(item is None for item in parsed_estimates) != all(
+            item is None for item in parsed_estimates
+        ):
+            raise ValueError("Curriculum probability estimates must be all null or set")
+        if (
+            parsed_estimates[1] is not None
+            and parsed_estimates[2] is not None
+            and parsed_estimates[1] > parsed_estimates[2]
+        ):
+            raise ValueError("Curriculum confidence bounds are reversed")
+        if self.status not in _ASSESSMENT_STATUSES:
+            raise ValueError("Unknown curriculum assessment status")
+        missing = tuple(self.missing_prerequisite_ids)
+        if missing != tuple(sorted(set(missing))):
+            raise ValueError("missing_prerequisite_ids must be sorted and unique")
+        for prerequisite in missing:
+            _identifier(prerequisite, "missing_prerequisite_ids[]")
+        for name, value in (
+            ("frontier_mass", self.frontier_mass),
+            ("confidence_mass", self.confidence_mass),
+            ("selection_weight", self.selection_weight),
+        ):
+            result = _exact_finite_float(value, name)
+            if not 0.0 <= result <= 1.0:
+                raise ValueError(f"{name} must be between zero and one")
+
+    @classmethod
+    def from_record(cls, value: Any) -> CurriculumAssessment:
+        record = _mapping(value, "CurriculumAssessment")
+        expected = {
+            "unit_id",
+            "unit_sha256",
+            "evidence_sha256",
+            "episode_count",
+            "success_count",
+            "safety_failure_count",
+            "invalid_action_count",
+            "success_probability",
+            "confidence_lower_bound",
+            "confidence_upper_bound",
+            "status",
+            "missing_prerequisite_ids",
+            "frontier_mass",
+            "confidence_mass",
+            "selection_weight",
+        }
+        _keys(record, expected, "CurriculumAssessment")
+        raw_missing = record["missing_prerequisite_ids"]
+        if not isinstance(raw_missing, list):
+            raise ValueError("missing_prerequisite_ids must be an array")
+        assessment = cls(
+            unit_id=record["unit_id"],
+            unit_sha256=record["unit_sha256"],
+            evidence_sha256=record["evidence_sha256"],
+            episode_count=record["episode_count"],
+            success_count=record["success_count"],
+            safety_failure_count=record["safety_failure_count"],
+            invalid_action_count=record["invalid_action_count"],
+            success_probability=record["success_probability"],
+            confidence_lower_bound=record["confidence_lower_bound"],
+            confidence_upper_bound=record["confidence_upper_bound"],
+            status=record["status"],
+            missing_prerequisite_ids=tuple(raw_missing),
+            frontier_mass=record["frontier_mass"],
+            confidence_mass=record["confidence_mass"],
+            selection_weight=record["selection_weight"],
+        )
+        assessment.validate()
+        return assessment
+
+    @classmethod
+    def from_json(cls, text: str) -> CurriculumAssessment:
+        return cls.from_record(strict_json_loads(text))
+
     def to_record(self) -> dict[str, Any]:
+        self.validate()
         return {
             "unit_id": self.unit_id,
             "unit_sha256": self.unit_sha256,
@@ -492,6 +637,9 @@ class CurriculumAssessment:
             "confidence_mass": self.confidence_mass,
             "selection_weight": self.selection_weight,
         }
+
+    def to_json(self) -> str:
+        return canonical_json(self.to_record())
 
     @property
     def fingerprint(self) -> str:
@@ -697,6 +845,256 @@ def assess_curriculum(
             )
         )
     return tuple(assessments)
+
+
+def _canonical_curriculum_policy(policy: CurriculumPolicy) -> CurriculumPolicy:
+    if not isinstance(policy, CurriculumPolicy):
+        raise ValueError("curriculum_policy must be a CurriculumPolicy")
+    record = policy.to_record()
+    for name in _CURRICULUM_POLICY_FLOAT_FIELDS:
+        if type(record[name]) is not float:
+            raise ValueError(f"curriculum_policy.{name} must be one JSON float")
+    return CurriculumPolicy.from_record(record)
+
+
+def _canonical_curriculum_units(
+    units: Iterable[CurriculumTaskUnit],
+) -> tuple[CurriculumTaskUnit, ...]:
+    canonical = []
+    for index, unit in enumerate(units):
+        if not isinstance(unit, CurriculumTaskUnit):
+            raise ValueError(f"units[{index}] must be a CurriculumTaskUnit")
+        canonical.append(CurriculumTaskUnit.from_record(unit.to_record()))
+    return tuple(sorted(canonical, key=lambda item: item.unit_id))
+
+
+def _canonical_curriculum_evidence(
+    evidence: Iterable[SealedEvaluationEvidence],
+) -> tuple[SealedEvaluationEvidence, ...]:
+    canonical = []
+    for index, item in enumerate(evidence):
+        if not isinstance(item, SealedEvaluationEvidence):
+            raise ValueError(
+                f"evidence[{index}] must be SealedEvaluationEvidence"
+            )
+        canonical.append(SealedEvaluationEvidence.from_record(item.to_record()))
+    return tuple(
+        sorted(canonical, key=lambda item: (item.unit_id, item.evidence_id))
+    )
+
+
+@dataclass(frozen=True, init=False)
+class CurriculumSnapshot:
+    """One exact, recomputable sealed-evidence curriculum decision boundary.
+
+    Callers provide only trusted inputs.  Assessments are always produced by
+    :func:`assess_curriculum`; neither the constructor nor ``create`` accepts a
+    caller-supplied assessment.
+    """
+
+    schema_version: int
+    candidate_policy_sha256: str
+    curriculum_policy: CurriculumPolicy
+    curriculum_policy_sha256: str
+    units: tuple[CurriculumTaskUnit, ...]
+    evidence: tuple[SealedEvaluationEvidence, ...]
+    assessments: tuple[CurriculumAssessment, ...]
+
+    def __init__(
+        self,
+        *,
+        candidate_policy_sha256: str,
+        curriculum_policy: CurriculumPolicy,
+        units: Iterable[CurriculumTaskUnit],
+        evidence: Iterable[SealedEvaluationEvidence],
+    ) -> None:
+        candidate = _sha256(
+            candidate_policy_sha256,
+            "candidate_policy_sha256",
+        )
+        canonical_policy = _canonical_curriculum_policy(curriculum_policy)
+        canonical_units = _canonical_curriculum_units(units)
+        canonical_evidence = _canonical_curriculum_evidence(evidence)
+        assessments = assess_curriculum(
+            units=canonical_units,
+            evidence=canonical_evidence,
+            candidate_policy_sha256=candidate,
+            policy=canonical_policy,
+        )
+        object.__setattr__(self, "schema_version", 1)
+        object.__setattr__(self, "candidate_policy_sha256", candidate)
+        object.__setattr__(self, "curriculum_policy", canonical_policy)
+        object.__setattr__(
+            self,
+            "curriculum_policy_sha256",
+            canonical_policy.fingerprint,
+        )
+        object.__setattr__(self, "units", canonical_units)
+        object.__setattr__(self, "evidence", canonical_evidence)
+        object.__setattr__(self, "assessments", assessments)
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        candidate_policy_sha256: str,
+        curriculum_policy: CurriculumPolicy,
+        units: Iterable[CurriculumTaskUnit],
+        evidence: Iterable[SealedEvaluationEvidence],
+    ) -> CurriculumSnapshot:
+        return cls(
+            candidate_policy_sha256=candidate_policy_sha256,
+            curriculum_policy=curriculum_policy,
+            units=units,
+            evidence=evidence,
+        )
+
+    @classmethod
+    def from_record(cls, value: Any) -> CurriculumSnapshot:
+        record = _mapping(value, "CurriculumSnapshot")
+        expected = {
+            "schema_version",
+            "candidate_policy_sha256",
+            "curriculum_policy",
+            "curriculum_policy_sha256",
+            "units",
+            "evidence",
+            "assessments",
+        }
+        _keys(record, expected, "CurriculumSnapshot")
+        if type(record["schema_version"]) is not int or record["schema_version"] != 1:
+            raise ValueError("Unsupported curriculum snapshot schema")
+        candidate = _sha256(
+            record["candidate_policy_sha256"],
+            "candidate_policy_sha256",
+        )
+        policy = CurriculumPolicy.from_record(record["curriculum_policy"])
+        policy = _canonical_curriculum_policy(policy)
+        policy_sha256 = _sha256(
+            record["curriculum_policy_sha256"],
+            "curriculum_policy_sha256",
+        )
+        if policy_sha256 != policy.fingerprint:
+            raise ValueError("Curriculum policy fingerprint mismatch")
+
+        raw_units = record["units"]
+        raw_evidence = record["evidence"]
+        raw_assessments = record["assessments"]
+        if not isinstance(raw_units, list) or not raw_units:
+            raise ValueError("CurriculumSnapshot.units must be a non-empty array")
+        if not isinstance(raw_evidence, list):
+            raise ValueError("CurriculumSnapshot.evidence must be an array")
+        if not isinstance(raw_assessments, list) or not raw_assessments:
+            raise ValueError(
+                "CurriculumSnapshot.assessments must be a non-empty array"
+            )
+        units = tuple(
+            CurriculumTaskUnit.from_record(item) for item in raw_units
+        )
+        unit_ids = tuple(item.unit_id for item in units)
+        if unit_ids != tuple(sorted(unit_ids)) or len(set(unit_ids)) != len(unit_ids):
+            raise ValueError("CurriculumSnapshot.units must be sorted and unique")
+        evidence = tuple(
+            SealedEvaluationEvidence.from_record(item) for item in raw_evidence
+        )
+        evidence_keys = tuple(
+            (item.unit_id, item.evidence_id) for item in evidence
+        )
+        if evidence_keys != tuple(sorted(evidence_keys)) or len(
+            set(evidence_keys)
+        ) != len(evidence_keys):
+            raise ValueError("CurriculumSnapshot.evidence must be sorted and unique")
+        stored_assessments = tuple(
+            CurriculumAssessment.from_record(item) for item in raw_assessments
+        )
+        assessment_ids = tuple(item.unit_id for item in stored_assessments)
+        if assessment_ids != tuple(sorted(assessment_ids)) or len(
+            set(assessment_ids)
+        ) != len(assessment_ids):
+            raise ValueError(
+                "CurriculumSnapshot.assessments must be sorted and unique"
+            )
+
+        snapshot = cls(
+            candidate_policy_sha256=candidate,
+            curriculum_policy=policy,
+            units=units,
+            evidence=evidence,
+        )
+        recomputed = [item.to_record() for item in snapshot.assessments]
+        if canonical_json(raw_assessments) != canonical_json(recomputed):
+            raise ValueError(
+                "CurriculumSnapshot assessments do not match sealed inputs"
+            )
+        return snapshot
+
+    @classmethod
+    def from_json(cls, text: str) -> CurriculumSnapshot:
+        return cls.from_record(strict_json_loads(text))
+
+    def validate(self) -> None:
+        if type(self.schema_version) is not int or self.schema_version != 1:
+            raise ValueError("Unsupported curriculum snapshot schema")
+        candidate = _sha256(
+            self.candidate_policy_sha256,
+            "candidate_policy_sha256",
+        )
+        policy = _canonical_curriculum_policy(self.curriculum_policy)
+        if self.curriculum_policy_sha256 != policy.fingerprint:
+            raise ValueError("Curriculum policy fingerprint mismatch")
+        units = _canonical_curriculum_units(self.units)
+        evidence = _canonical_curriculum_evidence(self.evidence)
+        if units != self.units:
+            raise ValueError("CurriculumSnapshot.units must be sorted exactly")
+        if evidence != self.evidence:
+            raise ValueError("CurriculumSnapshot.evidence must be sorted exactly")
+        expected = assess_curriculum(
+            units=units,
+            evidence=evidence,
+            candidate_policy_sha256=candidate,
+            policy=policy,
+        )
+        if canonical_json([item.to_record() for item in self.assessments]) != (
+            canonical_json([item.to_record() for item in expected])
+        ):
+            raise ValueError(
+                "CurriculumSnapshot assessments do not match sealed inputs"
+            )
+
+    def to_record(self) -> dict[str, Any]:
+        self.validate()
+        return {
+            "schema_version": self.schema_version,
+            "candidate_policy_sha256": self.candidate_policy_sha256,
+            "curriculum_policy": self.curriculum_policy.to_record(),
+            "curriculum_policy_sha256": self.curriculum_policy_sha256,
+            "units": [item.to_record() for item in self.units],
+            "evidence": [item.to_record() for item in self.evidence],
+            "assessments": [item.to_record() for item in self.assessments],
+        }
+
+    def to_json(self) -> str:
+        return canonical_json(self.to_record())
+
+    @property
+    def fingerprint(self) -> str:
+        return canonical_fingerprint(self.to_record())
+
+
+def build_curriculum_snapshot(
+    *,
+    candidate_policy_sha256: str,
+    curriculum_policy: CurriculumPolicy,
+    units: Iterable[CurriculumTaskUnit],
+    evidence: Iterable[SealedEvaluationEvidence],
+) -> CurriculumSnapshot:
+    """Build a snapshot while deriving every assessment from sealed inputs."""
+    return CurriculumSnapshot.create(
+        candidate_policy_sha256=candidate_policy_sha256,
+        curriculum_policy=curriculum_policy,
+        units=units,
+        evidence=evidence,
+    )
 
 
 def rank_curriculum(
