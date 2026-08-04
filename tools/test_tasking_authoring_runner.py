@@ -111,6 +111,14 @@ class TestAuthoringRunner(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "fingerprint drifted"):
                 run_proposer(command=command, request={"attempt": 1})
 
+    def test_interpreted_proposer_program_drift_is_hash_bound(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            script = _script(directory, "print('{}')\n")
+            command = _command(script)
+            script.write_text("print('{\"changed\":true}')\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "artifact fingerprint drifted"):
+                run_proposer(command=command, request={"attempt": 1})
+
     def test_environment_is_exactly_allowlisted_and_not_inherited(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             script = _script(

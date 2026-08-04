@@ -25,6 +25,7 @@ _BASE_ENVIRONMENT = {
 _STATUSES = frozenset(
     ("completed", "nonzero_exit", "timeout", "stdout_limit", "stderr_limit")
 )
+_INTERPRETER_PREFIXES = ("bash", "node", "perl", "python", "ruby", "sh", "zsh")
 
 
 def _file_sha256(path: Path) -> str:
@@ -112,10 +113,32 @@ DEFAULT_PROPOSER_EXECUTION_POLICY = ProposerExecutionPolicy(
 
 
 @dataclass(frozen=True)
+class ProposerArtifact:
+    path: str
+    sha256: str
+
+    def canonical(self) -> ProposerArtifact:
+        path = Path(self.path)
+        if not path.is_absolute() or "\x00" in self.path:
+            raise ValueError("Proposer artifact path must be absolute")
+        if (
+            not isinstance(self.sha256, str)
+            or len(self.sha256) != 64
+            or any(character not in "0123456789abcdef" for character in self.sha256)
+        ):
+            raise ValueError("Proposer artifact fingerprint is invalid")
+        return ProposerArtifact(path=str(path), sha256=self.sha256)
+
+    def to_record(self) -> dict[str, str]:
+        return {"path": self.path, "sha256": self.sha256}
+
+
+@dataclass(frozen=True)
 class ProposerCommand:
     command_id: str
     argv: tuple[str, ...]
     executable_sha256: str
+    artifacts: tuple[ProposerArtifact, ...]
 
     @classmethod
     def bind(cls, *, command_id: str, argv: tuple[str, ...]) -> ProposerCommand:
@@ -128,10 +151,25 @@ class ProposerCommand:
             raise ValueError("Proposer executable is unavailable") from error
         if not executable.is_absolute() or not stat.S_ISREG(mode):
             raise ValueError("Proposer executable must be an absolute regular file")
+        artifacts = []
+        for argument in argv[1:]:
+            candidate = Path(argument)
+            try:
+                candidate_mode = candidate.stat().st_mode
+            except OSError:
+                continue
+            if candidate.is_absolute() and stat.S_ISREG(candidate_mode):
+                artifacts.append(
+                    ProposerArtifact(
+                        path=str(candidate),
+                        sha256=_file_sha256(candidate),
+                    )
+                )
         return cls(
             command_id=command_id,
             argv=argv,
             executable_sha256=_file_sha256(executable),
+            artifacts=tuple(sorted(artifacts, key=lambda item: item.path)),
         ).canonical()
 
     def canonical(self) -> ProposerCommand:
@@ -160,10 +198,24 @@ class ProposerCommand:
             or any(character not in "0123456789abcdef" for character in self.executable_sha256)
         ):
             raise ValueError("Proposer executable fingerprint is invalid")
+        artifacts = tuple(item.canonical() for item in self.artifacts)
+        artifact_paths = tuple(item.path for item in artifacts)
+        if artifact_paths != tuple(sorted(set(artifact_paths))):
+            raise ValueError("Proposer artifacts must be sorted and unique")
+        executable_name = executable.name.lower()
+        if executable_name.startswith(_INTERPRETER_PREFIXES):
+            script_arguments = [
+                argument
+                for argument in self.argv[1:]
+                if not argument.startswith("-") and Path(argument).is_absolute()
+            ]
+            if script_arguments and script_arguments[0] not in set(artifact_paths):
+                raise ValueError("Interpreted proposer program must be hash-bound")
         return ProposerCommand(
             command_id=self.command_id,
             argv=tuple(self.argv),
             executable_sha256=self.executable_sha256,
+            artifacts=artifacts,
         )
 
     def verify_executable(self) -> None:
@@ -174,12 +226,20 @@ class ProposerCommand:
             raise ValueError("Proposer executable is unavailable") from error
         if actual != self.executable_sha256:
             raise ValueError("Proposer executable fingerprint drifted")
+        for artifact in self.artifacts:
+            try:
+                actual = _file_sha256(Path(artifact.path))
+            except OSError as error:
+                raise ValueError("Proposer artifact is unavailable") from error
+            if actual != artifact.sha256:
+                raise ValueError("Proposer artifact fingerprint drifted")
 
     def to_record(self) -> dict[str, Any]:
         return {
             "command_id": self.command_id,
             "argv": list(self.argv),
             "executable_sha256": self.executable_sha256,
+            "artifacts": [artifact.to_record() for artifact in self.artifacts],
         }
 
     @property
