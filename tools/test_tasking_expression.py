@@ -82,6 +82,50 @@ class TestTaskExpressionCompiler(unittest.TestCase):
         self.assertIs(evaluate_expression(goal, frame=close, schema=schema), True)
         self.assertIs(evaluate_expression(safety, frame=close, schema=schema), False)
 
+    def test_process_predicates_are_boolean_and_purpose_limited(self) -> None:
+        task, schema, parameters = _context()
+        process_expression = ExpressionSpec.from_record(
+            {
+                "op": "any",
+                "args": [
+                    {
+                        "op": "metric",
+                        "name": "reach.contact_violation",
+                        "at": "current",
+                    },
+                    {
+                        "op": "metric",
+                        "name": "reach.displacement_violation",
+                        "at": "current",
+                    },
+                ],
+            },
+            "$process",
+        )
+        program = compile_expression(
+            process_expression,
+            schema=schema,
+            parameters=task.environment.parameters,
+            parameter_capabilities=parameters,
+            purpose="process",
+            task_spec_fingerprint=task.fingerprint,
+        )
+
+        self.assertEqual(program.result_type, "boolean")
+        self.assertIs(
+            evaluate_expression(program, frame=_frame(schema), schema=schema),
+            False,
+        )
+        with self.assertRaisesRegex(ValueError, "process expression must return boolean"):
+            compile_expression(
+                task.reward_profiles[0].terms[0].expression,
+                schema=schema,
+                parameters=task.environment.parameters,
+                parameter_capabilities=parameters,
+                purpose="process",
+                task_spec_fingerprint=task.fingerprint,
+            )
+
     def test_unknown_metric_time_and_operator_are_rejected(self) -> None:
         task, schema, parameters = _context()
         cases = (
