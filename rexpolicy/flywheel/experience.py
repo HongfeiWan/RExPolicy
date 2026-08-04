@@ -11,6 +11,27 @@ SUCCESS_PATH_ROLE = "selected_success_path"
 SUCCESS_ROLES = frozenset((DIRECT_SUCCESS_ROLE, SUCCESS_PATH_ROLE))
 
 
+def format_sample_id(
+    generation: int,
+    rank: int,
+    episode: int,
+    decision: int,
+    world: int,
+) -> str:
+    """Return the one canonical current-collection sample identity."""
+    values = (generation, rank, episode, decision, world)
+    limits = (999999, 99999, 99999, 99999, 99999)
+    if any(
+        type(value) is not int or value < 0 or value > limit
+        for value, limit in zip(values, limits)
+    ):
+        raise ValueError("Sample provenance is outside canonical ID bounds")
+    return (
+        f"g{generation:06d}-r{rank:05d}-e{episode:05d}"
+        f"-d{decision:05d}-w{world:05d}"
+    )
+
+
 @dataclass
 class BranchOutcomeAccumulator:
     """Sticky oracle outcomes observed over an executed candidate prefix."""
@@ -94,9 +115,12 @@ class TrainingSample:
         source: str = "current",
     ) -> None:
         """Set the deterministic identity used by coverage and replay."""
-        self.sample_id = (
-            f"g{generation:06d}-r{rank:05d}-e{episode:05d}"
-            f"-d{decision:05d}-w{world:05d}"
+        self.sample_id = format_sample_id(
+            generation,
+            rank,
+            episode,
+            decision,
+            world,
         )
         self.generation = int(generation)
         self.rank = int(rank)

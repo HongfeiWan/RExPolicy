@@ -3655,26 +3655,18 @@ class GrootNewtonEnv:
 
     def dynamics_fingerprint_torch(self) -> dict[str, Any]:
         """Return reward-free physical/control state for Event Ledger v1."""
-        replay = self.replay_fingerprint_torch()
-        physical_task_fields = (
-            "obj_pose",
-            "initial_obj_pose",
-            "tcp_pose",
-            "goal_pos_world",
-            "reach_goal_pos_base",
-            "reach_reset_xy_offset",
-            "reach_eef_pos_world",
-            "reach_eef_pos_base",
-            "reach_distance",
-            "reach_bottle_displacement",
-            "reach_max_bottle_displacement",
+        from rexpolicy.tasking.dynamics_contract import (
+            DYNAMICS_CONTRACT_V1_TASK_FIELDS,
         )
+
+        replay = self.replay_fingerprint_torch()
         return {
             "joint": replay["joint"],
             "body": replay["body"],
             "control": replay["control"],
             "task": {
-                name: replay["task"][name] for name in physical_task_fields
+                name: replay["task"][name]
+                for name in DYNAMICS_CONTRACT_V1_TASK_FIELDS
             },
         }
 
