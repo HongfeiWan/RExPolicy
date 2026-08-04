@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import copy
 import json
 import unittest
 
@@ -74,13 +73,10 @@ def process_record() -> dict:
                             "at": "current",
                         },
                         {
-                            "op": "add",
+                            "op": "mul",
                             "args": [
+                                {"op": "const", "value": 2.5},
                                 {"op": "parameter", "name": "success_distance_m"},
-                                {
-                                    "op": "parameter",
-                                    "name": "reward_distance_scale_m",
-                                },
                             ],
                         },
                     ],
@@ -105,9 +101,9 @@ class TestProcessSpec(unittest.TestCase):
     def test_priority_order_changes_the_identity(self) -> None:
         original = ProcessSpecV1.from_record(process_record())
         changed_record = process_record()
-        changed_record["stages"][0], changed_record["stages"][1] = (
+        changed_record["stages"][1], changed_record["stages"][2] = (
+            changed_record["stages"][2],
             changed_record["stages"][1],
-            changed_record["stages"][0],
         )
         changed = ProcessSpecV1.from_record(changed_record)
 
@@ -128,6 +124,18 @@ class TestProcessSpec(unittest.TestCase):
         unsafe_ordinal["stages"][0]["ordinal"] = 9
         with self.assertRaisesRegex(ValueError, "must be null"):
             ProcessSpecV1.from_record(unsafe_ordinal)
+
+        unsafe_after_progress = process_record()
+        unsafe_after_progress["stages"].append(
+            unsafe_after_progress["stages"].pop(0)
+        )
+        with self.assertRaisesRegex(ValueError, "unsafe stages must precede"):
+            ProcessSpecV1.from_record(unsafe_after_progress)
+
+        nonzero_default = process_record()
+        nonzero_default["default_stage"]["ordinal"] = 3
+        with self.assertRaisesRegex(ValueError, "default progress ordinal"):
+            ProcessSpecV1.from_record(nonzero_default)
 
     def test_unknown_fields_and_unbounded_segments_fail_closed(self) -> None:
         unknown = process_record()

@@ -188,6 +188,16 @@ class ProcessSpecV1:
             record["default_stage"],
             "$.default_stage",
         )
+        if default.ordinal != 0:
+            raise ValueError("ProcessSpec default progress ordinal must be zero")
+        progress_seen = False
+        for stage in stages:
+            if stage.kind == "progress":
+                progress_seen = True
+            elif progress_seen:
+                raise ValueError(
+                    "ProcessSpec unsafe stages must precede progress stages"
+                )
         stage_ids = (default.stage_id, *(stage.stage_id for stage in stages))
         if len(set(stage_ids)) != len(stage_ids):
             raise ValueError("ProcessSpec stage IDs must be unique")
