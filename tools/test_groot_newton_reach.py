@@ -75,6 +75,52 @@ class TestGrootNewtonReach(unittest.TestCase):
         self.assertTrue(all(abs(value) <= 0.010 for value in first))
         self.assertEqual(env_module._reach_reset_xy_offset(1234, 0.0), (0.0, 0.0))
 
+    def test_copy_source_world_to_all_is_bitwise_exact_and_alias_safe(self):
+        import torch
+
+        float_bits = torch.tensor(
+            [
+                [0, 1065353216, -2147483648, 2143294004],
+                [1073741824, -1073741824, 1, 2139095040],
+                [1077936128, -1069547520, -8388608, 2141266757],
+                [1082130432, -1065353216, 8388607, 2139095039],
+            ],
+            dtype=torch.int32,
+        )
+        cases = {
+            "bool": torch.tensor(
+                [
+                    [False, False, True, False],
+                    [False, True, False, True],
+                    [True, False, True, True],
+                    [True, True, False, False],
+                ],
+                dtype=torch.bool,
+            ),
+            "uint8": torch.arange(16, dtype=torch.uint8).reshape(4, 4),
+            "int32": torch.arange(-8, 8, dtype=torch.int32).reshape(4, 4),
+            "float32": float_bits.view(torch.float32),
+        }
+
+        source_world = 2
+        for name, tensor in cases.items():
+            with self.subTest(dtype=name):
+                def exact_bits(value):
+                    return value.view(torch.int32) if name == "float32" else value
+
+                source_bits = exact_bits(tensor[source_world]).clone()
+                env_module._copy_source_world_to_all_(tensor, source_world)
+
+                actual = exact_bits(tensor)
+                expected = source_bits.expand_as(actual)
+                self.assertTrue(torch.equal(actual, expected))
+
+                preserved_world = exact_bits(tensor[1]).clone()
+                tensor[0].zero_()
+                self.assertTrue(torch.equal(exact_bits(tensor[1]), preserved_world))
+                tensor[source_world].fill_(True if name == "bool" else 1)
+                self.assertTrue(torch.equal(exact_bits(tensor[1]), preserved_world))
+
     def test_goal_is_world_offset_transformed_into_right_world_base(self):
         angle = math.pi / 2.0
         transforms = [

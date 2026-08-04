@@ -178,6 +178,16 @@ def _reach_reset_xy_offset(seed: int, jitter_m: float) -> tuple[float, float]:
     return x_unit * jitter_m, y_unit * jitter_m
 
 
+def _copy_source_world_to_all_(tensor: Any, source_world: int) -> None:
+    """Copy one environment-major row to every world in-place.
+
+    Snapshot the source before expanding it: cloning an already-expanded view
+    would allocate a temporary as large as the complete world batch.
+    """
+    source = tensor[source_world : source_world + 1].clone()
+    tensor.copy_(source.expand_as(tensor))
+
+
 @dataclass(frozen=True)
 class GrootNewtonEnvConfig:
     """Configuration for :class:`GrootNewtonEnv`.
@@ -3757,8 +3767,7 @@ class GrootNewtonEnv:
                 tensor.shape[0] // self.num_envs,
                 *tensor.shape[1:],
             )
-            source = rows[source_world : source_world + 1]
-            rows.copy_(source.expand_as(rows).clone())
+            _copy_source_world_to_all_(rows, source_world)
 
         def copy_dynamic_object(value: Any) -> None:
             for child in value.__dict__.values():
@@ -3785,8 +3794,7 @@ class GrootNewtonEnv:
                 )
             if tree.stride(0) == 0:
                 return
-            source = tree[source_world : source_world + 1]
-            tree.copy_(source.expand_as(tree).clone())
+            _copy_source_world_to_all_(tree, source_world)
 
         with torch.no_grad():
             copy_dynamic_object(self.state_0)
@@ -3809,8 +3817,7 @@ class GrootNewtonEnv:
                     array = getattr(mjw_data, name, None)
                     if isinstance(array, wp.array) and array.shape[0] == self.num_envs:
                         tensor = wp.to_torch(array)
-                        source = tensor[source_world : source_world + 1]
-                        tensor.copy_(source.expand_as(tensor).clone())
+                        _copy_source_world_to_all_(tensor, source_world)
             copy_tree(self.replay_fingerprint_torch())
             self.solver.reset(self.state_0, flags=0)
             self.contacts.clear()
