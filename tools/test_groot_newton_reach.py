@@ -65,6 +65,26 @@ class TestGrootNewtonReach(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "reach_reset_xy_jitter_m"):
             env_module.GrootNewtonEnvConfig(reach_reset_xy_jitter_m=-0.001)
 
+    def test_camera_launch_world_limit_is_checked_per_rendered_camera(self):
+        config = env_module.GrootNewtonEnvConfig(num_envs=6990)
+        self.assertEqual(config.num_envs, 6990)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"camera=wrist_view, resolution=640x480, "
+            r"requested_worlds=6991, max_worlds=6990",
+        ):
+            env_module.GrootNewtonEnvConfig(num_envs=6991)
+
+        self.assertEqual(
+            env_module.GrootNewtonEnvConfig(num_envs=6991, obs_mode="state").num_envs,
+            6991,
+        )
+        self.assertEqual(
+            env_module.GrootNewtonEnvConfig(num_envs=6991, render_images=False).num_envs,
+            6991,
+        )
+
     def test_reset_recipe_offset_is_stable_bounded_and_distinct(self):
         first = env_module._reach_reset_xy_offset(1234, 0.010)
         repeated = env_module._reach_reset_xy_offset(1234, 0.010)

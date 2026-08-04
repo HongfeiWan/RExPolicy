@@ -103,7 +103,9 @@ _UNCONFIRMED_OPPOSED_FINGER_WEIGHT = 0.02
 _UNCONFIRMED_OPPOSED_STREAK_FRAMES = 5
 _UNCONFIRMED_OPPOSED_REWARD_MAX = 1.60
 
-_OBS_MODES = {"state", "state_dict", "rgb", "state_dict+rgb", "policy"}
+_IMAGE_OBS_MODES = {"rgb", "state_dict+rgb", "policy"}
+_OBS_MODES = {"state", "state_dict", *_IMAGE_OBS_MODES}
+_CAMERA_LAUNCH_INT32_MAX = (1 << 31) - 1
 _FINGER_NAMES = ("thumb", "index", "middle", "ring", "pinky")
 _FINGER_ROOT_HAND_INDICES = (0, 2, 3, 4, 5)
 _FINGER_ROOT_JOINT_NAMES = tuple(HAND_JOINT_NAMES[index] for index in _FINGER_ROOT_HAND_INDICES)
@@ -186,6 +188,19 @@ def _copy_source_world_to_all_(tensor: Any, source_world: int) -> None:
     """
     source = tensor[source_world : source_world + 1].clone()
     tensor.copy_(source.expand_as(tensor))
+
+
+def _validate_camera_launch_world_count(
+    *, camera_name: str, width: int, height: int, num_envs: int
+) -> None:
+    """Fail before a tiled-camera launch exceeds its signed int32 index."""
+    max_worlds = _CAMERA_LAUNCH_INT32_MAX // (width * height)
+    if num_envs > max_worlds:
+        raise ValueError(
+            "Camera launch exceeds the signed int32 index limit: "
+            f"camera={camera_name}, resolution={width}x{height}, "
+            f"requested_worlds={num_envs}, max_worlds={max_worlds}"
+        )
 
 
 @dataclass(frozen=True)
@@ -350,6 +365,17 @@ class GrootNewtonEnvConfig:
             raise ValueError("capture_graph requires an even substeps_per_frame so state buffers do not alias")
         if min(self.ego_width, self.ego_height, self.wrist_width, self.wrist_height) < 1:
             raise ValueError("camera dimensions must be positive")
+        if self.render_images and self.obs_mode in _IMAGE_OBS_MODES:
+            for camera_name, width, height in (
+                ("ego_view", self.ego_width, self.ego_height),
+                ("wrist_view", self.wrist_width, self.wrist_height),
+            ):
+                _validate_camera_launch_world_count(
+                    camera_name=camera_name,
+                    width=width,
+                    height=height,
+                    num_envs=self.num_envs,
+                )
         if min(self.rigid_contacts_per_env, self.triangle_pairs_per_env) < 1:
             raise ValueError("contact buffer capacities must be positive")
         for name, values in (
@@ -1817,7 +1843,7 @@ class GrootNewtonEnv:
         self.render_mode = None
         self._control_mode_id = _CONTROL_MODE_IDS[self.control_mode]
         self._reward_mode_id = _REWARD_MODE_IDS[self.reward_mode]
-        self._expose_images = self.obs_mode in {"rgb", "state_dict+rgb", "policy"}
+        self._expose_images = self.obs_mode in _IMAGE_OBS_MODES
         self._render_images = self.config.render_images and self._expose_images
 
         args = scene_runtime.Example.create_parser().parse_args([])
