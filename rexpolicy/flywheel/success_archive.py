@@ -10,8 +10,15 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
+from rexpolicy.tasking.canonical import canonical_fingerprint
+
 from .checkpoint import file_sha256
 from .experience import SUCCESS_ROLES, TrainingSample
+from .quality_diversity import (
+    BalancedReplayState,
+    QualityDiversityIndex,
+    plan_balanced_replay,
+)
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _REASON_CODE = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -348,6 +355,90 @@ class SuccessArchive:
         chosen = [eligible[(start + offset) % len(eligible)] for offset in range(count)]
         self.cursor = (start + count) % len(eligible)
         return chosen
+
+    def plan_quality_balanced(
+        self,
+        *,
+        replay_per_rank: int,
+        max_generation_exclusive: int,
+        index: QualityDiversityIndex,
+        state: BalancedReplayState,
+    ) -> tuple[list[SuccessReference], BalancedReplayState]:
+        """Select exact eligible references through a hash-bound QD view.
+
+        This explicit path deliberately owns no checkpointed cursor.  Callers
+        must checkpoint the returned ``BalancedReplayState`` and explicitly
+        rebase it whenever the immutable QD index changes.  The legacy
+        :meth:`plan` cursor and selection order therefore remain unchanged.
+        """
+        if type(replay_per_rank) is not int or replay_per_rank < 0:
+            raise ValueError("replay_per_rank cannot be negative")
+        if (
+            type(max_generation_exclusive) is not int
+            or max_generation_exclusive < 0
+        ):
+            raise ValueError(
+                "max_generation_exclusive must be a non-negative integer"
+            )
+        canonical_index = QualityDiversityIndex.from_record(index.to_record())
+        eligible = tuple(
+            reference
+            for reference in self._references
+            if reference.source_generation < max_generation_exclusive
+            and reference.sample_id not in self._quarantined
+        )
+        eligible_by_sample_id = {
+            reference.sample_id: reference for reference in eligible
+        }
+        descriptor_by_sample_id = {
+            descriptor.sample_id: descriptor
+            for descriptor in canonical_index.descriptors
+        }
+        if set(descriptor_by_sample_id) != set(eligible_by_sample_id):
+            missing = sorted(
+                set(eligible_by_sample_id).difference(descriptor_by_sample_id)
+            )
+            extra = sorted(
+                set(descriptor_by_sample_id).difference(eligible_by_sample_id)
+            )
+            detail = []
+            if missing:
+                detail.append(f"missing={','.join(missing)}")
+            if extra:
+                detail.append(f"extra={','.join(extra)}")
+            raise ValueError(
+                "QD index sample IDs do not exactly match eligible successes"
+                + (f": {'; '.join(detail)}" if detail else "")
+            )
+        for sample_id in sorted(eligible_by_sample_id):
+            reference = eligible_by_sample_id[sample_id]
+            descriptor = descriptor_by_sample_id[sample_id]
+            expected_sha256 = canonical_fingerprint(reference.to_record())
+            if descriptor.success_reference_sha256 != expected_sha256:
+                raise ValueError(
+                    "QD descriptor success-reference hash mismatch for "
+                    f"{sample_id}"
+                )
+            if descriptor.task_id != reference.task_id:
+                raise ValueError(
+                    f"QD descriptor task binding mismatch for {sample_id}"
+                )
+            if descriptor.reward_profile_id != reference.reward_profile_id:
+                raise ValueError(
+                    "QD descriptor reward-profile binding mismatch for "
+                    f"{sample_id}"
+                )
+        balanced = plan_balanced_replay(
+            index=canonical_index,
+            count=min(replay_per_rank, len(eligible)),
+            state=state,
+        )
+        if len(set(balanced.sample_ids)) != len(balanced.sample_ids):
+            raise AssertionError("Quality-balanced plan repeated a success")
+        return (
+            [eligible_by_sample_id[sample_id] for sample_id in balanced.sample_ids],
+            balanced.next_state,
+        )
 
     def state_dict(self) -> dict[str, Any]:
         """Return the restart state; shards remain the source of truth."""

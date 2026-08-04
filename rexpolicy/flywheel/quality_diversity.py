@@ -714,36 +714,54 @@ def plan_balanced_replay(
     count: int,
     state: BalancedReplayState,
 ) -> BalancedReplayPlan:
-    """Round-robin across cell/profile/state strata and within each stratum."""
+    """Round-robin across strata without repeating a success in one plan."""
     if type(count) is not int or count < 0:
         raise ValueError("Balanced replay count must be non-negative")
     canonical_index = QualityDiversityIndex.from_record(index.to_record())
-    state.validate(canonical_index)
+    canonical_state = BalancedReplayState.from_record(
+        state.to_record(),
+        index=canonical_index,
+    )
     descriptor_by_sha = {
         item.fingerprint: item for item in canonical_index.descriptors
     }
     strata = _balanced_replay_strata(canonical_index)
     ordered_strata = tuple(sorted(strata))
-    cursors = dict(state.member_cursors)
+    cursors = dict(canonical_state.member_cursors)
     unknown = sorted(set(cursors).difference(ordered_strata))
     if unknown:
         raise ValueError("Balanced replay state contains unknown strata")
+    target_count = min(count, len(canonical_index.descriptors))
     chosen: list[SuccessBehaviorDescriptor] = []
-    for offset in range(count):
+    chosen_sha256s: set[str] = set()
+    attempted_strata = 0
+    while len(chosen) < target_count:
         stratum = ordered_strata[
-            (state.stratum_cursor + offset) % len(ordered_strata)
+            (canonical_state.stratum_cursor + attempted_strata)
+            % len(ordered_strata)
         ]
+        attempted_strata += 1
         members = strata[stratum]
         cursor = cursors.get(stratum, 0)
-        descriptor = members[cursor % len(members)]
+        descriptor = None
+        cursor_advance = 0
+        for member_offset in range(len(members)):
+            candidate = members[(cursor + member_offset) % len(members)]
+            if candidate.fingerprint not in chosen_sha256s:
+                descriptor = candidate
+                cursor_advance = member_offset + 1
+                break
+        if descriptor is None:
+            continue
         if descriptor_by_sha[descriptor.fingerprint] != descriptor:
             raise AssertionError("Internal quality-diversity descriptor drift")
         chosen.append(descriptor)
-        cursors[stratum] = cursor + 1
+        chosen_sha256s.add(descriptor.fingerprint)
+        cursors[stratum] = cursor + cursor_advance
     next_state = BalancedReplayState(
         schema_version=1,
         quality_diversity_index_sha256=canonical_index.fingerprint,
-        stratum_cursor=state.stratum_cursor + count,
+        stratum_cursor=canonical_state.stratum_cursor + attempted_strata,
         member_cursors=tuple(sorted(cursors.items())),
     )
     next_state.validate(canonical_index)
