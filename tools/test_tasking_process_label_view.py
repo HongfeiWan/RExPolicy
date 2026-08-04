@@ -63,6 +63,10 @@ class TestProcessLabelView(unittest.TestCase):
             {label.source_sequence for label in view.transition_labels},
             {1, 2, 5, 6},
         )
+        self.assertEqual(
+            view.task_oracle_sha256,
+            tasks.contract.oracle_fingerprint,
+        )
 
     def test_unsafe_stage_precedes_overlapping_goal_stage(self) -> None:
         tasks, process, ledger = _inputs(unsafe_goal=True)

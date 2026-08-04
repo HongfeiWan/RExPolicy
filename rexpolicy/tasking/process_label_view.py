@@ -148,6 +148,7 @@ class ProcessLabelView:
     source_bindings_sha256: str
     task_contract_id: str
     task_contract_sha256: str
+    task_oracle_sha256: str
     process_contract_id: str
     process_contract_sha256: str
     process_spec_id: str
@@ -166,6 +167,7 @@ class ProcessLabelView:
             "source_bindings_sha256": self.source_bindings_sha256,
             "task_contract_id": self.task_contract_id,
             "task_contract_sha256": self.task_contract_sha256,
+            "task_oracle_sha256": self.task_oracle_sha256,
             "process_contract_id": self.process_contract_id,
             "process_contract_sha256": self.process_contract_sha256,
             "process_spec_id": self.process_spec_id,
@@ -494,6 +496,7 @@ def materialize_process_label_view(
         ),
         task_contract_id=task_contract.task_contract_id,
         task_contract_sha256=task_contract.fingerprint,
+        task_oracle_sha256=task_contract.oracle_fingerprint,
         process_contract_id=process_contract.process_contract_id,
         process_contract_sha256=process_contract.fingerprint,
         process_spec_id=process_contract.process_spec_id,
