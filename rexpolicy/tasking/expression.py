@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
 from .canonical import canonical_fingerprint
-from .capabilities import EventSchema, MetricSpec
+from .capabilities import EventSchema, MetricSpec, ParameterCapability
+from .immutable import freeze_json
 from .model import ExpressionSpec
 
 NUMBER = "number"
@@ -44,14 +46,55 @@ class NumericInterval:
 
 
 @dataclass(frozen=True)
+class MetricOperand:
+    name: str
+    at: str
+
+    def to_record(self) -> dict[str, str]:
+        return {"name": self.name, "at": self.at}
+
+
+@dataclass(frozen=True)
+class ParameterOperand:
+    name: str
+    value: float
+    unit: str
+
+    def to_record(self) -> dict[str, Any]:
+        return {"name": self.name, "value": self.value, "unit": self.unit}
+
+
+@dataclass(frozen=True)
 class Instruction:
     opcode: str
     operand: Any = None
 
+    def __post_init__(self) -> None:
+        if self.opcode == "load_metric":
+            valid = isinstance(self.operand, MetricOperand)
+        elif self.opcode == "load_parameter":
+            valid = isinstance(self.operand, ParameterOperand)
+        elif self.opcode == "push_const":
+            valid = (
+                not isinstance(self.operand, bool)
+                and isinstance(self.operand, (int, float))
+                and math.isfinite(float(self.operand))
+            )
+        elif self.opcode in {"all", "any"}:
+            valid = type(self.operand) is int and self.operand >= 1
+        else:
+            valid = self.operand is None
+        if not valid:
+            raise ValueError(f"Expression opcode {self.opcode!r} has invalid operand")
+
     def to_record(self) -> dict[str, Any]:
         record = {"opcode": self.opcode}
         if self.operand is not None:
-            record["operand"] = self.operand
+            record["operand"] = (
+                self.operand.to_record()
+                if isinstance(self.operand, (MetricOperand, ParameterOperand))
+                else self.operand
+            )
         return record
 
 
@@ -61,8 +104,17 @@ class MetricFrame:
 
     event_schema_id: str
     event_schema_fingerprint: str
-    previous: dict[str, Any]
-    current: dict[str, Any]
+    previous: Mapping[str, Any]
+    current: Mapping[str, Any]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.previous, Mapping) or not isinstance(
+            self.current,
+            Mapping,
+        ):
+            raise ValueError("Metric frame values must be mappings")
+        object.__setattr__(self, "previous", freeze_json(self.previous))
+        object.__setattr__(self, "current", freeze_json(self.current))
 
 
 @dataclass(frozen=True)
@@ -70,6 +122,7 @@ class ExpressionProgram:
     bytecode_version: int
     purpose: str
     result_type: str
+    result_unit: str
     task_spec_fingerprint: str
     event_schema_id: str
     event_schema_fingerprint: str
@@ -80,9 +133,12 @@ class ExpressionProgram:
 
     def to_record(self) -> dict[str, Any]:
         return {
+            "artifact_type": "rexpolicy_expression_program",
+            "program_schema_version": 1,
             "bytecode_version": self.bytecode_version,
             "purpose": self.purpose,
             "result_type": self.result_type,
+            "result_unit": self.result_unit,
             "task_spec_fingerprint": self.task_spec_fingerprint,
             "event_schema_id": self.event_schema_id,
             "event_schema_fingerprint": self.event_schema_fingerprint,
@@ -107,6 +163,7 @@ class ExpressionProgram:
 @dataclass
 class _Compiled:
     value_type: str
+    unit: str
     interval: NumericInterval | None
     instructions: list[Instruction]
     referenced_metrics: set[str]
@@ -127,6 +184,14 @@ def _arity(expression: ExpressionSpec, expected: int | None) -> tuple[Expression
 def _require_type(compiled: _Compiled, value_type: str, op: str) -> None:
     if compiled.value_type != value_type:
         raise ValueError(f"Expression op {op!r} requires {value_type} operands")
+
+
+def _require_same_unit(left: _Compiled, right: _Compiled, op: str) -> str:
+    if left.unit != right.unit:
+        raise ValueError(
+            f"Expression op {op!r} mixes units {left.unit!r} and {right.unit!r}"
+        )
+    return left.unit
 
 
 def _bounded_binary(
@@ -178,7 +243,8 @@ def _compile(
     expression: ExpressionSpec,
     *,
     schema: EventSchema,
-    parameters: dict[str, Any],
+    parameters: Mapping[str, Any],
+    parameter_capabilities: Mapping[str, ParameterCapability],
     limits: CompileLimits,
 ) -> _Compiled:
     op = expression.op
@@ -186,6 +252,7 @@ def _compile(
         value = float(expression.payload["value"])
         return _Compiled(
             value_type=NUMBER,
+            unit="1",
             interval=NumericInterval.exact(value),
             instructions=[Instruction("push_const", value)],
             referenced_metrics=set(),
@@ -207,8 +274,11 @@ def _compile(
         )
         return _Compiled(
             value_type=metric.value_type,
+            unit=metric.unit,
             interval=interval,
-            instructions=[Instruction("load_metric", {"name": name, "at": at})],
+            instructions=[
+                Instruction("load_metric", MetricOperand(name=name, at=at))
+            ],
             referenced_metrics={name},
             nodes=1,
         )
@@ -216,17 +286,28 @@ def _compile(
         name = expression.payload["name"]
         if name not in parameters:
             raise ValueError(f"Expression references unknown parameter {name!r}")
+        try:
+            capability = parameter_capabilities[name]
+        except KeyError as error:
+            raise ValueError(
+                f"Expression parameter {name!r} is not in the trusted capability"
+            ) from error
         value = parameters[name]
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
+        if capability.value_type != NUMBER:
             raise ValueError(f"Expression parameter {name!r} is not scalar numeric")
+        capability.validate_value(value, f"parameter.{name}")
         number = float(value)
         if not math.isfinite(number):
             raise ValueError(f"Expression parameter {name!r} is non-finite")
         return _Compiled(
             value_type=NUMBER,
+            unit=capability.unit,
             interval=NumericInterval.exact(number),
             instructions=[
-                Instruction("load_parameter", {"name": name, "value": number})
+                Instruction(
+                    "load_parameter",
+                    ParameterOperand(name=name, value=number, unit=capability.unit),
+                )
             ],
             referenced_metrics=set(),
             nodes=1,
@@ -238,6 +319,7 @@ def _compile(
             _arity(expression, 1)[0],
             schema=schema,
             parameters=parameters,
+            parameter_capabilities=parameter_capabilities,
             limits=limits,
         )
         _require_type(child, NUMBER, op)
@@ -257,6 +339,7 @@ def _compile(
             )
         return _Compiled(
             value_type=NUMBER,
+            unit=child.unit,
             interval=result_interval,
             instructions=[*child.instructions, Instruction(op)],
             referenced_metrics=set(child.referenced_metrics),
@@ -267,11 +350,13 @@ def _compile(
             _arity(expression, 1)[0],
             schema=schema,
             parameters=parameters,
+            parameter_capabilities=parameter_capabilities,
             limits=limits,
         )
         _require_type(child, BOOLEAN, op)
         return _Compiled(
             value_type=BOOLEAN,
+            unit="bool",
             interval=None,
             instructions=[*child.instructions, Instruction("not")],
             referenced_metrics=set(child.referenced_metrics),
@@ -283,23 +368,53 @@ def _compile(
         if not args:
             raise ValueError(f"Expression op {op!r} requires at least one arg")
         children = [
-            _compile(arg, schema=schema, parameters=parameters, limits=limits)
+            _compile(
+                arg,
+                schema=schema,
+                parameters=parameters,
+                parameter_capabilities=parameter_capabilities,
+                limits=limits,
+            )
             for arg in args
         ]
         for child in children:
             _require_type(child, BOOLEAN, op)
-        return _combine(children, BOOLEAN, None, Instruction(op, len(children)))
+        return _combine(
+            children,
+            BOOLEAN,
+            "bool",
+            None,
+            Instruction(op, len(children)),
+        )
 
     binary_numeric = {"add", "sub", "mul", "min", "max"}
     comparisons = {"lt", "le", "gt", "ge"}
     if op in binary_numeric | comparisons:
         args = _arity(expression, 2)
         children = [
-            _compile(arg, schema=schema, parameters=parameters, limits=limits)
+            _compile(
+                arg,
+                schema=schema,
+                parameters=parameters,
+                parameter_capabilities=parameter_capabilities,
+                limits=limits,
+            )
             for arg in args
         ]
         for child in children:
             _require_type(child, NUMBER, op)
+        if op == "mul":
+            if children[0].unit == "1":
+                result_unit = children[1].unit
+            elif children[1].unit == "1":
+                result_unit = children[0].unit
+            else:
+                raise ValueError(
+                    "Expression op 'mul' requires at least one unitless operand"
+                )
+        else:
+            operand_unit = _require_same_unit(children[0], children[1], op)
+            result_unit = "bool" if op in comparisons else operand_unit
         interval = (
             None
             if op in comparisons
@@ -308,25 +423,48 @@ def _compile(
         return _combine(
             children,
             BOOLEAN if op in comparisons else NUMBER,
+            result_unit,
             interval,
             Instruction(op),
         )
     if op == "eq":
         args = _arity(expression, 2)
         children = [
-            _compile(arg, schema=schema, parameters=parameters, limits=limits)
+            _compile(
+                arg,
+                schema=schema,
+                parameters=parameters,
+                parameter_capabilities=parameter_capabilities,
+                limits=limits,
+            )
             for arg in args
         ]
         if children[0].value_type != children[1].value_type:
             raise ValueError("Expression op 'eq' requires equal operand types")
-        return _combine(children, BOOLEAN, None, Instruction("eq"))
+        if children[0].value_type == NUMBER:
+            _require_same_unit(children[0], children[1], op)
+        return _combine(
+            children,
+            BOOLEAN,
+            "bool",
+            None,
+            Instruction("eq"),
+        )
     if op == "div":
         args = _arity(expression, 2)
         numerator = _compile(
-            args[0], schema=schema, parameters=parameters, limits=limits
+            args[0],
+            schema=schema,
+            parameters=parameters,
+            parameter_capabilities=parameter_capabilities,
+            limits=limits,
         )
         denominator = _compile(
-            args[1], schema=schema, parameters=parameters, limits=limits
+            args[1],
+            schema=schema,
+            parameters=parameters,
+            parameter_capabilities=parameter_capabilities,
+            limits=limits,
         )
         _require_type(numerator, NUMBER, op)
         _require_type(denominator, NUMBER, op)
@@ -340,6 +478,15 @@ def _compile(
         ):
             raise ValueError("Division requires a proven non-zero constant divisor")
         divisor = interval.minimum
+        if denominator.unit == "1":
+            result_unit = numerator.unit
+        elif numerator.unit == denominator.unit:
+            result_unit = "1"
+        else:
+            raise ValueError(
+                f"Expression op 'div' mixes units {numerator.unit!r} "
+                f"and {denominator.unit!r}"
+            )
         numerator_interval = numerator.interval or NumericInterval(None, None)
         if numerator_interval.minimum is None or numerator_interval.maximum is None:
             result_interval = NumericInterval(None, None)
@@ -352,19 +499,28 @@ def _compile(
         return _combine(
             [numerator, denominator],
             NUMBER,
+            result_unit,
             result_interval,
             Instruction("div"),
         )
     if op == "clip":
         args = _arity(expression, 3)
         children = [
-            _compile(arg, schema=schema, parameters=parameters, limits=limits)
+            _compile(
+                arg,
+                schema=schema,
+                parameters=parameters,
+                parameter_capabilities=parameter_capabilities,
+                limits=limits,
+            )
             for arg in args
         ]
         for child in children:
             _require_type(child, NUMBER, op)
         lower = children[1].interval
         upper = children[2].interval
+        result_unit = _require_same_unit(children[0], children[1], op)
+        _require_same_unit(children[0], children[2], op)
         if (
             lower is None
             or upper is None
@@ -378,6 +534,7 @@ def _compile(
         return _combine(
             children,
             NUMBER,
+            result_unit,
             NumericInterval(lower.minimum, upper.minimum),
             Instruction("clip"),
         )
@@ -387,6 +544,7 @@ def _compile(
 def _combine(
     children: list[_Compiled],
     value_type: str,
+    unit: str,
     interval: NumericInterval | None,
     instruction: Instruction,
 ) -> _Compiled:
@@ -398,7 +556,7 @@ def _combine(
         metrics.update(child.referenced_metrics)
         nodes += child.nodes
     instructions.append(instruction)
-    return _Compiled(value_type, interval, instructions, metrics, nodes)
+    return _Compiled(value_type, unit, interval, instructions, metrics, nodes)
 
 
 def _stack_depth(instructions: list[Instruction]) -> int:
@@ -438,7 +596,8 @@ def compile_expression(
     expression: ExpressionSpec,
     *,
     schema: EventSchema,
-    parameters: dict[str, Any],
+    parameters: Mapping[str, Any],
+    parameter_capabilities: Mapping[str, ParameterCapability],
     purpose: str,
     task_spec_fingerprint: str,
     limits: CompileLimits | None = None,
@@ -452,6 +611,7 @@ def compile_expression(
         expression,
         schema=schema,
         parameters=parameters,
+        parameter_capabilities=parameter_capabilities,
         limits=active_limits,
     )
     disallowed_metrics = sorted(
@@ -467,6 +627,8 @@ def compile_expression(
     expected = BOOLEAN if purpose in BOOLEAN_PURPOSES else NUMBER
     if compiled.value_type != expected:
         raise ValueError(f"{purpose} expression must return {expected}")
+    if purpose == "reward" and compiled.unit != "1":
+        raise ValueError("reward expression must return a unitless number")
     if compiled.nodes > active_limits.max_nodes:
         raise ValueError("Expression exceeds the AST node limit")
     if len(compiled.instructions) > active_limits.max_instructions:
@@ -478,6 +640,7 @@ def compile_expression(
         bytecode_version=1,
         purpose=purpose,
         result_type=compiled.value_type,
+        result_unit=compiled.unit,
         task_spec_fingerprint=task_spec_fingerprint,
         event_schema_id=schema.event_schema_id,
         event_schema_fingerprint=schema.fingerprint,
@@ -544,10 +707,10 @@ def evaluate_expression(
             stack.append(float(instruction.operand))
         elif op == "load_metric":
             operand = instruction.operand
-            values = frame.previous if operand["at"] == "previous" else frame.current
-            stack.append(values[operand["name"]])
+            values = frame.previous if operand.at == "previous" else frame.current
+            stack.append(values[operand.name])
         elif op == "load_parameter":
-            stack.append(float(instruction.operand["value"]))
+            stack.append(float(instruction.operand.value))
         elif op in {"neg", "abs", "not"}:
             value = stack.pop()
             stack.append(-value if op == "neg" else abs(value) if op == "abs" else not value)
