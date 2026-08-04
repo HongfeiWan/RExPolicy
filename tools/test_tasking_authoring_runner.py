@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import stat
 import sys
 import tempfile
 import unittest
@@ -34,20 +35,42 @@ def _command(script: Path, *arguments: str) -> ProposerCommand:
     )
 
 
+def _resolved_bubblewrap_test_python() -> str | None:
+    """Return one real interpreter file already covered by the /usr mount."""
+
+    try:
+        resolved = Path("/usr/bin/python3").resolve(strict=True)
+        mode = resolved.lstat().st_mode
+        resolved.relative_to("/usr")
+    except (OSError, ValueError):
+        return None
+    if not stat.S_ISREG(mode):
+        return None
+    return str(resolved)
+
+
+BUBBLEWRAP_TEST_PYTHON = _resolved_bubblewrap_test_python()
+
+
 def _sandbox_command(
     script: Path,
     *arguments: str,
     profile=DEFAULT_BUBBLEWRAP_SANDBOX_PROFILE,
 ) -> BubblewrapProposerCommand:
+    if BUBBLEWRAP_TEST_PYTHON is None:
+        raise RuntimeError("Bubblewrap test interpreter is unavailable")
     return BubblewrapProposerCommand.bind(
-        proposer_command=_command(script, *arguments),
+        proposer_command=ProposerCommand.bind(
+            command_id="rexpolicy/fake_proposer/v1",
+            argv=(BUBBLEWRAP_TEST_PYTHON, str(script), *arguments),
+        ),
         sandbox_profile=profile,
     )
 
 
 _BUBBLEWRAP_AVAILABLE = sys.platform.startswith("linux") and Path(
     "/usr/bin/bwrap"
-).is_file()
+).is_file() and BUBBLEWRAP_TEST_PYTHON is not None
 
 
 class TestAuthoringRunner(unittest.TestCase):
@@ -316,6 +339,25 @@ class TestBubblewrapAuthoringRunner(unittest.TestCase):
             command = _sandbox_command(script)
             script.write_text("print('changed')\n", encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "artifact fingerprint drifted"):
+                run_proposer(command=command, request={"attempt": 1})
+
+    def test_outside_runtime_symlinked_executable_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            script = _script(directory, "print('{}')\n")
+            executable = Path(directory) / "python"
+            executable.symlink_to(BUBBLEWRAP_TEST_PYTHON)
+            proposer = ProposerCommand.bind(
+                command_id="rexpolicy/symlinked_fake_proposer/v1",
+                argv=(str(executable), str(script)),
+            )
+            command = BubblewrapProposerCommand.bind(
+                proposer_command=proposer,
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "Sandboxed proposer executable must be a regular file",
+            ):
                 run_proposer(command=command, request={"attempt": 1})
 
 

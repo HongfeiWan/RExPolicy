@@ -45,6 +45,7 @@ from tools.test_tasking_authoring_orchestrator import (
     _brief_record,
     _candidate_record,
 )
+from tools.test_tasking_authoring_runner import BUBBLEWRAP_TEST_PYTHON
 from tools.test_tasking_authoring_brief import _snapshot
 from rexpolicy.tasking.authoring_brief import PublicAuthoringBrief
 
@@ -55,7 +56,7 @@ _PROCESS_V2_PATH = (
 )
 _BUBBLEWRAP_AVAILABLE = sys.platform.startswith("linux") and Path(
     "/usr/bin/bwrap"
-).is_file()
+).is_file() and BUBBLEWRAP_TEST_PYTHON is not None
 
 
 class DurableAuthoringFixture(unittest.TestCase):
@@ -370,7 +371,7 @@ class TestDurableAuthoringJob(DurableAuthoringFixture):
             )
             trusted_wrapper = ProposerCommand.bind(
                 command_id="rexpolicy/sandboxed_durable_fake_proposer/v1",
-                argv=(sys.executable, str(script)),
+                argv=(BUBBLEWRAP_TEST_PYTHON, str(script)),
             )
             command = BubblewrapProposerCommand.bind(
                 proposer_command=trusted_wrapper,
