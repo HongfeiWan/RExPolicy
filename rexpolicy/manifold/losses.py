@@ -11,6 +11,7 @@ import torch.nn.functional as functional
 from .config import SuccessManifoldConfig
 from .distributed import all_gather_tensor, all_gather_values
 from .encoder import FutureTrajectoryOutput, FutureTrajectoryReconstruction
+from .selector import DiagonalGaussian
 
 
 @dataclass(frozen=True)
@@ -29,6 +30,13 @@ class SelfSupervisedLosses:
     info_nce: torch.Tensor
     variance: torch.Tensor
     covariance: torch.Tensor
+    total: torch.Tensor
+
+
+@dataclass(frozen=True)
+class SelectorLosses:
+    negative_log_likelihood: torch.Tensor
+    contrastive_alignment: torch.Tensor
     total: torch.Tensor
 
 
@@ -223,5 +231,45 @@ def success_manifold_losses(
         info_nce=info_nce,
         variance=diversity.variance,
         covariance=diversity.covariance,
+        total=total,
+    )
+
+
+def success_selector_losses(
+    distribution: DiagonalGaussian,
+    target_latents: torch.Tensor,
+    *,
+    contrastive_weight: float = 1.0,
+) -> SelectorLosses:
+    """Train current state -> reachable latent without skill labels."""
+    if not isinstance(distribution, DiagonalGaussian):
+        raise TypeError("distribution must be a DiagonalGaussian")
+    if (
+        not isinstance(target_latents, torch.Tensor)
+        or target_latents.shape != distribution.mean.shape
+        or not torch.is_floating_point(target_latents)
+        or target_latents.device != distribution.mean.device
+    ):
+        raise ValueError("target_latents must align with selector distribution")
+    if (
+        isinstance(contrastive_weight, bool)
+        or not isinstance(contrastive_weight, (int, float))
+        or float(contrastive_weight) < 0.0
+    ):
+        raise ValueError("contrastive_weight must be non-negative")
+    inverse_variance = torch.exp(-2.0 * distribution.log_std)
+    squared_error = (target_latents - distribution.mean).square()
+    negative_log_likelihood = (
+        0.5 * squared_error * inverse_variance + distribution.log_std
+    ).mean()
+    predicted = functional.normalize(distribution.mean, dim=-1)
+    target = functional.normalize(target_latents.detach(), dim=-1)
+    contrastive_alignment = (1.0 - (predicted * target).sum(dim=-1)).mean()
+    total = negative_log_likelihood + float(contrastive_weight) * (
+        contrastive_alignment
+    )
+    return SelectorLosses(
+        negative_log_likelihood=negative_log_likelihood,
+        contrastive_alignment=contrastive_alignment,
         total=total,
     )

@@ -308,6 +308,25 @@ class SuccessModeSelectorTest(unittest.TestCase):
         restored.load_state_dict(selector.state_dict())
         torch.testing.assert_close(restored.predict(states), selector.predict(states))
 
+    def test_prediction_and_contrastive_losses_backpropagate(self) -> None:
+        from rexpolicy.manifold.losses import success_selector_losses
+
+        config = _config()
+        selector = SuccessModeSelector(config)
+        states = torch.randn(4, config.state_dim)
+        target = torch.randn(4, config.latent_dim)
+        losses = success_selector_losses(selector(states), target)
+        losses.total.backward()
+        self.assertTrue(torch.isfinite(losses.total))
+        self.assertGreater(
+            sum(
+                float(parameter.grad.abs().sum())
+                for parameter in selector.parameters()
+                if parameter.grad is not None
+            ),
+            0.0,
+        )
+
 
 class LatentMemoryTest(unittest.TestCase):
     def test_novelty_sampling_rebase_and_checkpoint(self) -> None:
