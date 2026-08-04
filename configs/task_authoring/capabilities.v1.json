@@ -40,7 +40,7 @@
       "adapter_id": "groot_newton/reach/v1",
       "task_modes": ["reach_green_cap"],
       "event_schema_id": "groot_newton/reach_events/v1",
-      "process_spec_ids": ["reach_pregrasp/v1"],
+      "process_spec_ids": ["reach_pregrasp/v1", "reach_pregrasp/v2"],
       "allowed_assets": ["nero_bottle/v1"],
       "required_assets": ["nero_bottle/v1"],
       "bindings": {"target": ["green_cap"]},
