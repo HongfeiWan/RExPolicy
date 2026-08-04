@@ -217,6 +217,7 @@ CUDA_VISIBLE_DEVICES=0,1 REXPOLICY_NPROC=2 \
   --chunk-elite-fraction 0.5 \
   --advantage-temperature 0.1 \
   --same-state-tolerance 1e-5 \
+  --historical-replay-state-tolerance 1e-4 \
   --train-steps-per-generation 1 \
   --train-batch-size 1 \
   --gradient-accumulation 1 \
@@ -262,6 +263,7 @@ CUDA_VISIBLE_DEVICES=0,1 REXPOLICY_NPROC=2 \
   --chunk-elite-fraction 0.5 \
   --advantage-temperature 0.1 \
   --same-state-tolerance 1e-5 \
+  --historical-replay-state-tolerance 1e-4 \
   --train-steps-per-generation 1 \
   --train-batch-size 1 \
   --gradient-accumulation 1 \
@@ -330,6 +332,7 @@ CUDA_VISIBLE_DEVICES=0,1 REXPOLICY_NPROC=2 \
   --chunk-elite-fraction 0.5 \
   --advantage-temperature 0.1 \
   --same-state-tolerance 1e-5 \
+  --historical-replay-state-tolerance 1e-4 \
   --train-steps-per-generation 4 \
   --train-batch-size 1 \
   --gradient-accumulation 2 \
@@ -375,6 +378,7 @@ CUDA_VISIBLE_DEVICES=0,1 REXPOLICY_NPROC=2 \
   --chunk-elite-fraction 0.5 \
   --advantage-temperature 0.1 \
   --same-state-tolerance 1e-5 \
+  --historical-replay-state-tolerance 1e-4 \
   --train-steps-per-generation 4 \
   --train-batch-size 1 \
   --gradient-accumulation 2 \

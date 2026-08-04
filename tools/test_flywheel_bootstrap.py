@@ -20,11 +20,13 @@ from rexpolicy.flywheel.experience import (
     collate_training_samples,
     select_advantage_chunks,
 )
+from rexpolicy.flywheel.task_spec import get_task_spec
 from tools.run_flywheel_ddp import (
     _directory_descriptors,
     _early_gpu_preflight,
     _git_source_descriptor,
     _normalized_action_diversity,
+    _validate_args,
     _validate_run_directory_mode,
     create_parser,
 )
@@ -312,6 +314,36 @@ class TestRunnerConfiguration(unittest.TestCase):
         self.assertEqual(args.isaac_groot_root, Path("/runtime/Isaac-GR00T"))
         self.assertEqual(args.policy_checkpoint, Path("/weights/policy"))
         self.assertEqual(args.vlm_model, Path("/weights/vlm"))
+
+    def test_historical_replay_tolerance_is_strictly_validated(self) -> None:
+        parser = create_parser()
+        defaults = parser.parse_args(["--validate-only"])
+        self.assertEqual(defaults.same_state_tolerance, 1.0e-5)
+        self.assertEqual(defaults.historical_replay_state_tolerance, 1.0e-4)
+        _validate_args(defaults, get_task_spec(defaults.task_id))
+
+        for value in ("0", "-1e-4", "nan", "inf"):
+            args = parser.parse_args(
+                [
+                    "--validate-only",
+                    f"--historical-replay-state-tolerance={value}",
+                ]
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "historical-replay-state-tolerance",
+            ):
+                _validate_args(args, get_task_spec(args.task_id))
+
+        stricter = parser.parse_args(
+            [
+                "--validate-only",
+                "--historical-replay-state-tolerance",
+                "1e-6",
+            ]
+        )
+        with self.assertRaisesRegex(ValueError, "greater than or equal"):
+            _validate_args(stricter, get_task_spec(stricter.task_id))
 
     def test_early_preflight_checks_physical_gpu_before_distributed_init(
         self,

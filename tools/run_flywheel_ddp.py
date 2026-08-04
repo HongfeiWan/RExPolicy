@@ -62,7 +62,10 @@ from rexpolicy.flywheel.operations import (
 )
 from rexpolicy.flywheel.replay import (
     CandidateReplayResult,
+    build_physical_replay_gate_record,
     fingerprint_each_world,
+    validate_historical_physical_replay_gate,
+    validate_physical_replay_gate,
     validate_replay_fingerprint,
 )
 from rexpolicy.flywheel.paired_archive import (
@@ -174,6 +177,15 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument("--advantage-temperature", type=float, default=0.1)
     parser.add_argument("--same-state-tolerance", type=float, default=1.0e-5)
     parser.add_argument(
+        "--historical-replay-state-tolerance",
+        type=float,
+        default=1.0e-4,
+        help=(
+            "Absolute tolerance only for archived-vs-current continuous "
+            "physical-state witnesses."
+        ),
+    )
+    parser.add_argument(
         "--candidate-replay-reward-tolerance",
         type=float,
         default=7.0e-4,
@@ -280,6 +292,18 @@ def _validate_args(
         or args.same_state_tolerance <= 0.0
     ):
         raise ValueError("same-state-tolerance must be positive")
+    if (
+        not np.isfinite(args.historical_replay_state_tolerance)
+        or args.historical_replay_state_tolerance <= 0.0
+    ):
+        raise ValueError(
+            "historical-replay-state-tolerance must be positive"
+        )
+    if args.historical_replay_state_tolerance < args.same_state_tolerance:
+        raise ValueError(
+            "historical-replay-state-tolerance must be greater than or "
+            "equal to same-state-tolerance"
+        )
     if (
         not np.isfinite(args.candidate_replay_reward_tolerance)
         or args.candidate_replay_reward_tolerance <= 0.0
@@ -634,10 +658,20 @@ def _collect_episode(
                 raise RuntimeError(
                     "Root replay terminated before a previously reached decision"
                 )
-        replay_fingerprint = validate_replay_fingerprint(
-            env.replay_fingerprint_torch(),
+        physical_replay_gate = validate_physical_replay_gate(
+            env.physical_replay_gate_torch(),
             world_count=env.num_envs,
             float_tolerance=args.same_state_tolerance,
+        )
+        physical_replay_gate_record = build_physical_replay_gate_record(
+            physical_replay_gate,
+            same_state_tolerance=args.same_state_tolerance,
+            historical_replay_state_tolerance=(
+                args.historical_replay_state_tolerance
+            ),
+            simulator_fingerprint_sha256=simulator_fingerprint,
+            observation_contract_sha256=observation_contract_sha256,
+            render_contract=env.observation_render_contract(),
         )
         dynamics_fingerprint = validate_replay_fingerprint(
             env.dynamics_fingerprint_torch(),
@@ -901,11 +935,7 @@ def _collect_episode(
                 {
                     "decision_index": decision_index,
                     "start_control_step": len(root_actions),
-                    "replay_fingerprint_sha256": replay_fingerprint.digest,
-                    "same_state_float_spread_max_abs": (
-                        replay_fingerprint.max_float_spread
-                    ),
-                    "same_state_field_count": replay_fingerprint.field_count,
+                    "physical_replay_gate": physical_replay_gate_record,
                     "advantage_baseline": selection.baseline,
                     "selection_mode": selection.mode,
                     "success_constraint_active": False,
@@ -943,11 +973,7 @@ def _collect_episode(
             {
                 "decision_index": decision_index,
                 "start_control_step": len(root_actions) - continuation.valid_steps,
-                "replay_fingerprint_sha256": replay_fingerprint.digest,
-                "same_state_float_spread_max_abs": (
-                    replay_fingerprint.max_float_spread
-                ),
-                "same_state_field_count": replay_fingerprint.field_count,
+                "physical_replay_gate": physical_replay_gate_record,
                 "advantage_baseline": selection.baseline,
                 "selection_mode": selection.mode,
                 "success_constraint_active": any(
@@ -1079,6 +1105,7 @@ def _materialize_historical_samples(
     env: GrootNewtonEnv,
     task: FlywheelTaskSpec,
     simulator_fingerprint: str,
+    observation_contract_sha256: str,
     archive: SuccessArchive,
     generation: int,
 ) -> tuple[list[TrainingSample], list[dict[str, Any]]]:
@@ -1134,15 +1161,22 @@ def _materialize_historical_samples(
             raise RuntimeError(
                 f"Historical replay ended before {reference.sample_id}"
             )
-        fingerprint = validate_replay_fingerprint(
-            env.replay_fingerprint_torch(),
+        fingerprint = validate_physical_replay_gate(
+            env.physical_replay_gate_torch(),
             world_count=env.num_envs,
             float_tolerance=args.same_state_tolerance,
         )
-        if fingerprint.digest != decision["replay_fingerprint_sha256"]:
-            raise RuntimeError(
-                f"Historical root fingerprint changed for {reference.sample_id}"
-            )
+        validate_historical_physical_replay_gate(
+            decision.get("physical_replay_gate"),
+            current_fingerprint=fingerprint,
+            same_state_tolerance=args.same_state_tolerance,
+            historical_replay_state_tolerance=(
+                args.historical_replay_state_tolerance
+            ),
+            simulator_fingerprint_sha256=simulator_fingerprint,
+            observation_contract_sha256=observation_contract_sha256,
+            render_contract=env.observation_render_contract(),
+        )
         candidate = next(
             (
                 item
@@ -1717,6 +1751,9 @@ def _build_run_manifest(
             "chunk_elite_fraction": args.chunk_elite_fraction,
             "advantage_temperature": args.advantage_temperature,
             "same_state_tolerance": args.same_state_tolerance,
+            "historical_replay_state_tolerance": (
+                args.historical_replay_state_tolerance
+            ),
             "candidate_replay_reward_tolerance": (
                 args.candidate_replay_reward_tolerance
             ),
@@ -1753,6 +1790,7 @@ def _build_run_manifest(
 def _simulator_fingerprint(
     manifest: dict[str, Any],
 ) -> str:
+    """Bind physical execution separately from render/observation settings."""
     payload = {
         "code_commit": manifest["code_commit"],
         "task": manifest["task"],
@@ -1762,9 +1800,6 @@ def _simulator_fingerprint(
             key: manifest["config"][key]
             for key in (
                 "episode_control_steps",
-                "camera_textures",
-                "scene_visuals",
-                "capture_graph",
                 "hydroelastic",
                 "bottle_settle_frames",
                 "substeps_per_frame",
@@ -2380,6 +2415,7 @@ def main() -> None:
                 env=env,
                 task=task,
                 simulator_fingerprint=simulator_fingerprint,
+                observation_contract_sha256=observation_contract_sha256,
                 archive=archive,
                 generation=generation,
             )
