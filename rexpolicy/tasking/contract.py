@@ -271,6 +271,61 @@ class CompiledTaskContract:
     def fingerprint(self) -> str:
         return canonical_fingerprint(self.to_record())
 
+    def oracle_record(self) -> dict[str, Any]:
+        """Return reward-free success/failure/environment semantics."""
+        oracle_metrics = set(self.goal_program.referenced_metrics)
+        terminal_rules = []
+        for rule in self.terminal_rules:
+            oracle_metrics.update(rule.program.referenced_metrics)
+            terminal_rules.append(
+                {
+                    "code": rule.code,
+                    "kind": rule.kind,
+                    "program": _oracle_program_record(rule.program),
+                }
+            )
+        return {
+            "oracle_format": "rexpolicy_task_oracle/v1",
+            "task_contract_id": self.task_contract_id,
+            "compiler_policy_id": self.compiler_policy_id,
+            "compiler_policy_fingerprint": self.compiler_policy_fingerprint,
+            "task_id": self.task_id,
+            "task_version": self.task_version,
+            "capability_catalog_fingerprint": (
+                self.capability_catalog_fingerprint
+            ),
+            "adapter_id": self.adapter_id,
+            "adapter_fingerprint": self.adapter_fingerprint,
+            "event_schema_id": self.event_schema_id,
+            "event_schema_fingerprint": self.event_schema_fingerprint,
+            "process_spec_id": self.process_spec_id,
+            "environment_bindings": thaw_json(dict(self.environment_bindings)),
+            "environment_parameters": thaw_json(
+                dict(self.environment_parameters)
+            ),
+            "required_assets": list(self.required_assets),
+            "action_projection": {
+                name: list(mask) for name, mask in self.action_projection
+            },
+            "episode_control_steps": self.episode_control_steps,
+            "goal_hold_steps": self.goal_hold_steps,
+            "goal_program": _oracle_program_record(self.goal_program),
+            "terminal_rules": terminal_rules,
+            "required_metrics": sorted(oracle_metrics),
+        }
+
+    @property
+    def oracle_fingerprint(self) -> str:
+        """Identify task truth independently of reward-profile semantics."""
+        return canonical_fingerprint(self.oracle_record())
+
+
+def _oracle_program_record(program: ExpressionProgram) -> dict[str, Any]:
+    """Strip the full TaskSpec hash while retaining executable semantics."""
+    record = program.to_record()
+    del record["task_spec_fingerprint"]
+    return record
+
 
 def _canonical_inputs(
     task: TaskSpecV2,

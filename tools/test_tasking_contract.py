@@ -56,6 +56,8 @@ class TestCompiledTaskContract(unittest.TestCase):
             ),
         )
         self.assertEqual(len(contract.fingerprint), 64)
+        self.assertEqual(len(contract.oracle_fingerprint), 64)
+        self.assertNotIn("reward_profiles", contract.oracle_record())
         json.dumps(contract.to_record(), allow_nan=False)
         validate_compiled_task_contract(
             contract,
@@ -173,6 +175,33 @@ class TestCompiledTaskContract(unittest.TestCase):
             ),
         )
         self.assertNotEqual(contracts[0].fingerprint, contracts[1].fingerprint)
+        self.assertNotEqual(
+            contracts[0].oracle_fingerprint,
+            contracts[1].oracle_fingerprint,
+        )
+
+    def test_reward_only_change_preserves_task_oracle_identity(self) -> None:
+        changed = copy.deepcopy(task_record())
+        changed["reward_profiles"][0]["reward_profile_id"] = (
+            "reach_progress_alt/v2"
+        )
+        changed["reward_profiles"][0]["terms"][0]["weight"] = 0.5
+        changed["reward_profiles"][0]["shaping_bounds"] = [-0.5, 0.5]
+        original = compile_task_contract(self.task, catalog=self.catalog)
+        alternate = compile_task_contract(
+            TaskSpecV2.from_record(changed),
+            catalog=self.catalog,
+        )
+
+        self.assertNotEqual(original.fingerprint, alternate.fingerprint)
+        self.assertNotEqual(
+            original.task_spec_fingerprint,
+            alternate.task_spec_fingerprint,
+        )
+        self.assertEqual(
+            original.oracle_fingerprint,
+            alternate.oracle_fingerprint,
+        )
 
 
 if __name__ == "__main__":
