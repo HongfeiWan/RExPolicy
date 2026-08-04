@@ -236,6 +236,11 @@ _DEFAULT_POLICY_RECORD = {
             "message": "Keep the sealed audit commitment fixed.",
         },
         {
+            "code": "brief_violation",
+            "allowed_paths": ["$"],
+            "message": "Keep the proposal within the authorized public brief.",
+        },
+        {
             "code": "compile_rejected",
             "allowed_paths": [
                 "$.action_projection",
@@ -388,6 +393,12 @@ class AuthoringIntent:
     property_policy_fingerprint: str
     authoring_policy_id: str
     authoring_policy_fingerprint: str
+    authoring_brief_id: str | None
+    authoring_brief_fingerprint: str | None
+    process_spec_fingerprints: tuple[tuple[str, str], ...]
+    process_compiler_policy_id: str | None
+    process_compiler_policy_fingerprint: str | None
+    preauthoring_audit_plan_fingerprint: str | None
 
     @classmethod
     def from_record(
@@ -397,9 +408,8 @@ class AuthoringIntent:
         policy: AuthoringPolicy = DEFAULT_AUTHORING_POLICY,
     ) -> AuthoringIntent:
         record = _mapping(value, "$authoring_intent")
-        _keys(
-            record,
-            {
+        schema_version = record.get("schema_version")
+        common_fields = {
                 "schema_version",
                 "task_id",
                 "task_version",
@@ -415,11 +425,21 @@ class AuthoringIntent:
                 "property_policy_fingerprint",
                 "authoring_policy_id",
                 "authoring_policy_fingerprint",
-            },
-            "$authoring_intent",
-        )
-        if record["schema_version"] != 1:
-            raise ValueError("AuthoringIntent schema_version must be 1")
+        }
+        if schema_version == 1:
+            expected_fields = common_fields
+        elif schema_version == 2:
+            expected_fields = common_fields | {
+                "authoring_brief_id",
+                "authoring_brief_fingerprint",
+                "process_spec_fingerprints",
+                "process_compiler_policy_id",
+                "process_compiler_policy_fingerprint",
+                "preauthoring_audit_plan_fingerprint",
+            }
+        else:
+            raise ValueError("AuthoringIntent schema_version must be 1 or 2")
+        _keys(record, expected_fields, "$authoring_intent")
         task_id = _identifier(record["task_id"], "$authoring_intent.task_id")
         task_version = _positive_integer(
             record["task_version"],
@@ -439,8 +459,65 @@ class AuthoringIntent:
             raise ValueError("AuthoringIntent authoring policy ID mismatch")
         if authoring_policy_fingerprint != policy.fingerprint:
             raise ValueError("AuthoringIntent authoring policy fingerprint mismatch")
+        if schema_version == 2:
+            raw_process_fingerprints = _mapping(
+                record["process_spec_fingerprints"],
+                "$authoring_intent.process_spec_fingerprints",
+            )
+            expected_process_ids = tuple(
+                sorted(
+                    _identifier(
+                        item,
+                        "$authoring_intent.allowed_process_spec_ids",
+                    )
+                    for item in record["allowed_process_spec_ids"]
+                )
+            )
+            if tuple(sorted(raw_process_fingerprints)) != expected_process_ids:
+                raise ValueError(
+                    "AuthoringIntent process fingerprints must exactly cover "
+                    "the allowed process specs"
+                )
+            process_spec_fingerprints = tuple(
+                (
+                    process_spec_id,
+                    _sha256(
+                        raw_process_fingerprints[process_spec_id],
+                        "$authoring_intent.process_spec_fingerprints."
+                        f"{process_spec_id}",
+                    ),
+                )
+                for process_spec_id in expected_process_ids
+            )
+            authoring_brief_id = _identifier(
+                record["authoring_brief_id"],
+                "$authoring_intent.authoring_brief_id",
+            )
+            authoring_brief_fingerprint = _sha256(
+                record["authoring_brief_fingerprint"],
+                "$authoring_intent.authoring_brief_fingerprint",
+            )
+            process_compiler_policy_id = _identifier(
+                record["process_compiler_policy_id"],
+                "$authoring_intent.process_compiler_policy_id",
+            )
+            process_compiler_policy_fingerprint = _sha256(
+                record["process_compiler_policy_fingerprint"],
+                "$authoring_intent.process_compiler_policy_fingerprint",
+            )
+            preauthoring_audit_plan_fingerprint = _sha256(
+                record["preauthoring_audit_plan_fingerprint"],
+                "$authoring_intent.preauthoring_audit_plan_fingerprint",
+            )
+        else:
+            process_spec_fingerprints = ()
+            authoring_brief_id = None
+            authoring_brief_fingerprint = None
+            process_compiler_policy_id = None
+            process_compiler_policy_fingerprint = None
+            preauthoring_audit_plan_fingerprint = None
         return cls(
-            schema_version=1,
+            schema_version=schema_version,
             task_id=task_id,
             task_version=task_version,
             family_id=_identifier(
@@ -485,6 +562,16 @@ class AuthoringIntent:
             ),
             authoring_policy_id=authoring_policy_id,
             authoring_policy_fingerprint=authoring_policy_fingerprint,
+            authoring_brief_id=authoring_brief_id,
+            authoring_brief_fingerprint=authoring_brief_fingerprint,
+            process_spec_fingerprints=process_spec_fingerprints,
+            process_compiler_policy_id=process_compiler_policy_id,
+            process_compiler_policy_fingerprint=(
+                process_compiler_policy_fingerprint
+            ),
+            preauthoring_audit_plan_fingerprint=(
+                preauthoring_audit_plan_fingerprint
+            ),
         )
 
     @classmethod
@@ -497,7 +584,7 @@ class AuthoringIntent:
         return cls.from_record(strict_json_loads(text), policy=policy)
 
     def to_record(self) -> dict[str, Any]:
-        return {
+        record = {
             "schema_version": self.schema_version,
             "task_id": self.task_id,
             "task_version": self.task_version,
@@ -514,6 +601,38 @@ class AuthoringIntent:
             "authoring_policy_id": self.authoring_policy_id,
             "authoring_policy_fingerprint": self.authoring_policy_fingerprint,
         }
+        if self.schema_version == 2:
+            if (
+                self.authoring_brief_id is None
+                or self.authoring_brief_fingerprint is None
+                or self.process_compiler_policy_id is None
+                or self.process_compiler_policy_fingerprint is None
+                or self.preauthoring_audit_plan_fingerprint is None
+            ):
+                raise ValueError("AuthoringIntent v2 bindings are incomplete")
+            record.update(
+                {
+                    "authoring_brief_id": self.authoring_brief_id,
+                    "authoring_brief_fingerprint": (
+                        self.authoring_brief_fingerprint
+                    ),
+                    "process_spec_fingerprints": dict(
+                        self.process_spec_fingerprints
+                    ),
+                    "process_compiler_policy_id": (
+                        self.process_compiler_policy_id
+                    ),
+                    "process_compiler_policy_fingerprint": (
+                        self.process_compiler_policy_fingerprint
+                    ),
+                    "preauthoring_audit_plan_fingerprint": (
+                        self.preauthoring_audit_plan_fingerprint
+                    ),
+                }
+            )
+        elif self.schema_version != 1:
+            raise ValueError("AuthoringIntent schema_version must be 1 or 2")
+        return record
 
     def to_json(self) -> str:
         return canonical_json(self.to_record())
@@ -535,8 +654,11 @@ class ProposalAttempt:
     model_id: str
     template_fingerprint: str
     request_fingerprint: str
+    session_fingerprint: str | None
+    invocation_fingerprint: str | None
     raw_response_sha256: str
     raw_response_bytes: int
+    response_complete: bool
     status: str
     issues: tuple[PublicIssue, ...]
 
@@ -548,9 +670,8 @@ class ProposalAttempt:
         policy: AuthoringPolicy = DEFAULT_AUTHORING_POLICY,
     ) -> ProposalAttempt:
         record = _mapping(value, "$proposal_attempt")
-        _keys(
-            record,
-            {
+        schema_version = record.get("schema_version")
+        common_fields = {
                 "schema_version",
                 "intent_fingerprint",
                 "ordinal",
@@ -563,11 +684,34 @@ class ProposalAttempt:
                 "raw_response_bytes",
                 "status",
                 "issues",
-            },
-            "$proposal_attempt",
-        )
-        if record["schema_version"] != 1:
-            raise ValueError("ProposalAttempt schema_version must be 1")
+        }
+        if schema_version == 1:
+            expected_fields = common_fields
+            session_fingerprint = None
+            invocation_fingerprint = None
+            response_complete = True
+        elif schema_version == 2:
+            expected_fields = common_fields | {
+                "session_fingerprint",
+                "invocation_fingerprint",
+                "response_complete",
+            }
+            session_fingerprint = _sha256(
+                record.get("session_fingerprint"),
+                "$proposal_attempt.session_fingerprint",
+            )
+            invocation_fingerprint = _sha256(
+                record.get("invocation_fingerprint"),
+                "$proposal_attempt.invocation_fingerprint",
+            )
+            response_complete = record.get("response_complete")
+            if type(response_complete) is not bool:
+                raise ValueError(
+                    "$proposal_attempt.response_complete must be Boolean"
+                )
+        else:
+            raise ValueError("ProposalAttempt schema_version must be 1 or 2")
+        _keys(record, expected_fields, "$proposal_attempt")
         ordinal = _positive_integer(
             record["ordinal"],
             "$proposal_attempt.ordinal",
@@ -611,16 +755,16 @@ class ProposalAttempt:
             record["raw_response_bytes"],
             "$proposal_attempt.raw_response_bytes",
         )
-        too_large = byte_count > policy.max_response_bytes
+        too_large = (
+            byte_count > policy.max_response_bytes or not response_complete
+        )
         has_size_issue = any(issue.code == "response_too_large" for issue in issues)
         if too_large != has_size_issue:
             raise ValueError(
                 "ProposalAttempt response size and response_too_large issue disagree"
             )
-        if too_large and status != "rejected":
-            raise ValueError("Oversized proposer responses must be rejected")
         return cls(
-            schema_version=1,
+            schema_version=schema_version,
             intent_fingerprint=_sha256(
                 record["intent_fingerprint"],
                 "$proposal_attempt.intent_fingerprint",
@@ -640,11 +784,14 @@ class ProposalAttempt:
                 record["request_fingerprint"],
                 "$proposal_attempt.request_fingerprint",
             ),
+            session_fingerprint=session_fingerprint,
+            invocation_fingerprint=invocation_fingerprint,
             raw_response_sha256=_sha256(
                 record["raw_response_sha256"],
                 "$proposal_attempt.raw_response_sha256",
             ),
             raw_response_bytes=byte_count,
+            response_complete=response_complete,
             status=status,
             issues=issues,
         )
@@ -662,6 +809,9 @@ class ProposalAttempt:
         status: str,
         issues: Iterable[tuple[str, str]] = (),
         parent: ProposalAttempt | None = None,
+        session_fingerprint: str | None = None,
+        invocation_fingerprint: str | None = None,
+        response_complete: bool = True,
         policy: AuthoringPolicy = DEFAULT_AUTHORING_POLICY,
     ) -> ProposalAttempt:
         """Record response provenance without retaining the response itself."""
@@ -678,6 +828,20 @@ class ProposalAttempt:
             raise ValueError("Authoring attempt limit is exhausted")
         if not isinstance(raw_response, (str, bytes)):
             raise TypeError("Proposer response must be text or bytes")
+        if type(response_complete) is not bool:
+            raise TypeError("Proposer response completeness flag must be Boolean")
+        if (session_fingerprint is None) != (invocation_fingerprint is None):
+            raise ValueError(
+                "Proposal session and invocation fingerprints must be paired"
+            )
+        schema_version = 1 if session_fingerprint is None else 2
+        if schema_version == 1 and not response_complete:
+            raise ValueError("Incomplete responses require ProposalAttempt v2")
+        if schema_version == 2:
+            _sha256(session_fingerprint, "session_fingerprint")
+            _sha256(invocation_fingerprint, "invocation_fingerprint")
+            if parent is not None and parent.session_fingerprint != session_fingerprint:
+                raise ValueError("Proposal repair changed authoring session")
         response_bytes = (
             raw_response.encode("utf-8")
             if isinstance(raw_response, str)
@@ -685,7 +849,7 @@ class ProposalAttempt:
         )
         normalized_issues = normalize_public_issues(issues, policy=policy)
         record = {
-            "schema_version": 1,
+            "schema_version": schema_version,
             "intent_fingerprint": intent.fingerprint,
             "ordinal": ordinal,
             "parent_attempt_fingerprint": (
@@ -700,6 +864,14 @@ class ProposalAttempt:
             "status": status,
             "issues": [issue.to_record() for issue in normalized_issues],
         }
+        if schema_version == 2:
+            record.update(
+                {
+                    "session_fingerprint": session_fingerprint,
+                    "invocation_fingerprint": invocation_fingerprint,
+                    "response_complete": response_complete,
+                }
+            )
         return cls.from_record(record, policy=policy)
 
     @classmethod
@@ -712,7 +884,7 @@ class ProposalAttempt:
         return cls.from_record(strict_json_loads(text), policy=policy)
 
     def to_record(self) -> dict[str, Any]:
-        return {
+        record = {
             "schema_version": self.schema_version,
             "intent_fingerprint": self.intent_fingerprint,
             "ordinal": self.ordinal,
@@ -726,6 +898,19 @@ class ProposalAttempt:
             "status": self.status,
             "issues": [issue.to_record() for issue in self.issues],
         }
+        if self.schema_version == 2:
+            if self.session_fingerprint is None or self.invocation_fingerprint is None:
+                raise ValueError("ProposalAttempt v2 bindings are incomplete")
+            record.update(
+                {
+                    "session_fingerprint": self.session_fingerprint,
+                    "invocation_fingerprint": self.invocation_fingerprint,
+                    "response_complete": self.response_complete,
+                }
+            )
+        elif self.schema_version != 1:
+            raise ValueError("ProposalAttempt schema_version must be 1 or 2")
+        return record
 
     def to_json(self) -> str:
         return canonical_json(self.to_record())

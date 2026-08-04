@@ -19,6 +19,7 @@ from rexpolicy.tasking.contract import DEFAULT_TASK_COMPILER_POLICY
 from rexpolicy.tasking.property_validation import (
     DEFAULT_PROPERTY_VALIDATION_POLICY,
 )
+from rexpolicy.tasking.process_contract import DEFAULT_PROCESS_COMPILER_POLICY
 
 
 def intent_record() -> dict:
@@ -41,6 +42,26 @@ def intent_record() -> dict:
         "authoring_policy_id": DEFAULT_AUTHORING_POLICY.policy_id,
         "authoring_policy_fingerprint": DEFAULT_AUTHORING_POLICY.fingerprint,
     }
+
+
+def intent_v2_record() -> dict:
+    record = intent_record()
+    record.update(
+        {
+            "schema_version": 2,
+            "authoring_brief_id": "reach_green_cap/v3/brief/v1",
+            "authoring_brief_fingerprint": "1" * 64,
+            "process_spec_fingerprints": {"reach_pregrasp/v1": "2" * 64},
+            "process_compiler_policy_id": (
+                DEFAULT_PROCESS_COMPILER_POLICY.policy_id
+            ),
+            "process_compiler_policy_fingerprint": (
+                DEFAULT_PROCESS_COMPILER_POLICY.fingerprint
+            ),
+            "preauthoring_audit_plan_fingerprint": "3" * 64,
+        }
+    )
+    return record
 
 
 def proposal_record(*, intent: AuthoringIntent | None = None) -> dict:
@@ -179,6 +200,35 @@ class TestAuthoringIntent(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "Duplicate JSON key"):
             AuthoringIntent.from_json(duplicate)
+
+    def test_v2_binds_public_brief_and_exact_process_artifacts(self) -> None:
+        intent = AuthoringIntent.from_record(intent_v2_record())
+        restored = AuthoringIntent.from_json(intent.to_json())
+
+        self.assertEqual(restored, intent)
+        self.assertEqual(intent.schema_version, 2)
+        self.assertEqual(
+            intent.authoring_brief_id,
+            "reach_green_cap/v3/brief/v1",
+        )
+        self.assertEqual(
+            dict(intent.process_spec_fingerprints),
+            {"reach_pregrasp/v1": "2" * 64},
+        )
+        self.assertEqual(
+            intent.process_compiler_policy_fingerprint,
+            DEFAULT_PROCESS_COMPILER_POLICY.fingerprint,
+        )
+
+        missing_process = intent_v2_record()
+        missing_process["process_spec_fingerprints"] = {}
+        with self.assertRaisesRegex(ValueError, "exactly cover"):
+            AuthoringIntent.from_record(missing_process)
+
+        leaked_gap = intent_v2_record()
+        leaked_gap["curriculum_assessment"] = {"success_count": 0}
+        with self.assertRaisesRegex(ValueError, "unknown fields"):
+            AuthoringIntent.from_record(leaked_gap)
 
 
 class TestPublicIssues(unittest.TestCase):
@@ -340,6 +390,23 @@ class TestProposalAttempt(unittest.TestCase):
         ]
         with self.assertRaisesRegex(ValueError, "response size"):
             ProposalAttempt.from_record(missing_size_issue)
+
+        repair = ProposalAttempt.record_response(
+            oversized,
+            intent=self.intent,
+            proposer_id="openai/task_proposer/v1",
+            model_id="openai/gpt-5.4",
+            template_fingerprint=self.template_fingerprint,
+            request_fingerprint=self.request_fingerprint,
+            status="repair_requested",
+            issues=(("response_too_large", "$"),),
+            session_fingerprint="4" * 64,
+            invocation_fingerprint="5" * 64,
+            response_complete=False,
+        )
+        self.assertFalse(repair.response_complete)
+        self.assertEqual(repair.status, "repair_requested")
+        self.assertEqual(repair.schema_version, 2)
 
     def test_attempt_rejects_extra_results_and_duplicate_json_keys(self) -> None:
         extra = proposal_record(intent=self.intent)
