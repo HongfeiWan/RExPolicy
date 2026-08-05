@@ -23,6 +23,13 @@ existing v1/v2/full path remains available and unchanged; successor,
 occupancy, and active-exploration work stays default-off until the Stage 0
 scientific gates pass.
 
+The Stage 0 Reach engineering loop is runnable on node1: 64 camera-free
+Newton worlds collect materialized trajectories, train the independent future
+encoder, selector, and state/latent-conditioned Flow-DiT, then atomically save
+and reload all components. The first 20-step smoke passed the engineering
+checks but not the non-collapse research gate (effective latent rank 1.09), so
+it is not yet evidence of convergence or multimodal success.
+
 The repository also contains a fail-closed TaskSpec v2 control plane: sealed
 task and process contracts, reward-free Event Ledgers and rebuildable views,
 sandboxed provider-attested automatic authoring to static quarantine, signed
@@ -35,6 +42,11 @@ activation before training may consume it.
 
 The repository contains:
 
+- a strict 79D right-base-frame Stage 0 state schema and a no-image Newton
+  adapter whose independent Reach oracle is checked against simulator flags;
+- immutable Stage 0 success/failure/timeout trajectory shards, grouped future
+  windows, independent PyTorch models/trainers, latent diagnostics, and
+  multi-component atomic checkpoints;
 - the batched Newton Nero + Linker L10 environment and the validated 19D action
   representation;
 - the versioned `reach_green_cap/v1` task, whose instruction, reward, success,

@@ -1,6 +1,32 @@
 # RExPolicy Stage 0 — State-only Success Manifold Validation
 
-Status: **implementation planned; current priority**.
+Status: **engineering loop implemented; scientific manifold gate not yet passed**.
+
+## Node1 validation snapshot — 2026-08-05
+
+The first independent Reach loop is now implemented under `rexpolicy/stage0/`
+and was exercised on node1 CUDA without images or GR00T:
+
+- the 64-world environment gate returned contiguous finite CUDA state
+  `[64, 79]` and action `[64, 19]` tensors;
+- the standalone oracle agreed exactly with Newton for every world: 64/64
+  success, zero failure, with at most `1.42e-7 m` object displacement;
+- the environment-only run completed 448 world-steps at about 432
+  world-steps/s;
+- the integrated run retained 64 successful trajectories and produced
+  322/45/38 grouped train/validation/test windows;
+- FutureTrajectoryEncoder, selector, and Flow-DiT each completed 20 optimizer
+  steps, followed by a verified multi-component checkpoint save/load;
+- all 57 focused Stage 0 tests, Ruff, formatting, and diff checks passed on
+  node1.
+
+This is an engineering validation, not a convergence claim. The short run had
+an active latent-dimension fraction of 1.0 but effective rank 1.09, below the
+minimum gate of 2.0. Oracle-z changed generated actions and reduced offline
+action MSE from 0.976 (no-z) to 0.961, but this diagnostic is explicitly not a
+rollout-success comparison. The next scientific gate requires repeated
+same-reset successes with deliberately different safe approach modes, longer
+encoder training, and equal-budget no-z/oracle-z/selector-z Newton rollouts.
 
 Stage 0 is a fast scientific validation platform, not a smaller claim of full
 VLA capability. It asks whether parallel robot self-interaction can produce a
@@ -187,7 +213,7 @@ include:
 Reward shaping remains out of scope. The Newton oracle is authoritative and
 latent diversity is logging only.
 
-## New files by phase
+## Implemented Stage 0 surface
 
 ```text
 rexpolicy/stage0/
@@ -204,26 +230,27 @@ rexpolicy/stage0/
     state_only.py
     oracles.py
     reset_sampler.py
-  datasets/
+  data/
     __init__.py
-    schema.py
     trajectory.py
-    shards.py
+    store.py
     windows.py
     splits.py
-    sampler.py
   models/
     __init__.py
+    _validation.py
     conditioning.py
     future_encoder.py
     selector.py
     flow_dit.py
   trainers/
     __init__.py
+    batch.py
+    common.py
+    losses.py
     manifold.py
     selector.py
     policy.py
-    loop.py
   evaluation/
     __init__.py
     latent_analysis.py
@@ -233,17 +260,15 @@ rexpolicy/stage0/
 configs/stage0/
   base.json
   reach_smoke.json
-  reach.json
-  push.json
-  pick.json
 
 tools/
   run_stage0.py
-  run_stage0_demo.py
-  analyze_stage0_latents.py
-  launch_stage0_ddp.sh
+  run_stage0_env.py
   test_stage0_*.py
 ```
+
+Push/Pick configs, task-specific oracles, richer analysis entry points, and a
+multi-GPU launcher remain phase-gated additions rather than placeholders.
 
 Files are added phase by phase; placeholder modules are not created in bulk.
 

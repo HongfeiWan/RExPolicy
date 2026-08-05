@@ -43,6 +43,13 @@ are not evidence that the Stage 0 hypothesis has been validated. See
 [stage0_success_manifold_validation.md](stage0_success_manifold_validation.md)
 for the implementation order and acceptance gates.
 
+Stage 0's Reach engineering path is now implemented and has completed a
+64-world node1 CUDA smoke, success-only window construction, three component
+training phases, and exact checkpoint recovery. Its first short-run latent
+effective rank was 1.09, so the representation-quality gate remains open; the
+next work is same-reset multi-mode data and fixed-budget conditional rollouts,
+not Stage 1 activation.
+
 ## Phase 0 — migrated baseline
 
 Status: **complete**.
