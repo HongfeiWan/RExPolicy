@@ -37,6 +37,11 @@ _NEURAL_EXPORTS = {
     "SuccessorLosses": ("successor", "SuccessorLosses"),
     "SuccessorModel": ("successor", "SuccessorModel"),
     "SuccessorTrainingConfig": ("successor", "SuccessorTrainingConfig"),
+    "SuccessorDdpTrainer": ("successor_trainer", "SuccessorDdpTrainer"),
+    "SuccessorUpdateMetrics": (
+        "successor_trainer",
+        "SuccessorUpdateMetrics",
+    ),
     "ManifoldUpdateMetrics": ("trainer", "ManifoldUpdateMetrics"),
     "SuccessManifoldDdpTrainer": (
         "trainer",
@@ -93,6 +98,8 @@ __all__ = [
     "SuccessorLosses",
     "SuccessorModel",
     "SuccessorTrainingConfig",
+    "SuccessorDdpTrainer",
+    "SuccessorUpdateMetrics",
     "all_gather_tensor",
     "masked_reconstruction_loss",
     "multi_positive_info_nce_loss",
