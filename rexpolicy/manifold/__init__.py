@@ -20,6 +20,16 @@ from .memory import (
     LatentMemoryEntry,
     LatentNeighbor,
 )
+from .occupancy import (
+    SUCCESS_OCCUPANCY_CONFIG_SCHEMA_VERSION,
+    SUCCESS_OCCUPANCY_STATE_SCHEMA_VERSION,
+    OccupancyMetrics,
+    OccupancyQuery,
+    OccupancySuccessRecord,
+    OccupancyUpdate,
+    SuccessOccupancyConfig,
+    SuccessOccupancyIndex,
+)
 
 
 _NEURAL_EXPORTS = {
@@ -79,6 +89,8 @@ def __getattr__(name: str) -> Any:
 __all__ = [
     "LATENT_MEMORY_SCHEMA_VERSION",
     "SUCCESS_MANIFOLD_CONFIG_SCHEMA_VERSION",
+    "SUCCESS_OCCUPANCY_CONFIG_SCHEMA_VERSION",
+    "SUCCESS_OCCUPANCY_STATE_SCHEMA_VERSION",
     "DiagonalGaussian",
     "DiversityLosses",
     "FutureTrajectoryDecoder",
@@ -90,11 +102,17 @@ __all__ = [
     "LatentMemoryEntry",
     "LatentNeighbor",
     "ManifoldUpdateMetrics",
+    "OccupancyMetrics",
+    "OccupancyQuery",
+    "OccupancySuccessRecord",
+    "OccupancyUpdate",
     "SelfSupervisedLosses",
     "SelectorLosses",
     "SuccessManifoldConfig",
     "SuccessManifoldDdpTrainer",
     "SuccessModeSelector",
+    "SuccessOccupancyConfig",
+    "SuccessOccupancyIndex",
     "SuccessorLosses",
     "SuccessorModel",
     "SuccessorTrainingConfig",
