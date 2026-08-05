@@ -84,6 +84,24 @@ _TEMPORAL_CONTROL_PROTOCOL = {
     "split": "all-locked-test-windows/v1",
     "start_bin_width": "action_horizon/v1",
 }
+_CHECKPOINT_SELECTION_PROTOCOL = {
+    "candidate_filter": (
+        "encoder-and-selector-complete/conditional-positive/no-z-zero/v1"
+    ),
+    "conditions": ["no-z", "oracle-z", "selector-z", "permuted-z"],
+    "hard_safety": "zero-contact-and-object-displacement-within-rollout-limit/v1",
+    "maximum_validation_windows": 32,
+    "ranking": [
+        "hard_safety_passed_desc",
+        "minimum_oracle_selector_success_rate_desc",
+        "minimum_conditional_path_macro_f1_desc",
+        "conditional_step_asc",
+    ],
+    "schema_id": "rexpolicy/stage0-validation-checkpoint-selection/v1",
+    "seed_namespace": "validation_checkpoint_selection_rollout/v1",
+    "selected_component": "conditional_policy_only_from_checkpoint/v1",
+    "test_policy": "locked-test-only-after-selection-commit/v1",
+}
 _MANIFOLD_TRAINER_CONFIG = {
     "contrastive_temperature": 0.1,
     "contrastive_weight": 1.0,
@@ -173,10 +191,19 @@ def _install_stop_handlers() -> None:
 
 
 def _run_contract(config: Stage0LongRunConfig) -> dict[str, Any]:
+    scientific_protocol = {
+        "checkpoint_selection": _CHECKPOINT_SELECTION_PROTOCOL,
+        "mode_diagnostic": _MODE_DIAGNOSTIC_PROTOCOL,
+        "path_adherence": _PATH_ADHERENCE_PROTOCOL,
+        "rollout": _ROLLOUT_PROTOCOL,
+        "selector_diagnostic": _SELECTOR_DIAGNOSTIC_PROTOCOL,
+        "temporal_control": _TEMPORAL_CONTROL_PROTOCOL,
+    }
     return {
         "config": config.to_record(),
         "config_sha256": config.fingerprint,
         "schema_id": _RUN_CONTRACT_SCHEMA_ID,
+        "scientific_protocol_sha256": canonical_fingerprint(scientific_protocol),
     }
 
 
@@ -1726,8 +1753,18 @@ def _evaluate_newton_rollouts(
     *,
     device_name: str,
     normalization: Any,
+    split_name: str,
+    seed_namespace: str,
+    maximum_windows: int,
 ) -> dict[str, Any]:
     import torch
+
+    if split_name not in {"validation", "test"}:
+        raise ValueError("rollout split_name must be validation or test")
+    if not isinstance(seed_namespace, str) or not seed_namespace.strip():
+        raise ValueError("rollout seed_namespace must be non-empty text")
+    if type(maximum_windows) is not int or maximum_windows < 1:
+        raise ValueError("rollout maximum_windows must be a positive integer")
 
     from rexpolicy.envs.groot_newton_env import GrootNewtonEnv
     from rexpolicy.stage0.envs.oracles import ReachSuccessOracle
@@ -1745,6 +1782,7 @@ def _evaluate_newton_rollouts(
         config.corpus.mode_ids,
         maximum_windows=min(
             config.runtime.eval_window_count,
+            maximum_windows,
             _ROLLOUT_PROTOCOL["maximum_evaluation_windows"],
         ),
     )
@@ -1756,7 +1794,7 @@ def _evaluate_newton_rollouts(
     noise_seeds = tuple(
         _step_seed(
             config.runtime.seed,
-            "final_test_rollout",
+            seed_namespace,
             "flow_noise",
             index,
         )
@@ -1829,7 +1867,7 @@ def _evaluate_newton_rollouts(
                     torch,
                     seed=_step_seed(
                         config.runtime.seed,
-                        "final_test_rollout",
+                        seed_namespace,
                         "selector_latent",
                         0,
                     ),
@@ -1948,8 +1986,9 @@ def _evaluate_newton_rollouts(
         "path_adherence_gate_passed": path_gate,
         "path_adherence_protocol": dict(_PATH_ADHERENCE_PROTOCOL),
         "safety_gate_passed": safety_gate,
-        "schema_id": "rexpolicy/stage0-final-newton-rollouts/v1",
-        "split": "test",
+        "schema_id": "rexpolicy/stage0-newton-rollouts/v2",
+        "seed_namespace": seed_namespace,
+        "split": split_name,
         "success_gate_passed": success_gate,
         "selector_sampled_mode_coverage_by_reset": selector_coverages,
         "selector_average_sampled_mode_coverage": average_selector_coverage,
@@ -1982,6 +2021,7 @@ def _checkpoint_hashes(
             "conditional_policy_latent": "fixed-trajectory-start-zero/v1",
             "rollout_protocol": _ROLLOUT_PROTOCOL,
             "path_adherence_protocol": _PATH_ADHERENCE_PROTOCOL,
+            "checkpoint_selection_protocol": _CHECKPOINT_SELECTION_PROTOCOL,
             "temporal_control_protocol": _TEMPORAL_CONTROL_PROTOCOL,
             "window_policy_sha256": window_splits.window_policy_sha256,
         }
@@ -2460,6 +2500,9 @@ def _run_training(
             trajectory_modes,
             device_name=device_name,
             normalization=normalization,
+            split_name="test",
+            seed_namespace="locked_test_rollout",
+            maximum_windows=_ROLLOUT_PROTOCOL["maximum_evaluation_windows"],
         )
         atomic_write_json(
             output_dir / "final-newton-rollouts.json",
