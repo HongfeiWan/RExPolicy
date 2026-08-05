@@ -8,9 +8,9 @@ from dataclasses import dataclass
 from typing import Any
 
 STAGE0_VALIDATION_CHECKPOINT_SELECTION_SCHEMA_ID = (
-    "rexpolicy/stage0-validation-checkpoint-selection/v1"
+    "rexpolicy/stage0-validation-checkpoint-selection/v2"
 )
-STAGE0_VALIDATION_CHECKPOINT_SELECTION_SCHEMA_VERSION = 1
+STAGE0_VALIDATION_CHECKPOINT_SELECTION_SCHEMA_VERSION = 2
 
 
 def _finite_unit_interval(value: float, name: str) -> float:
@@ -40,6 +40,8 @@ class Stage0ValidationCheckpointCandidate:
     contact_violation: bool
     maximum_object_displacement_m: float
     path_macro_f1: float
+    success_gate_passed: bool
+    path_gate_passed: bool
 
     def __post_init__(self) -> None:
         if (
@@ -50,6 +52,10 @@ class Stage0ValidationCheckpointCandidate:
             raise ValueError("conditional_step must be a non-negative integer")
         if not isinstance(self.contact_violation, bool):
             raise TypeError("contact_violation must be boolean")
+        if not isinstance(self.success_gate_passed, bool):
+            raise TypeError("success_gate_passed must be boolean")
+        if not isinstance(self.path_gate_passed, bool):
+            raise TypeError("path_gate_passed must be boolean")
         object.__setattr__(
             self,
             "success_rate",
@@ -75,18 +81,23 @@ class Stage0ValidationCheckpointCandidate:
             "contact_violation": self.contact_violation,
             "maximum_object_displacement_m": self.maximum_object_displacement_m,
             "path_macro_f1": self.path_macro_f1,
+            "path_gate_passed": self.path_gate_passed,
             "success_rate": self.success_rate,
+            "success_gate_passed": self.success_gate_passed,
         }
 
 
 @dataclass(frozen=True)
 class Stage0RankedValidationCheckpoint:
-    """One candidate's position and hard-safety status in a complete ranking."""
+    """One candidate's position and admission status in a complete ranking."""
 
     rank: int
     candidate: Stage0ValidationCheckpointCandidate
     hard_safety_passed: bool
+    quality_gates_passed: bool
+    eligible: bool
     safety_failures: tuple[str, ...]
+    quality_failures: tuple[str, ...]
     selected: bool
 
     def __post_init__(self) -> None:
@@ -100,21 +111,44 @@ class Stage0RankedValidationCheckpoint:
             raise TypeError("candidate must be a Stage0 validation candidate")
         if not isinstance(self.hard_safety_passed, bool):
             raise TypeError("hard_safety_passed must be boolean")
+        if not isinstance(self.quality_gates_passed, bool):
+            raise TypeError("quality_gates_passed must be boolean")
+        if not isinstance(self.eligible, bool):
+            raise TypeError("eligible must be boolean")
         if not isinstance(self.selected, bool):
             raise TypeError("selected must be boolean")
-        failures = tuple(self.safety_failures)
-        if any(not isinstance(value, str) or not value for value in failures):
+        if not isinstance(self.safety_failures, tuple):
+            raise TypeError("safety_failures must be a tuple")
+        if not isinstance(self.quality_failures, tuple):
+            raise TypeError("quality_failures must be a tuple")
+        safety_failures = tuple(self.safety_failures)
+        quality_failures = tuple(self.quality_failures)
+        if any(not isinstance(value, str) or not value for value in safety_failures):
             raise ValueError("safety_failures must contain non-empty strings")
-        if self.hard_safety_passed != (not failures):
+        if any(not isinstance(value, str) or not value for value in quality_failures):
+            raise ValueError("quality_failures must contain non-empty strings")
+        if self.hard_safety_passed != (not safety_failures):
             raise ValueError("hard_safety_passed must agree with safety_failures")
-        if self.selected and not self.hard_safety_passed:
-            raise ValueError("an unsafe checkpoint cannot be selected")
-        object.__setattr__(self, "safety_failures", failures)
+        if self.quality_gates_passed != (not quality_failures):
+            raise ValueError("quality_gates_passed must agree with quality_failures")
+        if self.eligible != (self.hard_safety_passed and self.quality_gates_passed):
+            raise ValueError("eligible must require safety and quality admission")
+        if self.selected and not self.eligible:
+            raise ValueError("an ineligible checkpoint cannot be selected")
+        object.__setattr__(self, "safety_failures", safety_failures)
+        object.__setattr__(self, "quality_failures", quality_failures)
 
     def to_record(self) -> dict[str, Any]:
         return {
             **self.candidate.to_record(),
+            "admission_failures": {
+                "quality": list(self.quality_failures),
+                "safety": list(self.safety_failures),
+            },
+            "eligible": self.eligible,
             "hard_safety_passed": self.hard_safety_passed,
+            "quality_failures": list(self.quality_failures),
+            "quality_gates_passed": self.quality_gates_passed,
             "rank": self.rank,
             "safety_failures": list(self.safety_failures),
             "selected": self.selected,
@@ -123,7 +157,7 @@ class Stage0RankedValidationCheckpoint:
 
 @dataclass(frozen=True)
 class Stage0ValidationCheckpointSelection:
-    """Machine-readable outcome of a hard-safe checkpoint selection."""
+    """Machine-readable outcome of strict validation admission and ranking."""
 
     maximum_object_displacement_m: float
     gate_passed: bool
@@ -156,6 +190,7 @@ class Stage0ValidationCheckpointSelection:
         if tuple(item.rank for item in ranking) != tuple(range(1, len(ranking) + 1)):
             raise ValueError("ranking positions must be contiguous and one-based")
         selected = tuple(item for item in ranking if item.selected)
+        eligible = tuple(item for item in ranking if item.eligible)
         if self.gate_passed:
             if len(selected) != 1:
                 raise ValueError(
@@ -163,8 +198,10 @@ class Stage0ValidationCheckpointSelection:
                 )
             if self.selected_conditional_step != selected[0].candidate.conditional_step:
                 raise ValueError("selected_conditional_step disagrees with ranking")
-        elif selected or self.selected_conditional_step is not None:
-            raise ValueError("a failed gate cannot select a checkpoint")
+        elif selected or self.selected_conditional_step is not None or eligible:
+            raise ValueError(
+                "a failed gate cannot contain an eligible or selected checkpoint"
+            )
         object.__setattr__(self, "maximum_object_displacement_m", limit)
         object.__setattr__(self, "ranking", ranking)
 
@@ -172,14 +209,20 @@ class Stage0ValidationCheckpointSelection:
         return {
             "gate_passed": self.gate_passed,
             "protocol": {
-                "hard_safety": {
-                    "contact_violation": False,
-                    "maximum_object_displacement_m_lte": (
-                        self.maximum_object_displacement_m
-                    ),
+                "admission": {
+                    "hard_safety": {
+                        "contact_violation": False,
+                        "maximum_object_displacement_m_lte": (
+                            self.maximum_object_displacement_m
+                        ),
+                    },
+                    "quality_gates": {
+                        "path_gate_passed": True,
+                        "success_gate_passed": True,
+                    },
                 },
                 "ranking": [
-                    "hard_safety_passed_desc",
+                    "eligible_desc",
                     "success_rate_desc",
                     "path_macro_f1_desc",
                     "conditional_step_asc",
@@ -198,11 +241,11 @@ def select_stage0_validation_checkpoint(
     *,
     maximum_object_displacement_m: float,
 ) -> Stage0ValidationCheckpointSelection:
-    """Rank candidates and select only from the hard-safe subset.
+    """Rank candidates and select only from the strictly eligible subset.
 
-    Ranking is deterministic and independent of input order. Hard safety is a
-    strict eligibility gate, not a soft score: when every candidate is unsafe,
-    the returned gate fails and ``selected_conditional_step`` is ``None``.
+    Ranking is deterministic and independent of input order. Eligibility
+    requires hard safety plus upstream validation success and path gates.  When
+    every candidate fails admission, the result fails closed without selecting.
     """
 
     limit = _finite_non_negative(
@@ -218,46 +261,59 @@ def select_stage0_validation_checkpoint(
     if len(set(steps)) != len(steps):
         raise ValueError("candidate conditional_step values must be unique")
 
-    def failures(
+    def admission_failures(
         candidate: Stage0ValidationCheckpointCandidate,
-    ) -> tuple[str, ...]:
-        result = []
+    ) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        safety = []
         if candidate.contact_violation:
-            result.append("contact_violation")
+            safety.append("contact_violation")
         if candidate.maximum_object_displacement_m > limit:
-            result.append("object_displacement_limit_exceeded")
-        return tuple(result)
+            safety.append("object_displacement_limit_exceeded")
+        quality = []
+        if not candidate.success_gate_passed:
+            quality.append("success_gate_failed")
+        if not candidate.path_gate_passed:
+            quality.append("path_gate_failed")
+        return tuple(safety), tuple(quality)
 
-    evidence = tuple((candidate, failures(candidate)) for candidate in values)
+    evidence = tuple(
+        (candidate, *admission_failures(candidate)) for candidate in values
+    )
     ordered = sorted(
         evidence,
         key=lambda item: (
-            bool(item[1]),
+            bool(item[1] or item[2]),
             -item[0].success_rate,
             -item[0].path_macro_f1,
             item[0].conditional_step,
         ),
     )
-    safe = tuple(item for item in ordered if not item[1])
-    selected_step = safe[0][0].conditional_step if safe else None
+    eligible = tuple(item for item in ordered if not item[1] and not item[2])
+    selected_step = eligible[0][0].conditional_step if eligible else None
     ranking = tuple(
         Stage0RankedValidationCheckpoint(
             rank=index,
             candidate=candidate,
-            hard_safety_passed=not candidate_failures,
-            safety_failures=candidate_failures,
+            hard_safety_passed=not safety_failures,
+            quality_gates_passed=not quality_failures,
+            eligible=not safety_failures and not quality_failures,
+            safety_failures=safety_failures,
+            quality_failures=quality_failures,
             selected=candidate.conditional_step == selected_step,
         )
-        for index, (candidate, candidate_failures) in enumerate(ordered, start=1)
+        for index, (candidate, safety_failures, quality_failures) in enumerate(
+            ordered,
+            start=1,
+        )
     )
     if selected_step is None:
         reason = (
-            "hard safety gate failed: no validation checkpoint had zero contact "
-            "and object displacement within the configured limit"
+            "validation admission failed: no checkpoint passed hard safety, "
+            "the success gate, and the path gate"
         )
     else:
         reason = (
-            f"selected conditional step {selected_step}: highest-ranked hard-safe "
+            f"selected conditional step {selected_step}: highest-ranked eligible "
             "checkpoint by success rate, path macro-F1, then earliest step"
         )
     return Stage0ValidationCheckpointSelection(
