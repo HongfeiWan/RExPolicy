@@ -34,6 +34,7 @@ from .rollout import (
     ReachRolloutResult,
     RolloutConditioningMode,
     rollout_reach_policy,
+    rollout_reach_policy_controls,
 )
 
 __all__ = [
@@ -60,5 +61,6 @@ __all__ = [
     "compare_conditioning_runs",
     "deterministic_pca",
     "rollout_reach_policy",
+    "rollout_reach_policy_controls",
     "select_stage0_validation_checkpoint",
 ]

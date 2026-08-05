@@ -58,12 +58,13 @@ _SELECTOR_DIAGNOSTIC_PROTOCOL = {
     "warm_start": "train-start-zero-mode-centroids/v1",
 }
 _ROLLOUT_PROTOCOL = {
+    "conditioning_execution": "four-controls-one-vector-environment/v1",
     "maximum_evaluation_windows": 64,
     "maximum_object_displacement_m": 0.005,
     "physics_backend": "fingerprinted-runtime-cuda-graph-toggle/v1",
     "minimum_oracle_z_success_rate": 0.80,
     "minimum_selector_z_success_rate": 0.80,
-    "schema_id": "rexpolicy/stage0-newton-rollout-gate/v1",
+    "schema_id": "rexpolicy/stage0-newton-rollout-gate/v2",
 }
 _PATH_ADHERENCE_PROTOCOL = {
     "all_selector_modes_must_be_sampled": True,
@@ -1968,7 +1969,7 @@ def _evaluate_newton_rollouts(
     from rexpolicy.stage0.evaluation import (
         ReachRolloutBudget,
         analyze_path_adherence,
-        rollout_reach_policy,
+        rollout_reach_policy_controls,
     )
 
     selected = _select_complete_mode_groups(
@@ -2020,7 +2021,7 @@ def _evaluate_newton_rollouts(
             device_name,
             capture_graph=config.runtime.rollout_capture_graph,
         ),
-        num_envs=len(selected),
+        num_envs=len(selected) * 4,
     )
     env = GrootNewtonEnv(env_config)
     adapter = Stage0StateOnlyEnv(env)
@@ -2037,65 +2038,35 @@ def _evaluate_newton_rollouts(
 
     def oracle() -> Any:
         return ReachSuccessOracle(
-            len(selected),
+            len(selected) * 4,
             success_threshold_m=env_config.reach_success_threshold,
             success_hold_steps=env_config.reach_success_hold_steps,
             displacement_limit_m=env_config.reach_bottle_displacement_limit,
         )
 
     try:
-        results = {
-            "no-z": rollout_reach_policy(
-                adapter,
-                models["no_z_policy"],
-                normalization,
-                budget,
-                mode="no-z",
-                oracle=oracle(),
-                flow_sample_steps=config.runtime.flow_sample_steps,
-            ),
-            "oracle-z": rollout_reach_policy(
-                adapter,
-                models["conditional_policy"],
-                normalization,
-                budget,
-                mode="oracle-z",
-                oracle=oracle(),
-                oracle_latents=oracle_latents,
-                flow_sample_steps=config.runtime.flow_sample_steps,
-            ),
-            "selector-z": rollout_reach_policy(
-                adapter,
-                models["conditional_policy"],
-                normalization,
-                budget,
-                mode="selector-z",
-                oracle=oracle(),
-                selector=models["selector"],
-                selector_generator=_generator(
-                    torch,
-                    seed=_step_seed(
-                        config.runtime.seed,
-                        seed_namespace,
-                        "selector_latent",
-                        0,
-                    ),
-                    device=device,
+        results = rollout_reach_policy_controls(
+            adapter,
+            models["no_z_policy"],
+            models["conditional_policy"],
+            normalization,
+            budget,
+            oracle=oracle(),
+            oracle_latents=oracle_latents,
+            selector=models["selector"],
+            selector_generator=_generator(
+                torch,
+                seed=_step_seed(
+                    config.runtime.seed,
+                    seed_namespace,
+                    "selector_latent",
+                    0,
                 ),
-                flow_sample_steps=config.runtime.flow_sample_steps,
+                device=device,
             ),
-            "permuted-z": rollout_reach_policy(
-                adapter,
-                models["conditional_policy"],
-                normalization,
-                budget,
-                mode="permuted-z",
-                oracle=oracle(),
-                oracle_latents=oracle_latents,
-                latent_permutation=permutation,
-                flow_sample_steps=config.runtime.flow_sample_steps,
-            ),
-        }
+            latent_permutation=permutation,
+            flow_sample_steps=config.runtime.flow_sample_steps,
+        )
     finally:
         env.close()
     eef_slice = DEFAULT_STAGE0_STATE_SCHEMA.slice("eef_position")

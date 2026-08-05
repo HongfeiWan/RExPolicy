@@ -15,6 +15,7 @@ from rexpolicy.stage0.evaluation.rollout import (
     ReachRolloutBudget,
     RolloutConditioningMode,
     rollout_reach_policy,
+    rollout_reach_policy_controls,
 )
 from rexpolicy.stage0.normalization import Stage0Normalization
 from rexpolicy.stage0.runtime import Stage0FlowPolicy
@@ -181,6 +182,69 @@ def _oracle(worlds: int) -> ReachSuccessOracle:
 
 
 class Stage0ReachRolloutTests(unittest.TestCase):
+    def test_four_controls_share_one_vector_environment_without_semantic_drift(
+        self,
+    ) -> None:
+        goals = torch.tensor([[0.20, 0.0, 0.0], [0.20, 0.0, 0.0]])
+        oracle_latents = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
+        env = _FakeReachEnv(goals.repeat(4, 1))
+        no_z_policy = _FakePolicy()
+        conditional_policy = _FakePolicy()
+        selector = _FakeSelector()
+        no_z_policy.eval()
+        selector.eval()
+
+        batched = rollout_reach_policy_controls(
+            env,
+            no_z_policy,
+            conditional_policy,
+            _normalization(),
+            _budget(max_steps=2),
+            oracle=_oracle(8),
+            oracle_latents=oracle_latents,
+            selector=selector,
+            latent_permutation=(1, 0),
+        )
+
+        sequential: dict[str, Any] = {}
+        for mode in RolloutConditioningMode:
+            kwargs: dict[str, Any] = {}
+            if mode is RolloutConditioningMode.ORACLE_Z:
+                kwargs["oracle_latents"] = oracle_latents
+            elif mode is RolloutConditioningMode.SELECTOR_Z:
+                kwargs["selector"] = _FakeSelector()
+            elif mode is RolloutConditioningMode.PERMUTED_Z:
+                kwargs["oracle_latents"] = oracle_latents
+                kwargs["latent_permutation"] = (1, 0)
+            sequential[mode.value] = rollout_reach_policy(
+                _FakeReachEnv(goals),
+                _FakePolicy(),
+                _normalization(),
+                _budget(max_steps=2),
+                mode=mode,
+                oracle=_oracle(2),
+                **kwargs,
+            )
+
+        self.assertEqual(
+            env.reset_seed_history,
+            [(101, 202, 101, 202, 101, 202, 101, 202)],
+        )
+        self.assertEqual(len(env.actions), 2)
+        self.assertEqual(selector.calls, 1)
+        self.assertFalse(no_z_policy.training)
+        self.assertTrue(conditional_policy.training)
+        self.assertFalse(selector.training)
+        for mode in RolloutConditioningMode:
+            self.assertEqual(
+                batched[mode.value].to_record(),
+                sequential[mode.value].to_record(),
+            )
+        for step, no_z_noise in enumerate(no_z_policy.noises):
+            conditional_noise = conditional_policy.noises[step]
+            for block in conditional_noise.split(2, dim=0):
+                torch.testing.assert_close(no_z_noise, block, rtol=0.0, atol=0.0)
+
     def test_real_flow_policy_is_signature_compatible(self) -> None:
         torch.manual_seed(13)
         env = _FakeReachEnv(torch.tensor([[1.0, 0.0, 0.0], [1.0, 0.0, 0.0]]))

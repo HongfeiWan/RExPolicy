@@ -874,10 +874,276 @@ def rollout_reach_policy(
     )
 
 
+_CONTROL_BATCH_ORDER = (
+    RolloutConditioningMode.NO_Z,
+    RolloutConditioningMode.ORACLE_Z,
+    RolloutConditioningMode.SELECTOR_Z,
+    RolloutConditioningMode.PERMUTED_Z,
+)
+
+
+class _BatchedReachControlPolicy(nn.Module):
+    """Dispatch four scientific controls inside one vector environment."""
+
+    def __init__(
+        self,
+        no_z_policy: nn.Module,
+        conditional_policy: nn.Module,
+        selector: nn.Module,
+        oracle_latents: torch.Tensor,
+        *,
+        episodes: int,
+        selector_generator: torch.Generator | None,
+        latent_permutation: Sequence[int] | None,
+    ) -> None:
+        super().__init__()
+        no_z_contract = _policy_contract(no_z_policy)
+        conditional_contract = _policy_contract(conditional_policy)
+        if no_z_contract != conditional_contract:
+            raise ValueError("batched control policies must share one model contract")
+        if not isinstance(selector, nn.Module):
+            raise TypeError("batched controls require a Torch selector module")
+        _positive_int(episodes, name="episodes")
+        if (
+            not isinstance(oracle_latents, torch.Tensor)
+            or tuple(oracle_latents.shape) != (episodes, conditional_contract[1])
+            or not torch.is_floating_point(oracle_latents)
+            or not bool(torch.isfinite(oracle_latents).all())
+        ):
+            raise ValueError("oracle_latents must be finite [episodes, latent_dim]")
+
+        self.no_z_policy = no_z_policy
+        self.conditional_policy = conditional_policy
+        self.selector = selector
+        self.state_dim, self.latent_dim, self.action_dim, self.action_horizon = (
+            conditional_contract
+        )
+        self.episodes = episodes
+        self.register_buffer(
+            "oracle_latents",
+            oracle_latents.detach().clone(),
+            persistent=False,
+        )
+        self.selector_generator = selector_generator
+        self.requested_latent_permutation = latent_permutation
+        self.control_latents: dict[RolloutConditioningMode, torch.Tensor | None] | None = (
+            None
+        )
+        self.latent_permutation: tuple[int, ...] | None = None
+
+    def _initialize_latents(self, normalized_state: torch.Tensor) -> None:
+        blocks = normalized_state.reshape(
+            len(_CONTROL_BATCH_ORDER),
+            self.episodes,
+            self.state_dim,
+        )
+        if any(not torch.equal(blocks[0], block) for block in blocks[1:]):
+            raise RuntimeError(
+                "batched control reset states differ for a shared reset budget"
+            )
+        zeros, _ = _episode_latent(
+            RolloutConditioningMode.NO_Z,
+            policy=self.no_z_policy,
+            normalized_initial_state=blocks[0],
+            oracle_latents=None,
+            selector=None,
+            selector_generator=None,
+            latent_permutation=None,
+        )
+        oracle, _ = _episode_latent(
+            RolloutConditioningMode.ORACLE_Z,
+            policy=self.conditional_policy,
+            normalized_initial_state=blocks[1],
+            oracle_latents=self.oracle_latents,
+            selector=None,
+            selector_generator=None,
+            latent_permutation=None,
+        )
+        selected, _ = _episode_latent(
+            RolloutConditioningMode.SELECTOR_Z,
+            policy=self.conditional_policy,
+            normalized_initial_state=blocks[2],
+            oracle_latents=None,
+            selector=self.selector,
+            selector_generator=self.selector_generator,
+            latent_permutation=None,
+        )
+        permuted, permutation = _episode_latent(
+            RolloutConditioningMode.PERMUTED_Z,
+            policy=self.conditional_policy,
+            normalized_initial_state=blocks[3],
+            oracle_latents=self.oracle_latents,
+            selector=None,
+            selector_generator=None,
+            latent_permutation=self.requested_latent_permutation,
+        )
+        self.control_latents = {
+            RolloutConditioningMode.NO_Z: zeros,
+            RolloutConditioningMode.ORACLE_Z: oracle,
+            RolloutConditioningMode.SELECTOR_Z: selected,
+            RolloutConditioningMode.PERMUTED_Z: permuted,
+        }
+        self.latent_permutation = permutation
+
+    def sample(
+        self,
+        current_state: torch.Tensor,
+        *,
+        success_latent: torch.Tensor | None,
+        steps: int,
+        action_feature_mask: torch.Tensor,
+        initial_noise: torch.Tensor,
+    ) -> torch.Tensor:
+        del success_latent
+        expected_batch = len(_CONTROL_BATCH_ORDER) * self.episodes
+        if tuple(current_state.shape) != (expected_batch, self.state_dim):
+            raise ValueError("batched control state shape changed")
+        if tuple(initial_noise.shape) != (
+            expected_batch,
+            self.action_horizon,
+            self.action_dim,
+        ):
+            raise ValueError("batched control noise shape changed")
+        if self.control_latents is None:
+            self._initialize_latents(current_state)
+        if self.control_latents is None:
+            raise RuntimeError("batched control latents were not initialized")
+
+        state_blocks = current_state.split(self.episodes, dim=0)
+        noise_blocks = initial_noise.split(self.episodes, dim=0)
+        no_z_actions = self.no_z_policy.sample(
+            state_blocks[0],
+            success_latent=self.control_latents[RolloutConditioningMode.NO_Z],
+            steps=steps,
+            action_feature_mask=action_feature_mask,
+            initial_noise=noise_blocks[0],
+        )
+        conditional_modes = _CONTROL_BATCH_ORDER[1:]
+        conditional_actions = self.conditional_policy.sample(
+            torch.cat(state_blocks[1:], dim=0),
+            success_latent=torch.cat(
+                [self.control_latents[mode] for mode in conditional_modes],
+                dim=0,
+            ),
+            steps=steps,
+            action_feature_mask=action_feature_mask,
+            initial_noise=torch.cat(noise_blocks[1:], dim=0),
+        )
+        return torch.cat((no_z_actions, conditional_actions), dim=0)
+
+
+def rollout_reach_policy_controls(
+    env: Any,
+    no_z_policy: nn.Module,
+    conditional_policy: nn.Module,
+    normalization: Stage0Normalization,
+    budget: ReachRolloutBudget,
+    *,
+    oracle: ReachSuccessOracle | None = None,
+    oracle_latents: torch.Tensor,
+    selector: nn.Module,
+    selector_generator: torch.Generator | None = None,
+    latent_permutation: Sequence[int] | None = None,
+    flow_sample_steps: int = 16,
+    max_translation_step_m: float = MAX_REACH_TRANSLATION_STEP_M,
+) -> dict[str, ReachRolloutResult]:
+    """Evaluate all four controls in one four-block Newton vector step."""
+
+    if not isinstance(budget, ReachRolloutBudget):
+        raise TypeError("budget must be a ReachRolloutBudget")
+    episodes = budget.episode_count
+    combined_episodes = len(_CONTROL_BATCH_ORDER) * episodes
+    if getattr(env, "num_envs", None) != combined_episodes:
+        raise ValueError(
+            "batched control environment must contain four worlds per episode"
+        )
+    combined_budget = ReachRolloutBudget(
+        reset_group_ids=tuple(
+            f"{mode.value}:{group_id}"
+            for mode in _CONTROL_BATCH_ORDER
+            for group_id in budget.reset_group_ids
+        ),
+        reset_seeds=budget.reset_seeds * len(_CONTROL_BATCH_ORDER),
+        noise_seeds=budget.noise_seeds * len(_CONTROL_BATCH_ORDER),
+        max_steps_per_episode=budget.max_steps_per_episode,
+    )
+    if oracle is None:
+        oracle = ReachSuccessOracle(combined_episodes)
+    if not isinstance(oracle, ReachSuccessOracle) or oracle.num_envs != combined_episodes:
+        raise ValueError("oracle must cover every batched control world")
+
+    original_training = {
+        "no_z": no_z_policy.training,
+        "conditional": conditional_policy.training,
+        "selector": selector.training,
+    }
+    dispatcher = _BatchedReachControlPolicy(
+        no_z_policy,
+        conditional_policy,
+        selector,
+        oracle_latents,
+        episodes=episodes,
+        selector_generator=selector_generator,
+        latent_permutation=latent_permutation,
+    )
+    try:
+        combined = rollout_reach_policy(
+            env,
+            dispatcher,
+            normalization,
+            combined_budget,
+            mode=RolloutConditioningMode.NO_Z,
+            oracle=oracle,
+            flow_sample_steps=flow_sample_steps,
+            max_translation_step_m=max_translation_step_m,
+        )
+    finally:
+        no_z_policy.train(original_training["no_z"])
+        conditional_policy.train(original_training["conditional"])
+        selector.train(original_training["selector"])
+
+    if dispatcher.control_latents is None:
+        raise RuntimeError("batched controls completed without fixed episode latents")
+
+    results: dict[str, ReachRolloutResult] = {}
+    for block, mode in enumerate(_CONTROL_BATCH_ORDER):
+        start = block * episodes
+        stop = start + episodes
+        episode_latent = dispatcher.control_latents[mode]
+        results[mode.value] = ReachRolloutResult(
+            mode=mode,
+            budget=budget,
+            evaluated_mask=combined.evaluated_mask[start:stop].clone(),
+            success=combined.success[start:stop].clone(),
+            failure=combined.failure[start:stop].clone(),
+            timeout=combined.timeout[start:stop].clone(),
+            completed_steps=combined.completed_steps[start:stop].clone(),
+            contact_violation=combined.contact_violation[start:stop].clone(),
+            maximum_object_displacement_m=(
+                combined.maximum_object_displacement_m[start:stop].clone()
+            ),
+            final_goal_distance_m=combined.final_goal_distance_m[start:stop].clone(),
+            eef_trace_m=combined.eef_trace_m[start:stop].clone(),
+            trace_valid_mask=combined.trace_valid_mask[start:stop].clone(),
+            episode_latents=(
+                None
+                if mode is RolloutConditioningMode.NO_Z
+                else episode_latent.detach().float().cpu()
+            ),
+            latent_permutation=(
+                dispatcher.latent_permutation
+                if mode is RolloutConditioningMode.PERMUTED_Z
+                else None
+            ),
+        )
+    return results
+
+
 __all__ = [
     "MAX_REACH_TRANSLATION_STEP_M",
     "ReachRolloutBudget",
     "ReachRolloutResult",
     "RolloutConditioningMode",
     "rollout_reach_policy",
+    "rollout_reach_policy_controls",
 ]
