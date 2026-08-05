@@ -170,6 +170,124 @@ class TestSuccessManifoldRuntime(unittest.TestCase):
                     selector_temperature=0.0,
                 )
 
+    def test_active_sampling_prefers_occupancy_novel_candidates(self) -> None:
+        from rexpolicy.manifold.exploration import (
+            ExplorationPolicy,
+            normalize_occupancy_novelty,
+        )
+        from rexpolicy.manifold.occupancy import (
+            SuccessOccupancyConfig,
+            SuccessOccupancyIndex,
+        )
+        from rexpolicy.manifold.runtime import (
+            SuccessManifoldRuntime,
+            save_success_manifold_bundle,
+        )
+
+        config, encoder, selector = self._components()
+        occupancy = SuccessOccupancyIndex(
+            SuccessOccupancyConfig(
+                enabled=True,
+                latent_dim=config.latent_dim,
+                cluster_radius=0.25,
+                density_bandwidth=0.25,
+            )
+        )
+        occupancy.observe_success(
+            {
+                "sample_id": "known-mode",
+                "latent": [0.0, 0.0],
+                "generation": 0,
+                "rank": 0,
+                "episode_id": "baseline",
+                "source_sha256": "a" * 64,
+            }
+        )
+        exploration = ExplorationPolicy(
+            enabled=True,
+            novelty_coefficient_start=10.0,
+            novelty_coefficient_end=10.0,
+            active_candidates=4,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "manifold.pt"
+            digest = save_success_manifold_bundle(
+                path,
+                config=config,
+                encoder=encoder,
+                selector=selector,
+            )
+            runtime = SuccessManifoldRuntime.load(
+                path,
+                expected_sha256=digest,
+                device="cpu",
+            )
+            conditions = self._conditions()
+            states = self.torch.stack([item.state for item in conditions]).flatten(1)
+            with self.torch.inference_mode():
+                distribution = runtime.selector.distribution(states)
+                candidates = distribution.sample(
+                    (exploration.active_candidates,),
+                    generator=self.torch.Generator().manual_seed(53),
+                )
+                standardized = (
+                    candidates - distribution.mean.unsqueeze(0)
+                ) / distribution.std.unsqueeze(0)
+                log_probability = -0.5 * standardized.square().sum(dim=-1)
+            expected_indices = []
+            for batch_index in range(len(conditions)):
+                scores = []
+                for candidate_index in range(exploration.active_candidates):
+                    query = occupancy.query(
+                        candidates[candidate_index, batch_index].tolist()
+                    )
+                    novelty, _bootstrap = normalize_occupancy_novelty(
+                        query,
+                        policy=exploration,
+                    )
+                    scores.append(
+                        float(log_probability[candidate_index, batch_index])
+                        / config.latent_dim
+                        + 10.0 * novelty
+                    )
+                expected_indices.append(
+                    max(range(len(scores)), key=lambda index: (scores[index], -index))
+                )
+            selected = runtime.condition(
+                policy=self._policy(),
+                conditions=conditions,
+                exploration_policy=exploration,
+                occupancy=occupancy,
+                generation=3,
+                generator=self.torch.Generator().manual_seed(53),
+            )
+            self.assertEqual(tuple(selected.latents.shape), (2, config.latent_dim))
+            self.assertEqual(len(selected.selection_metadata), 2)
+            for batch_index, metadata in enumerate(selected.selection_metadata):
+                self.assertEqual(
+                    metadata["authority"],
+                    "active_manifold_sampling",
+                )
+                self.assertGreaterEqual(metadata["candidate_index"], 0)
+                self.assertLess(metadata["candidate_index"], 4)
+                self.assertEqual(metadata["candidate_count"], 4)
+                self.assertEqual(
+                    metadata["candidate_index"],
+                    expected_indices[batch_index],
+                )
+                self.torch.testing.assert_close(
+                    selected.latents[batch_index],
+                    candidates[expected_indices[batch_index], batch_index],
+                )
+
+            with self.assertRaisesRegex(ValueError, "requires occupancy"):
+                runtime.condition(
+                    policy=self._policy(),
+                    conditions=self._conditions(),
+                    exploration_policy=exploration,
+                    generation=3,
+                )
+
     def test_bundle_checksum_and_condition_width_fail_closed(self) -> None:
         from rexpolicy.manifold.runtime import (
             SuccessManifoldRuntime,

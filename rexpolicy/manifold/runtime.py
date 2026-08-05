@@ -14,7 +14,9 @@ from rexpolicy.tasking.canonical import canonical_fingerprint
 
 from .config import SuccessManifoldConfig
 from .encoder import FutureTrajectoryEncoder
+from .exploration import ExplorationPolicy, normalize_occupancy_novelty
 from .memory import LatentAdmission, LatentMemory
+from .occupancy import SuccessOccupancyIndex
 from .selector import SuccessModeSelector
 
 _BUNDLE_SCHEMA_VERSION = 1
@@ -29,6 +31,7 @@ class ConditionedLatentBatch:
     latents: Any
     condition_tokens: Any
     sources: tuple[str, ...]
+    selection_metadata: tuple[dict[str, Any], ...] = ()
 
 
 def _bundle_payload(
@@ -171,6 +174,9 @@ class SuccessManifoldRuntime:
         memory_candidates: int = 0,
         deterministic_selector: bool = False,
         selector_temperature: float = 1.0,
+        exploration_policy: ExplorationPolicy | None = None,
+        occupancy: SuccessOccupancyIndex | None = None,
+        generation: int | None = None,
         generator: Any | None = None,
     ) -> ConditionedLatentBatch:
         """Sample reachable modes, optionally reserving bounded memory slots."""
@@ -178,6 +184,24 @@ class SuccessManifoldRuntime:
             raise ValueError("At least one cached condition is required")
         if type(memory_candidates) is not int or memory_candidates < 0:
             raise ValueError("memory_candidates must be a non-negative integer")
+        active = exploration_policy is not None
+        if active:
+            if not exploration_policy.enabled:
+                raise ValueError("Active manifold exploration policy is disabled")
+            if occupancy is None:
+                raise ValueError("Active manifold exploration requires occupancy")
+            if occupancy.config.latent_dim != self.config.latent_dim:
+                raise ValueError("Active occupancy latent_dim does not match bundle")
+            if type(generation) is not int or generation < 1:
+                raise ValueError("Active manifold generation must be positive")
+            if selector_temperature != 1.0:
+                raise ValueError(
+                    "Active exploration owns selector_temperature via its schedule"
+                )
+        elif occupancy is not None or generation is not None:
+            raise ValueError(
+                "occupancy and generation require an exploration policy"
+            )
         states = self.torch.stack(
             [self.torch.as_tensor(condition.state) for condition in conditions]
         ).to(device=self.device, dtype=self.torch.float32)
@@ -188,12 +212,84 @@ class SuccessManifoldRuntime:
                 f"{int(states.shape[1])} != {self.config.state_dim}"
             )
         with self.torch.inference_mode():
-            latents = self.selector.sample(
-                states,
-                deterministic=deterministic_selector,
-                temperature=selector_temperature,
-                generator=generator,
-            )
+            selection_metadata: list[dict[str, Any]] = []
+            if active:
+                if deterministic_selector:
+                    raise ValueError(
+                        "Active exploration cannot use deterministic selector mode"
+                    )
+                schedule = exploration_policy.at_generation(generation)
+                distribution = self.selector.distribution(states)
+                candidates = distribution.sample(
+                    (exploration_policy.active_candidates,),
+                    temperature=schedule.selector_temperature,
+                    generator=generator,
+                )
+                effective_std = distribution.std
+                if schedule.selector_temperature != 1.0:
+                    effective_std = effective_std * (
+                        schedule.selector_temperature**0.5
+                    )
+                standardized = (
+                    candidates - distribution.mean.unsqueeze(0)
+                ) / effective_std.unsqueeze(0)
+                log_probability = -0.5 * standardized.square().sum(dim=-1)
+                selected: list[Any] = []
+                for batch_index in range(len(conditions)):
+                    ranked: list[tuple[float, int, Any, Any, float, bool]] = []
+                    for candidate_index in range(
+                        exploration_policy.active_candidates
+                    ):
+                        candidate = candidates[candidate_index, batch_index]
+                        query = occupancy.query(candidate.detach().cpu().tolist())
+                        normalized_novelty, bootstrap = (
+                            normalize_occupancy_novelty(
+                                query,
+                                policy=exploration_policy,
+                            )
+                        )
+                        selector_score = float(
+                            log_probability[candidate_index, batch_index]
+                            .detach()
+                            .cpu()
+                        ) / self.config.latent_dim
+                        active_score = (
+                            selector_score
+                            + schedule.novelty_coefficient * normalized_novelty
+                        )
+                        ranked.append(
+                            (
+                                active_score,
+                                candidate_index,
+                                candidate,
+                                query,
+                                normalized_novelty,
+                                bootstrap,
+                            )
+                        )
+                    choice = max(ranked, key=lambda item: (item[0], -item[1]))
+                    selected.append(choice[2])
+                    selection_metadata.append(
+                        {
+                            "authority": "active_manifold_sampling",
+                            "candidate_index": choice[1],
+                            "candidate_count": exploration_policy.active_candidates,
+                            "active_score": choice[0],
+                            "nearest_mode_id": choice[3].nearest_mode_id,
+                            "nearest_distance": choice[3].nearest_distance,
+                            "normalized_novelty": choice[4],
+                            "bootstrap": choice[5],
+                            "schedule": schedule.to_record(),
+                        }
+                    )
+                latents = self.torch.stack(selected)
+            else:
+                latents = self.selector.sample(
+                    states,
+                    deterministic=deterministic_selector,
+                    temperature=selector_temperature,
+                    generator=generator,
+                )
             sources = ["selector"] * len(conditions)
             memory_entries = self.memory.sample(
                 min(memory_candidates, len(conditions))
@@ -207,6 +303,11 @@ class SuccessManifoldRuntime:
                     )
                 )
                 sources[index] = "latent_memory"
+                if active:
+                    selection_metadata[index] = {
+                        "authority": "latent_memory_override",
+                        "sample_id": entry.sample_id,
+                    }
             tokens = self.encoder.condition_head(latents)
         if int(tokens.shape[1]) != policy.success_token_dimension:
             raise ValueError(
@@ -225,6 +326,7 @@ class SuccessManifoldRuntime:
             latents=latents.detach().cpu(),
             condition_tokens=tokens.detach().cpu(),
             sources=tuple(sources),
+            selection_metadata=tuple(selection_metadata),
         )
 
     def record_successes(

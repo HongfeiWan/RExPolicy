@@ -204,6 +204,30 @@ class ExplorationScore:
         }
 
 
+def normalize_occupancy_novelty(
+    occupancy: OccupancyQuery,
+    *,
+    policy: ExplorationPolicy,
+) -> tuple[float, bool]:
+    """Map nearest-mode distance to one bounded, JSON-safe value."""
+    if not isinstance(occupancy, OccupancyQuery):
+        raise TypeError("occupancy must be an OccupancyQuery")
+    if occupancy.nearest_distance is None:
+        return float(policy.novelty_cap), True
+    distance = _finite(
+        occupancy.nearest_distance,
+        "occupancy.nearest_distance",
+        minimum=0.0,
+    )
+    return (
+        min(
+            distance / float(policy.novelty_scale),
+            float(policy.novelty_cap),
+        ),
+        False,
+    )
+
+
 def score_shadow_exploration(
     *,
     sample_id: str,
@@ -223,22 +247,10 @@ def score_shadow_exploration(
     _sha256(latent_sha256, "latent_sha256")
     _label(latent_source, "latent_source")
     task_success_score = _finite(task_success_score, "task_success_score")
-    if not isinstance(occupancy, OccupancyQuery):
-        raise TypeError("occupancy must be an OccupancyQuery")
-    if occupancy.nearest_distance is None:
-        bootstrap = True
-        normalized_novelty = float(policy.novelty_cap)
-    else:
-        bootstrap = False
-        distance = _finite(
-            occupancy.nearest_distance,
-            "occupancy.nearest_distance",
-            minimum=0.0,
-        )
-        normalized_novelty = min(
-            distance / float(policy.novelty_scale),
-            float(policy.novelty_cap),
-        )
+    normalized_novelty, bootstrap = normalize_occupancy_novelty(
+        occupancy,
+        policy=policy,
+    )
     shadow_score = (
         task_success_score
         + schedule.novelty_coefficient * normalized_novelty
@@ -265,5 +277,6 @@ __all__ = [
     "ExplorationPolicy",
     "ExplorationSchedulePoint",
     "ExplorationScore",
+    "normalize_occupancy_novelty",
     "score_shadow_exploration",
 ]

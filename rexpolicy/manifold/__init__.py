@@ -18,6 +18,7 @@ from .exploration import (
     ExplorationPolicy,
     ExplorationSchedulePoint,
     ExplorationScore,
+    normalize_occupancy_novelty,
     score_shadow_exploration,
 )
 from .memory import (
@@ -132,6 +133,7 @@ __all__ = [
     "all_gather_tensor",
     "masked_reconstruction_loss",
     "multi_positive_info_nce_loss",
+    "normalize_occupancy_novelty",
     "success_manifold_losses",
     "success_selector_losses",
     "score_shadow_exploration",
