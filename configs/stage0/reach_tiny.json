@@ -45,6 +45,7 @@
     "batch_size": 16,
     "checkpoint_every_steps": 2,
     "conditional_policy_steps": 2,
+    "cuda_fused_adamw": true,
     "eval_every_steps": 2,
     "future_encoder_steps": 2,
     "learning_rate": 0.0003,

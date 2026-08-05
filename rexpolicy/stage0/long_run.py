@@ -127,6 +127,7 @@ class LongRunTrainingConfig:
     """Step budgets and persistence cadence for all independent components."""
 
     batch_size: int
+    cuda_fused_adamw: bool
     learning_rate: float
     weight_decay: float
     future_encoder_steps: int
@@ -155,6 +156,8 @@ class LongRunTrainingConfig:
             minimum=math.nextafter(0.0, 1.0),
         )
         _finite_number(self.weight_decay, "training.weight_decay", minimum=0.0)
+        if not isinstance(self.cuda_fused_adamw, bool):
+            raise ValueError("training.cuda_fused_adamw must be boolean")
         if self.batch_size < 8 or self.batch_size % 8:
             raise ValueError(
                 "training.batch_size must be a multiple of eight for paired "
@@ -172,6 +175,7 @@ class LongRunTrainingConfig:
             "batch_size",
             "checkpoint_every_steps",
             "conditional_policy_steps",
+            "cuda_fused_adamw",
             "eval_every_steps",
             "future_encoder_steps",
             "learning_rate",
@@ -187,6 +191,7 @@ class LongRunTrainingConfig:
             "batch_size": self.batch_size,
             "checkpoint_every_steps": self.checkpoint_every_steps,
             "conditional_policy_steps": self.conditional_policy_steps,
+            "cuda_fused_adamw": self.cuda_fused_adamw,
             "eval_every_steps": self.eval_every_steps,
             "future_encoder_steps": self.future_encoder_steps,
             "learning_rate": self.learning_rate,

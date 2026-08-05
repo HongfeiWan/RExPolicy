@@ -1400,11 +1400,15 @@ def _create_training_components(
         "no_z_policy": no_z_policy,
         "selector": selector,
     }
+    optimizer_kwargs = {
+        "lr": config.training.learning_rate,
+        "weight_decay": config.training.weight_decay,
+        "fused": bool(config.training.cuda_fused_adamw and device.type == "cuda"),
+    }
     optimizers = {
         name: torch.optim.AdamW(
             (parameter for parameter in model.parameters() if parameter.requires_grad),
-            lr=config.training.learning_rate,
-            weight_decay=config.training.weight_decay,
+            **optimizer_kwargs,
         )
         for name, model in models.items()
     }
@@ -2564,6 +2568,11 @@ def _checkpoint_hashes(
             "manifold_sampling": "paired-mode-cross-reset-octets/v1",
             "mode_invariant_alignment": "raw-latent-squared-distance/v1",
             "manifold_trainer_config": dict(_MANIFOLD_TRAINER_CONFIG),
+            "optimizer_backend": (
+                "torch-adamw-cuda-fused/v1"
+                if config.training.cuda_fused_adamw
+                else "torch-adamw-standard/v1"
+            ),
             "mode_diagnostic_protocol": _MODE_DIAGNOSTIC_PROTOCOL,
             "no_z_control": "zero_latent_same_two_token_architecture/v1",
             "selector_diagnostic_protocol": _SELECTOR_DIAGNOSTIC_PROTOCOL,

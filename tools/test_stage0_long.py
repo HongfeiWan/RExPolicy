@@ -79,6 +79,7 @@ def _record() -> dict[str, object]:
             "batch_size": 8,
             "checkpoint_every_steps": 2,
             "conditional_policy_steps": 2,
+            "cuda_fused_adamw": True,
             "eval_every_steps": 2,
             "future_encoder_steps": 2,
             "learning_rate": 0.001,
@@ -139,6 +140,20 @@ class Stage0LongRunConfigTest(unittest.TestCase):
         record["training"]["batch_size"] = 4  # type: ignore[index]
         with self.assertRaisesRegex(ValueError, "multiple of eight"):
             Stage0LongRunConfig.from_mapping(record)
+
+    def test_cuda_fused_optimizer_choice_is_fingerprinted_and_strict(self) -> None:
+        fused = Stage0LongRunConfig.from_mapping(_record())
+        standard_record = _record()
+        standard_record["training"]["cuda_fused_adamw"] = False  # type: ignore[index]
+        standard = Stage0LongRunConfig.from_mapping(standard_record)
+        self.assertTrue(fused.training.cuda_fused_adamw)
+        self.assertFalse(standard.training.cuda_fused_adamw)
+        self.assertNotEqual(fused.fingerprint, standard.fingerprint)
+
+        invalid = _record()
+        invalid["training"]["cuda_fused_adamw"] = 1  # type: ignore[index]
+        with self.assertRaisesRegex(ValueError, "must be boolean"):
+            Stage0LongRunConfig.from_mapping(invalid)
 
     def test_validate_only_cli_does_not_need_torch_or_newton(self) -> None:
         repository = Path(__file__).resolve().parents[1]
