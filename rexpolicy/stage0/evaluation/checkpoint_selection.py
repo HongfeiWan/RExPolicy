@@ -8,9 +8,9 @@ from dataclasses import dataclass
 from typing import Any
 
 STAGE0_VALIDATION_CHECKPOINT_SELECTION_SCHEMA_ID = (
-    "rexpolicy/stage0-validation-checkpoint-selection/v2"
+    "rexpolicy/stage0-validation-checkpoint-selection/v3"
 )
-STAGE0_VALIDATION_CHECKPOINT_SELECTION_SCHEMA_VERSION = 2
+STAGE0_VALIDATION_CHECKPOINT_SELECTION_SCHEMA_VERSION = 3
 
 
 def _finite_unit_interval(value: float, name: str) -> float:
@@ -42,6 +42,9 @@ class Stage0ValidationCheckpointCandidate:
     path_macro_f1: float
     success_gate_passed: bool
     path_gate_passed: bool
+    temporal_control_conditional_mse: float
+    temporal_control_no_z_mse: float
+    temporal_control_gate_passed: bool
 
     def __post_init__(self) -> None:
         if (
@@ -56,6 +59,8 @@ class Stage0ValidationCheckpointCandidate:
             raise TypeError("success_gate_passed must be boolean")
         if not isinstance(self.path_gate_passed, bool):
             raise TypeError("path_gate_passed must be boolean")
+        if not isinstance(self.temporal_control_gate_passed, bool):
+            raise TypeError("temporal_control_gate_passed must be boolean")
         object.__setattr__(
             self,
             "success_rate",
@@ -74,6 +79,29 @@ class Stage0ValidationCheckpointCandidate:
             "path_macro_f1",
             _finite_unit_interval(self.path_macro_f1, "path_macro_f1"),
         )
+        object.__setattr__(
+            self,
+            "temporal_control_conditional_mse",
+            _finite_non_negative(
+                self.temporal_control_conditional_mse,
+                "temporal_control_conditional_mse",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "temporal_control_no_z_mse",
+            _finite_non_negative(
+                self.temporal_control_no_z_mse,
+                "temporal_control_no_z_mse",
+            ),
+        )
+        if self.temporal_control_gate_passed != (
+            self.temporal_control_conditional_mse
+            < self.temporal_control_no_z_mse
+        ):
+            raise ValueError(
+                "temporal_control_gate_passed must match the strict MSE comparison"
+            )
 
     def to_record(self) -> dict[str, Any]:
         return {
@@ -84,6 +112,11 @@ class Stage0ValidationCheckpointCandidate:
             "path_gate_passed": self.path_gate_passed,
             "success_rate": self.success_rate,
             "success_gate_passed": self.success_gate_passed,
+            "temporal_control_conditional_mse": (
+                self.temporal_control_conditional_mse
+            ),
+            "temporal_control_gate_passed": self.temporal_control_gate_passed,
+            "temporal_control_no_z_mse": self.temporal_control_no_z_mse,
         }
 
 
@@ -98,6 +131,8 @@ class Stage0RankedValidationCheckpoint:
     eligible: bool
     safety_failures: tuple[str, ...]
     quality_failures: tuple[str, ...]
+    eligible_run_length: int
+    eligible_run_center_distance_steps: float
     selected: bool
 
     def __post_init__(self) -> None:
@@ -117,6 +152,16 @@ class Stage0RankedValidationCheckpoint:
             raise TypeError("eligible must be boolean")
         if not isinstance(self.selected, bool):
             raise TypeError("selected must be boolean")
+        if (
+            isinstance(self.eligible_run_length, bool)
+            or not isinstance(self.eligible_run_length, int)
+            or self.eligible_run_length < 0
+        ):
+            raise ValueError("eligible_run_length must be a non-negative integer")
+        center_distance = _finite_non_negative(
+            self.eligible_run_center_distance_steps,
+            "eligible_run_center_distance_steps",
+        )
         if not isinstance(self.safety_failures, tuple):
             raise TypeError("safety_failures must be a tuple")
         if not isinstance(self.quality_failures, tuple):
@@ -135,8 +180,15 @@ class Stage0RankedValidationCheckpoint:
             raise ValueError("eligible must require safety and quality admission")
         if self.selected and not self.eligible:
             raise ValueError("an ineligible checkpoint cannot be selected")
+        if self.eligible != (self.eligible_run_length > 0):
+            raise ValueError("eligible candidates must belong to one eligible run")
         object.__setattr__(self, "safety_failures", safety_failures)
         object.__setattr__(self, "quality_failures", quality_failures)
+        object.__setattr__(
+            self,
+            "eligible_run_center_distance_steps",
+            center_distance,
+        )
 
     def to_record(self) -> dict[str, Any]:
         return {
@@ -146,6 +198,10 @@ class Stage0RankedValidationCheckpoint:
                 "safety": list(self.safety_failures),
             },
             "eligible": self.eligible,
+            "eligible_run_center_distance_steps": (
+                self.eligible_run_center_distance_steps
+            ),
+            "eligible_run_length": self.eligible_run_length,
             "hard_safety_passed": self.hard_safety_passed,
             "quality_failures": list(self.quality_failures),
             "quality_gates_passed": self.quality_gates_passed,
@@ -219,12 +275,16 @@ class Stage0ValidationCheckpointSelection:
                     "quality_gates": {
                         "path_gate_passed": True,
                         "success_gate_passed": True,
+                        "temporal_control_gate_passed": True,
                     },
                 },
                 "ranking": [
                     "eligible_desc",
+                    "eligible_run_length_desc",
+                    "eligible_run_center_distance_steps_asc",
                     "success_rate_desc",
                     "path_macro_f1_desc",
+                    "temporal_control_conditional_to_no_z_mse_ratio_asc",
                     "conditional_step_asc",
                 ],
             },
@@ -244,8 +304,10 @@ def select_stage0_validation_checkpoint(
     """Rank candidates and select only from the strictly eligible subset.
 
     Ranking is deterministic and independent of input order. Eligibility
-    requires hard safety plus upstream validation success and path gates.  When
-    every candidate fails admission, the result fails closed without selecting.
+    requires hard safety plus upstream validation success, path, and temporal
+    control gates. Stable contiguous runs outrank isolated eligible spikes.
+    When every candidate fails admission, the result fails closed without
+    selecting.
     """
 
     limit = _finite_non_negative(
@@ -274,17 +336,58 @@ def select_stage0_validation_checkpoint(
             quality.append("success_gate_failed")
         if not candidate.path_gate_passed:
             quality.append("path_gate_failed")
+        if not candidate.temporal_control_gate_passed:
+            quality.append("temporal_control_gate_failed")
         return tuple(safety), tuple(quality)
 
     evidence = tuple(
         (candidate, *admission_failures(candidate)) for candidate in values
     )
+    eligible_by_step = {
+        candidate.conditional_step
+        for candidate, safety, quality in evidence
+        if not safety and not quality
+    }
+    ordered_steps = sorted(candidate.conditional_step for candidate in values)
+    positive_deltas = tuple(
+        right - left
+        for left, right in zip(ordered_steps, ordered_steps[1:])
+        if right > left
+    )
+    checkpoint_interval = min(positive_deltas) if positive_deltas else None
+    eligible_runs: list[list[int]] = []
+    for step in sorted(eligible_by_step):
+        if (
+            not eligible_runs
+            or checkpoint_interval is None
+            or step - eligible_runs[-1][-1] != checkpoint_interval
+        ):
+            eligible_runs.append([step])
+        else:
+            eligible_runs[-1].append(step)
+    stability: dict[int, tuple[int, float]] = {}
+    for run in eligible_runs:
+        center = (run[0] + run[-1]) / 2.0
+        for step in run:
+            stability[step] = (len(run), abs(step - center))
+
+    def temporal_ratio(candidate: Stage0ValidationCheckpointCandidate) -> float:
+        if candidate.temporal_control_no_z_mse == 0.0:
+            return math.inf
+        return (
+            candidate.temporal_control_conditional_mse
+            / candidate.temporal_control_no_z_mse
+        )
+
     ordered = sorted(
         evidence,
         key=lambda item: (
             bool(item[1] or item[2]),
+            -stability.get(item[0].conditional_step, (0, 0.0))[0],
+            stability.get(item[0].conditional_step, (0, 0.0))[1],
             -item[0].success_rate,
             -item[0].path_macro_f1,
+            temporal_ratio(item[0]),
             item[0].conditional_step,
         ),
     )
@@ -299,6 +402,14 @@ def select_stage0_validation_checkpoint(
             eligible=not safety_failures and not quality_failures,
             safety_failures=safety_failures,
             quality_failures=quality_failures,
+            eligible_run_length=stability.get(
+                candidate.conditional_step,
+                (0, 0.0),
+            )[0],
+            eligible_run_center_distance_steps=stability.get(
+                candidate.conditional_step,
+                (0, 0.0),
+            )[1],
             selected=candidate.conditional_step == selected_step,
         )
         for index, (candidate, safety_failures, quality_failures) in enumerate(
@@ -309,12 +420,13 @@ def select_stage0_validation_checkpoint(
     if selected_step is None:
         reason = (
             "validation admission failed: no checkpoint passed hard safety, "
-            "the success gate, and the path gate"
+            "the success gate, the path gate, and the temporal-control gate"
         )
     else:
         reason = (
-            f"selected conditional step {selected_step}: highest-ranked eligible "
-            "checkpoint by success rate, path macro-F1, then earliest step"
+            f"selected conditional step {selected_step}: center-most candidate in "
+            "the longest contiguous eligible validation run, then ranked by "
+            "success, path adherence, temporal control, and step"
         )
     return Stage0ValidationCheckpointSelection(
         maximum_object_displacement_m=limit,

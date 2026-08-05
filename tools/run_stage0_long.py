@@ -81,10 +81,9 @@ _TEMPORAL_CONTROL_PROTOCOL = {
     "metric": "normalized-effective-first-action-mse/v1",
     "noise_pairing": "identical-initial-noise-conditional-vs-no-z/v1",
     "sample_batch_size": "training_batch_size/v1",
-    "schema_id": "rexpolicy/stage0-temporal-control-gate/v1",
-    "seed_phase": "final_temporal_control",
+    "schema_id": "rexpolicy/stage0-temporal-control-gate/v2",
     "seed_stream": "initial_noise",
-    "split": "all-locked-test-windows/v1",
+    "split": "all-windows-within-declared-split/v1",
     "start_bin_width": "action_horizon/v1",
 }
 _CHECKPOINT_SELECTION_PROTOCOL = {
@@ -92,6 +91,7 @@ _CHECKPOINT_SELECTION_PROTOCOL = {
         "hard_safety_gate_passed",
         "success_gate_passed",
         "path_adherence_gate_passed",
+        "temporal_control_gate_passed",
     ],
     "candidate_filter": (
         "encoder-and-selector-complete/conditional-positive/no-z-zero/v1"
@@ -102,11 +102,14 @@ _CHECKPOINT_SELECTION_PROTOCOL = {
     "minimum_locked_test_budget_seconds": 1800.0,
     "ranking": [
         "eligible_desc",
+        "eligible_run_length_desc",
+        "eligible_run_center_distance_steps_asc",
         "minimum_oracle_selector_success_rate_desc",
         "minimum_conditional_path_macro_f1_desc",
+        "temporal_control_conditional_to_no_z_mse_ratio_asc",
         "conditional_step_asc",
     ],
-    "schema_id": "rexpolicy/stage0-validation-checkpoint-selection/v2",
+    "schema_id": "rexpolicy/stage0-validation-checkpoint-selection/v3",
     "seed_namespace": "validation_checkpoint_selection_rollout",
     "selected_component": "conditional_policy_only_from_checkpoint/v1",
     "test_policy": "locked-test-only-after-selection-commit/v1",
@@ -1821,9 +1824,11 @@ def _evaluate_temporal_control(
     trajectory_modes: Mapping[str, Mapping[str, str]],
     *,
     device: Any,
-    global_step: int,
     normalization: Any,
-    checkpoint_selection_sha256: str,
+    split_name: str,
+    noise_seed_phase: str,
+    noise_seed_step: int,
+    authority: Mapping[str, str],
 ) -> dict[str, Any]:
     import torch
 
@@ -1832,21 +1837,34 @@ def _evaluate_temporal_control(
     )
     from rexpolicy.stage0.trainers import collate_success_windows
 
+    if split_name not in {"validation", "test"}:
+        raise ValueError("temporal-control split_name must be validation or test")
+    if not isinstance(noise_seed_phase, str) or not noise_seed_phase.strip():
+        raise ValueError("temporal-control noise_seed_phase must be non-empty text")
     if (
-        not isinstance(checkpoint_selection_sha256, str)
-        or len(checkpoint_selection_sha256) != 64
-        or any(
-            character not in "0123456789abcdef"
-            for character in checkpoint_selection_sha256
-        )
+        isinstance(noise_seed_step, bool)
+        or not isinstance(noise_seed_step, int)
+        or noise_seed_step < 0
     ):
-        raise ValueError("checkpoint_selection_sha256 must be a SHA-256 digest")
+        raise ValueError("temporal-control noise_seed_step must be non-negative")
+    if not isinstance(authority, Mapping) or len(authority) != 1:
+        raise ValueError("temporal-control authority must contain one SHA-256 binding")
+    authority_record = dict(authority)
+    if any(
+        not isinstance(name, str)
+        or not name.strip()
+        or not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+        for name, value in authority_record.items()
+    ):
+        raise ValueError("temporal-control authority must bind one SHA-256 digest")
 
     ordered = tuple(
         sorted(windows, key=lambda window: (window.trajectory_id, window.start))
     )
     if not ordered:
-        raise RuntimeError("locked test split has no temporal-control windows")
+        raise RuntimeError(f"{split_name} split has no temporal-control windows")
     trajectory_ids = tuple(sorted({window.trajectory_id for window in ordered}))
     start_windows = tuple(window for window in ordered if window.start == 0)
     start_trajectory_ids = tuple(window.trajectory_id for window in start_windows)
@@ -1856,7 +1874,7 @@ def _evaluate_temporal_control(
     ):
         raise RuntimeError(
             "temporal-control evaluation requires exactly one start-zero window "
-            "per test trajectory"
+            f"per {split_name} trajectory"
         )
     start_latent_cache = _precompute_window_latents(
         models["future_encoder"],
@@ -1880,9 +1898,9 @@ def _evaluate_temporal_control(
     batch = _normalize_batch(collate_success_windows(ordered), normalization)
     noise_seed = _step_seed(
         config.runtime.seed,
-        _TEMPORAL_CONTROL_PROTOCOL["seed_phase"],
+        noise_seed_phase,
         _TEMPORAL_CONTROL_PROTOCOL["seed_stream"],
-        global_step,
+        noise_seed_step,
     )
     initial_noise = torch.randn(
         batch.action_chunks.shape,
@@ -1913,18 +1931,20 @@ def _evaluate_temporal_control(
         no_z.nonzero_start.first_action_mse,
     )
     contract = {
-        "checkpoint_selection_sha256": checkpoint_selection_sha256,
+        "authority": authority_record,
         "corpus_sha256": batch.corpus_sha256,
-        "global_step": global_step,
+        "noise_seed_phase": noise_seed_phase,
+        "noise_seed_step": noise_seed_step,
         "noise_seed": noise_seed,
         "normalization_sha256": normalization.sha256,
         "protocol": _TEMPORAL_CONTROL_PROTOCOL,
+        "split": split_name,
         "window_keys": [[window.trajectory_id, window.start] for window in ordered],
         "window_policy_sha256": batch.window_policy_sha256,
     }
     return {
         "comparison": comparison,
-        "checkpoint_selection_sha256": checkpoint_selection_sha256,
+        "authority": authority_record,
         "conditional_policy": conditional.to_record(),
         "evaluation_contract_sha256": canonical_fingerprint(contract),
         "gate_passed": comparison["gate_passed"],
@@ -1932,9 +1952,9 @@ def _evaluate_temporal_control(
         "no_z_policy": no_z.to_record(),
         "noise_seed": noise_seed,
         "protocol": dict(_TEMPORAL_CONTROL_PROTOCOL),
-        "schema_id": "rexpolicy/stage0-final-temporal-control/v2",
+        "schema_id": "rexpolicy/stage0-temporal-control-evaluation/v3",
         "shared_initial_noise": True,
-        "split": "test",
+        "split": split_name,
         "trajectory_count": len(trajectory_ids),
         "window_count": len(ordered),
     }
@@ -2242,6 +2262,7 @@ def _conditional_checkpoint_candidates(
 def _validation_checkpoint_evidence(
     conditional_step: int,
     rollout_record: Mapping[str, Any],
+    temporal_record: Mapping[str, Any],
 ):
     from rexpolicy.stage0.evaluation import Stage0ValidationCheckpointCandidate
 
@@ -2270,8 +2291,17 @@ def _validation_checkpoint_evidence(
         path_gate_passed = rollout_record["path_adherence_gate_passed"]
         if type(success_gate_passed) is not bool or type(path_gate_passed) is not bool:
             raise TypeError("validation rollout gates must be strict booleans")
+        temporal_gate_passed = temporal_record["gate_passed"]
+        conditional_temporal_mse = temporal_record["conditional_policy"][
+            "nonzero_start"
+        ]["first_action_mse"]
+        no_z_temporal_mse = temporal_record["no_z_policy"]["nonzero_start"][
+            "first_action_mse"
+        ]
+        if type(temporal_gate_passed) is not bool:
+            raise TypeError("validation temporal-control gate must be boolean")
     except (KeyError, TypeError, ValueError) as error:
-        raise RuntimeError("validation rollout record is incomplete") from error
+        raise RuntimeError("validation checkpoint evidence is incomplete") from error
     return Stage0ValidationCheckpointCandidate(
         conditional_step=conditional_step,
         success_rate=conservative_success,
@@ -2280,6 +2310,9 @@ def _validation_checkpoint_evidence(
         path_macro_f1=conservative_path_f1,
         success_gate_passed=success_gate_passed,
         path_gate_passed=path_gate_passed,
+        temporal_control_conditional_mse=float(conditional_temporal_mse),
+        temporal_control_no_z_mse=float(no_z_temporal_mse),
+        temporal_control_gate_passed=temporal_gate_passed,
     )
 
 
@@ -2329,6 +2362,20 @@ def _select_conditional_checkpoint(
             model=models["conditional_policy"],
             checkpoint=checkpoint_path,
         )
+        temporal_record = _evaluate_temporal_control(
+            config,
+            models,
+            validation_windows,
+            trajectory_modes,
+            device=next(models["conditional_policy"].parameters()).device,
+            normalization=normalization,
+            split_name="validation",
+            noise_seed_phase="validation_temporal_control",
+            noise_seed_step=0,
+            authority={
+                "conditional_model_sha256": metadata["conditional_model_sha256"]
+            },
+        )
         rollout_record = _evaluate_newton_rollouts(
             config,
             models,
@@ -2343,7 +2390,11 @@ def _select_conditional_checkpoint(
                 "maximum_validation_windows"
             ],
         )
-        candidate = _validation_checkpoint_evidence(step, rollout_record)
+        candidate = _validation_checkpoint_evidence(
+            step,
+            rollout_record,
+            temporal_record,
+        )
         evidence.append(candidate)
         evaluation_path = (
             output_dir
@@ -2351,6 +2402,12 @@ def _select_conditional_checkpoint(
             / f"validation-rollout-conditional-{step:012d}.json"
         )
         atomic_write_json(evaluation_path, rollout_record)
+        temporal_path = (
+            output_dir
+            / "evaluations"
+            / f"validation-temporal-conditional-{step:012d}.json"
+        )
+        atomic_write_json(temporal_path, temporal_record)
         evaluation_records[step] = {
             "checkpoint": str(checkpoint_path.relative_to(output_dir)),
             "conditional_model_sha256": metadata["conditional_model_sha256"],
@@ -2360,6 +2417,11 @@ def _select_conditional_checkpoint(
             "manifest_sha256": metadata["manifest_sha256"],
             "rollout_gate_passed": rollout_record["gate_passed"],
             "sequence": metadata["sequence"],
+            "temporal_control_evaluation": str(
+                temporal_path.relative_to(output_dir)
+            ),
+            "temporal_control_evaluation_sha256": file_sha256(temporal_path),
+            "temporal_control_gate_passed": temporal_record["gate_passed"],
         }
         if on_candidate is not None:
             on_candidate(
@@ -3153,10 +3215,19 @@ def _run_training(
             window_splits.test,
             trajectory_modes,
             device=device,
-            global_step=cursor.global_step,
             normalization=normalization,
-            checkpoint_selection_sha256=checkpoint_selection["selection_sha256"],
+            split_name="test",
+            noise_seed_phase="final_temporal_control",
+            noise_seed_step=cursor.global_step,
+            authority={
+                "checkpoint_selection_sha256": checkpoint_selection[
+                    "selection_sha256"
+                ]
+            },
         )
+        final_temporal_eval["checkpoint_selection_sha256"] = checkpoint_selection[
+            "selection_sha256"
+        ]
         final_temporal_eval["locked_test_claim_sha256"] = locked_test_claim[
             "claim_sha256"
         ]

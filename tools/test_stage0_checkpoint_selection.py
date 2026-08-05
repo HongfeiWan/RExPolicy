@@ -22,6 +22,9 @@ def _candidate(
     displacement: float = 0.0,
     success_gate: bool = True,
     path_gate: bool = True,
+    conditional_mse: float = 0.5,
+    no_z_mse: float = 1.0,
+    temporal_gate: bool = True,
 ) -> Stage0ValidationCheckpointCandidate:
     return Stage0ValidationCheckpointCandidate(
         conditional_step=step,
@@ -31,6 +34,9 @@ def _candidate(
         path_macro_f1=path_f1,
         success_gate_passed=success_gate,
         path_gate_passed=path_gate,
+        temporal_control_conditional_mse=conditional_mse,
+        temporal_control_no_z_mse=no_z_mse,
+        temporal_control_gate_passed=temporal_gate,
     )
 
 
@@ -93,7 +99,7 @@ class Stage0CheckpointSelectionTest(unittest.TestCase):
         self.assertEqual(rejected.safety_failures, ())
         self.assertEqual(rejected.quality_failures, ("success_gate_failed",))
 
-    def test_path_f1_and_earliest_step_break_success_ties_deterministically(
+    def test_stable_run_then_path_f1_and_step_break_ties_deterministically(
         self,
     ) -> None:
         candidates = (
@@ -178,7 +184,11 @@ class Stage0CheckpointSelectionTest(unittest.TestCase):
         )
         self.assertEqual(
             record["protocol"]["admission"]["quality_gates"],
-            {"path_gate_passed": True, "success_gate_passed": True},
+            {
+                "path_gate_passed": True,
+                "success_gate_passed": True,
+                "temporal_control_gate_passed": True,
+            },
         )
         json.dumps(record, allow_nan=False, sort_keys=True)
 
@@ -205,6 +215,9 @@ class Stage0CheckpointSelectionTest(unittest.TestCase):
                 path_macro_f1=0.5,
                 success_gate_passed=True,
                 path_gate_passed=True,
+                temporal_control_conditional_mse=0.5,
+                temporal_control_no_z_mse=1.0,
+                temporal_control_gate_passed=True,
             )
         with self.assertRaisesRegex(TypeError, "success_gate_passed"):
             _candidate(
@@ -220,6 +233,15 @@ class Stage0CheckpointSelectionTest(unittest.TestCase):
                 path_f1=0.5,
                 path_gate=1,  # type: ignore[arg-type]
             )
+        with self.assertRaisesRegex(ValueError, "strict MSE comparison"):
+            _candidate(
+                1,
+                success=0.5,
+                path_f1=0.5,
+                conditional_mse=2.0,
+                no_z_mse=1.0,
+                temporal_gate=True,
+            )
         with self.assertRaisesRegex(ValueError, "unique"):
             select_stage0_validation_checkpoint(
                 (
@@ -233,6 +255,41 @@ class Stage0CheckpointSelectionTest(unittest.TestCase):
                 (_candidate(1, success=0.5, path_f1=0.5),),
                 maximum_object_displacement_m=-0.001,
             )
+
+    def test_temporal_gate_and_longest_safe_plateau_reject_isolated_peak(
+        self,
+    ) -> None:
+        result = select_stage0_validation_checkpoint(
+            (
+                _candidate(500, success=1.0, path_f1=1.0),
+                _candidate(1_000, success=1.0, path_f1=1.0, contact=True),
+                _candidate(1_500, success=0.95, path_f1=0.95),
+                _candidate(2_000, success=0.95, path_f1=0.95),
+                _candidate(2_500, success=0.95, path_f1=0.95),
+                _candidate(
+                    3_000,
+                    success=1.0,
+                    path_f1=1.0,
+                    conditional_mse=1.1,
+                    no_z_mse=1.0,
+                    temporal_gate=False,
+                ),
+            ),
+            maximum_object_displacement_m=0.005,
+        )
+
+        self.assertEqual(result.selected_conditional_step, 2_000)
+        self.assertEqual(result.ranking[0].eligible_run_length, 3)
+        self.assertEqual(result.ranking[0].eligible_run_center_distance_steps, 0.0)
+        temporal_failure = next(
+            item
+            for item in result.ranking
+            if item.candidate.conditional_step == 3_000
+        )
+        self.assertEqual(
+            temporal_failure.quality_failures,
+            ("temporal_control_gate_failed",),
+        )
 
 
 if __name__ == "__main__":

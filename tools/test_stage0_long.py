@@ -322,7 +322,14 @@ class Stage0LongRunSamplingTest(unittest.TestCase):
             "path_adherence_gate_passed": True,
             "success_gate_passed": True,
         }
-        evidence = _validation_checkpoint_evidence(500, rollout)
+        temporal = {
+            "conditional_policy": {
+                "nonzero_start": {"first_action_mse": 0.25}
+            },
+            "gate_passed": True,
+            "no_z_policy": {"nonzero_start": {"first_action_mse": 0.5}},
+        }
+        evidence = _validation_checkpoint_evidence(500, rollout, temporal)
         self.assertEqual(evidence.conditional_step, 500)
         self.assertEqual(evidence.success_rate, 0.8)
         self.assertEqual(evidence.path_macro_f1, 0.75)
@@ -330,6 +337,9 @@ class Stage0LongRunSamplingTest(unittest.TestCase):
         self.assertEqual(evidence.maximum_object_displacement_m, 0.004)
         self.assertTrue(evidence.success_gate_passed)
         self.assertTrue(evidence.path_gate_passed)
+        self.assertTrue(evidence.temporal_control_gate_passed)
+        self.assertEqual(evidence.temporal_control_conditional_mse, 0.25)
+        self.assertEqual(evidence.temporal_control_no_z_mse, 0.5)
 
     def test_manifold_octet_pairs_modes_across_resets(self) -> None:
         import torch
