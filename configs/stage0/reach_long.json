@@ -14,9 +14,10 @@
     "eval_window_count": 256,
     "flow_sample_steps": 16,
     "max_wall_seconds": 86400.0,
+    "rollout_capture_graph": true,
     "seed": 20260806
   },
-  "schema_version": 1,
+  "schema_version": 2,
   "stage0": {
     "action_dim": 19,
     "action_horizon": 8,

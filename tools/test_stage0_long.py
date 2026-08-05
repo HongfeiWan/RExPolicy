@@ -48,9 +48,10 @@ def _record() -> dict[str, object]:
             "eval_window_count": 4,
             "flow_sample_steps": 2,
             "max_wall_seconds": 60.0,
+            "rollout_capture_graph": True,
             "seed": 17,
         },
-        "schema_version": 1,
+        "schema_version": 2,
         "stage0": {
             "action_dim": 19,
             "action_horizon": 2,
@@ -118,6 +119,20 @@ class Stage0LongRunConfigTest(unittest.TestCase):
         record["corpus"]["reset_groups"] = 5  # type: ignore[index]
         with self.assertRaisesRegex(ValueError, "divisible"):
             Stage0LongRunConfig.from_mapping(record)
+
+    def test_rollout_cuda_graph_backend_is_fingerprinted_and_strict(self) -> None:
+        graph = Stage0LongRunConfig.from_mapping(_record())
+        direct_record = _record()
+        direct_record["runtime"]["rollout_capture_graph"] = False  # type: ignore[index]
+        direct = Stage0LongRunConfig.from_mapping(direct_record)
+        self.assertTrue(graph.runtime.rollout_capture_graph)
+        self.assertFalse(direct.runtime.rollout_capture_graph)
+        self.assertNotEqual(graph.fingerprint, direct.fingerprint)
+
+        invalid = _record()
+        invalid["runtime"]["rollout_capture_graph"] = 1  # type: ignore[index]
+        with self.assertRaisesRegex(ValueError, "must be boolean"):
+            Stage0LongRunConfig.from_mapping(invalid)
 
     def test_manifold_batch_is_composed_of_complete_octets(self) -> None:
         record = _record()

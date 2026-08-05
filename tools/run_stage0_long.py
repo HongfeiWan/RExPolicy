@@ -60,6 +60,7 @@ _SELECTOR_DIAGNOSTIC_PROTOCOL = {
 _ROLLOUT_PROTOCOL = {
     "maximum_evaluation_windows": 64,
     "maximum_object_displacement_m": 0.005,
+    "physics_backend": "fingerprinted-runtime-cuda-graph-toggle/v1",
     "minimum_oracle_z_success_rate": 0.80,
     "minimum_selector_z_success_rate": 0.80,
     "schema_id": "rexpolicy/stage0-newton-rollout-gate/v1",
@@ -2010,11 +2011,25 @@ def _evaluate_newton_rollouts(
         for mode_index in range(mode_count)
     )
     env_config = replace(
-        _environment_config(config, device_name, capture_graph=False),
+        _environment_config(
+            config,
+            device_name,
+            capture_graph=config.runtime.rollout_capture_graph,
+        ),
         num_envs=len(selected),
     )
     env = GrootNewtonEnv(env_config)
     adapter = Stage0StateOnlyEnv(env)
+    expected_physics_backend = (
+        "cuda_graph" if config.runtime.rollout_capture_graph else "direct_gpu"
+    )
+    physics_backend = env.bottle_settle_metadata.get("backend")
+    if physics_backend != expected_physics_backend:
+        env.close()
+        raise RuntimeError(
+            "Newton rollout physics backend differs from the fingerprinted runtime: "
+            f"expected {expected_physics_backend}, got {physics_backend!r}"
+        )
 
     def oracle() -> Any:
         return ReachSuccessOracle(
@@ -2175,6 +2190,7 @@ def _evaluate_newton_rollouts(
         },
         "path_adherence_gate_passed": path_gate,
         "path_adherence_protocol": dict(_PATH_ADHERENCE_PROTOCOL),
+        "physics_backend": physics_backend,
         "safety_gate_passed": safety_gate,
         "schema_id": "rexpolicy/stage0-newton-rollouts/v2",
         "seed_namespace": seed_namespace,

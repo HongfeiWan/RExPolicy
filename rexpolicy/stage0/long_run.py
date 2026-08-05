@@ -23,8 +23,8 @@ from rexpolicy.stage0.config import Stage0Config
 from rexpolicy.stage0.types import canonical_fingerprint
 
 
-STAGE0_LONG_RUN_SCHEMA_VERSION = 1
-STAGE0_LONG_RUN_SCHEMA_ID = "rexpolicy/stage0-long-run/v1"
+STAGE0_LONG_RUN_SCHEMA_VERSION = 2
+STAGE0_LONG_RUN_SCHEMA_ID = "rexpolicy/stage0-long-run/v2"
 _SAFE_MODE_ID = re.compile(r"^[a-z0-9][a-z0-9_./-]{0,127}$")
 
 
@@ -206,6 +206,7 @@ class LongRunRuntimeConfig:
     seed: int
     eval_window_count: int
     flow_sample_steps: int
+    rollout_capture_graph: bool
 
     def __post_init__(self) -> None:
         _integer(self.cpu_threads, "runtime.cpu_threads", minimum=1)
@@ -217,6 +218,8 @@ class LongRunRuntimeConfig:
         _integer(self.seed, "runtime.seed", minimum=0, maximum=(1 << 63) - 1)
         _integer(self.eval_window_count, "runtime.eval_window_count", minimum=2)
         _integer(self.flow_sample_steps, "runtime.flow_sample_steps", minimum=1)
+        if not isinstance(self.rollout_capture_graph, bool):
+            raise ValueError("runtime.rollout_capture_graph must be boolean")
 
     @classmethod
     def from_mapping(cls, value: Any) -> LongRunRuntimeConfig:
@@ -225,6 +228,7 @@ class LongRunRuntimeConfig:
             "eval_window_count",
             "flow_sample_steps",
             "max_wall_seconds",
+            "rollout_capture_graph",
             "seed",
         }
         return cls(**_exact_mapping(value, keys, "long-run runtime config"))
@@ -235,6 +239,7 @@ class LongRunRuntimeConfig:
             "eval_window_count": self.eval_window_count,
             "flow_sample_steps": self.flow_sample_steps,
             "max_wall_seconds": self.max_wall_seconds,
+            "rollout_capture_graph": self.rollout_capture_graph,
             "seed": self.seed,
         }
 
