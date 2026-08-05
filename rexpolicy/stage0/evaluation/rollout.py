@@ -645,16 +645,15 @@ def rollout_reach_policy(
         (episodes, budget.max_steps_per_episode + 1, 3),
         math.nan,
         dtype=torch.float32,
-        device="cpu",
+        device=device,
     )
     trace_valid = torch.zeros(
         (episodes, budget.max_steps_per_episode + 1),
         dtype=torch.bool,
-        device="cpu",
+        device=device,
     )
-    evaluated_cpu = evaluated.detach().cpu()
-    trace[evaluated_cpu, 0] = state[evaluated, eef_slice].detach().float().cpu()
-    trace_valid[evaluated_cpu, 0] = True
+    trace[evaluated, 0] = state[evaluated, eef_slice].float()
+    trace_valid[evaluated, 0] = True
 
     success = torch.zeros(episodes, dtype=torch.bool, device=device)
     failure = torch.zeros_like(success)
@@ -763,11 +762,10 @@ def rollout_reach_policy(
                     raise TypeError("environment transition info must be a mapping")
 
                 completed_steps.add_(active_before.to(torch.int64))
-                active_before_cpu = active_before.detach().cpu()
-                trace[active_before_cpu, control_step + 1] = (
-                    next_state[active_before, eef_slice].detach().float().cpu()
-                )
-                trace_valid[active_before_cpu, control_step + 1] = True
+                trace[active_before, control_step + 1] = next_state[
+                    active_before, eef_slice
+                ].float()
+                trace_valid[active_before, control_step + 1] = True
 
                 result = oracle.evaluate(next_state)
                 info_contact = _optional_info_vector(
@@ -863,8 +861,8 @@ def rollout_reach_policy(
         contact_violation=contact_violation.detach().cpu(),
         maximum_object_displacement_m=maximum_displacement.detach().float().cpu(),
         final_goal_distance_m=final_distance.detach().float().cpu(),
-        eef_trace_m=trace,
-        trace_valid_mask=trace_valid,
+        eef_trace_m=trace.detach().cpu(),
+        trace_valid_mask=trace_valid.detach().cpu(),
         episode_latents=(
             None
             if mode is RolloutConditioningMode.NO_Z
