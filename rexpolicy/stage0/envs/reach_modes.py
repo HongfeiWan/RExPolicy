@@ -122,21 +122,21 @@ DEFAULT_REACH_MODE_SPECS = (
     ),
     ReachModeSpec(
         mode_id="stage0/reach/left_arc/v1",
-        lateral_offset_m=0.050,
-        vertical_offset_m=0.015,
-        outward_offset_m=0.015,
+        lateral_offset_m=0.075,
+        vertical_offset_m=0.020,
+        outward_offset_m=0.020,
     ),
     ReachModeSpec(
         mode_id="stage0/reach/right_arc/v1",
-        lateral_offset_m=-0.050,
-        vertical_offset_m=0.015,
-        outward_offset_m=0.015,
+        lateral_offset_m=-0.075,
+        vertical_offset_m=0.020,
+        outward_offset_m=0.020,
     ),
     ReachModeSpec(
         mode_id="stage0/reach/over_arc/v1",
         lateral_offset_m=0.0,
-        vertical_offset_m=0.065,
-        outward_offset_m=0.015,
+        vertical_offset_m=0.095,
+        outward_offset_m=0.020,
     ),
 )
 
@@ -352,7 +352,7 @@ class ReachModeController:
         self,
         *,
         max_translation_step_m: float = 0.030,
-        waypoint_tolerance_m: float = 0.008,
+        waypoint_tolerance_m: float = 0.030,
         minimum_object_clearance_m: float = 0.050,
         library: ReachModeLibrary = DEFAULT_REACH_MODE_LIBRARY,
     ) -> None:
