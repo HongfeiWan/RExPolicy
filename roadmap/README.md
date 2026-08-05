@@ -17,6 +17,32 @@ conditioning, and bounded online latent-memory expansion. It is intentionally
 isolated from the v1 learner until a trained bundle is checksum-pinned at
 launch. See [success_manifold_v2.md](success_manifold_v2.md).
 
+## Current research sequence
+
+The scientific validation sequence is now explicitly separated from the
+production flywheel phases below:
+
+1. **Stage 0 — State-only Success Manifold Validation (current priority).**
+   Use Newton state, a simulator oracle, future-trajectory latents, a
+   state-conditioned selector, and a lightweight conditional Flow-DiT. Do not
+   load images, language, GR00T, Transformers, or the frozen VLM. First close
+   Reach end to end; Push and Pick require their own verified oracles and reset
+   diversity before they are acceptance tasks.
+2. **Stage 1 — GR00T visual embedding.** Replace the Stage 0 state condition
+   adapter with frozen visual embeddings while keeping the validated manifold,
+   data, evaluation, and conditional-policy contracts.
+3. **Stage 2 — Full GR00T VLA + Success Manifold Guided Flow-DiT.** Add visual
+   and language grounding only after Stage 0 and Stage 1 pass held-out gates.
+4. **Stage 3 — Successor Representation + Active Exploration.** Activate
+   successor calibration, latent occupancy, active sampling, and curriculum
+   only after the base representation is shown to be non-collapsed and useful.
+
+The recently added successor, occupancy, temperature, shadow-scoring, and
+active-sampling components remain strict default-off Stage 3 candidates. They
+are not evidence that the Stage 0 hypothesis has been validated. See
+[stage0_success_manifold_validation.md](stage0_success_manifold_validation.md)
+for the implementation order and acceptance gates.
+
 ## Phase 0 — migrated baseline
 
 Status: **complete**.
@@ -144,6 +170,10 @@ training and node3 acceptance remain runtime gates**.
 Diversity/progress reward shaping and successor representation are deferred
 until the representation and selector pass held-out real-corpus gates. This is
 an explicit staging boundary, not an implicit activation of new rewards.
+
+The v2/full implementation is preserved while Stage 0 becomes the active
+validation path. No Stage 0 module may silently import or mutate the v2/full
+runtime, replay graph, or checkpoint state.
 
 ## Final system
 

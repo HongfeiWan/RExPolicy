@@ -1,5 +1,11 @@
 # RExPolicy v2: Success Manifold Guided Flow-DiT
 
+The v2/full path documented here is preserved. The current scientific priority
+is the independent, state-only [Stage 0 validation
+path](stage0_success_manifold_validation.md). Successor, occupancy, and active
+exploration remain default-off Stage 3 candidates until Stage 0 establishes
+that the representation is non-collapsed and useful.
+
 Status: **MVP phases 1–5 implemented behind default-off contracts**.
 
 RExPolicy v2 replaces a single hand-designed reward direction with an explicit

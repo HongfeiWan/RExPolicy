@@ -13,6 +13,16 @@ successful futures, samples a reachable success mode from the current state,
 and conditions the existing Flow-DiT with one success token. The v1 path is
 unchanged when the feature flags are absent.
 
+The current research priority is **RExPolicy Stage 0**, an independent,
+state-only Success Manifold validation path. Stage 0 keeps Newton and the
+automatic success/failure oracle, but deliberately removes images, language,
+the GR00T processor, and the frozen VLM. Its purpose is to test whether
+parallel self-interaction can discover multiple successful trajectory modes
+and condition a lightweight Flow-DiT before adding VLA complexity. The
+existing v1/v2/full path remains available and unchanged; successor,
+occupancy, and active-exploration work stays default-off until the Stage 0
+scientific gates pass.
+
 The repository also contains a fail-closed TaskSpec v2 control plane: sealed
 task and process contracts, reward-free Event Ledgers and rebuildable views,
 sandboxed provider-attested automatic authoring to static quarantine, signed
@@ -67,6 +77,8 @@ remaining activation gates are documented in [automatic task
 authoring](roadmap/automatic_task_authoring.md). The v2 architecture, rollout
 flags, staged training contract, and deliberately deferred work are documented
 in [Success Manifold v2](roadmap/success_manifold_v2.md).
+The state-only validation architecture and phased implementation gates are in
+[Stage 0 Success Manifold Validation](roadmap/stage0_success_manifold_validation.md).
 
 ## Environment
 
