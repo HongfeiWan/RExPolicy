@@ -2827,7 +2827,6 @@ def _run_training(
     budget = WallClockBudget(max_wall_seconds)
     latest_eval: dict[str, Any] | None = None
     latest_eval_summary: dict[str, Any] | None = None
-    latest_metrics: dict[str, Any] | None = None
     latent_cache: dict[tuple[str, int], Any] | None = None
     selector_warm_started = cursor.selector > 0
     last_checkpoint_step = cursor.global_step if resume_checkpoint is not None else -1
@@ -2968,8 +2967,6 @@ def _run_training(
             normalization=normalization,
             materialize_metrics=materialize_metrics,
         )
-        if step_metrics is not None:
-            latest_metrics = step_metrics
         cursor = cursor.advance(config.training, phase)
         next_phase = cursor.next_phase(config.training)
         phase_boundary = next_phase is not before_phase
