@@ -69,9 +69,12 @@ class Stage0PolicyTrainer:
         success_latents: torch.Tensor | None,
         *,
         generator: torch.Generator | None = None,
-    ) -> PolicyStepMetrics:
+        materialize_metrics: bool = True,
+    ) -> PolicyStepMetrics | None:
         if not isinstance(batch, Stage0WindowBatch):
             raise TypeError("batch must be a Stage0WindowBatch")
+        if not isinstance(materialize_metrics, bool):
+            raise TypeError("materialize_metrics must be boolean")
         self.model.train()
         device, dtype = module_device_dtype(self.model)
         batch = batch.to(device, dtype=dtype)
@@ -109,6 +112,8 @@ class Stage0PolicyTrainer:
             gradient_clip_norm=self.gradient_clip_norm,
         )
         self.optimizer_step += 1
+        if not materialize_metrics:
+            return None
         values = materialize_finite_scalars(
             loss=loss,
             gradient_norm=gradient_norm,

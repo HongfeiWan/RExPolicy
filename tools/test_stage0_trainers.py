@@ -307,6 +307,38 @@ class Stage0BatchAndLossTest(unittest.TestCase):
 
 
 class Stage0TrainerStepTest(unittest.TestCase):
+    def test_policy_step_can_defer_metric_device_transfer(self) -> None:
+        torch.manual_seed(27)
+        batch = _batch()
+        model = Stage0FlowPolicy(
+            state_dim=5,
+            latent_dim=4,
+            action_dim=3,
+            action_horizon=3,
+            model_dim=16,
+            transformer_layers=1,
+            attention_heads=4,
+            feedforward_dim=24,
+            dropout=0.0,
+        )
+        optimizer = torch.optim.AdamW(model.parameters(), lr=1.0e-3)
+        trainer = Stage0PolicyTrainer(model, optimizer)
+        before = tuple(parameter.detach().clone() for parameter in model.parameters())
+        metrics = trainer.step(
+            batch,
+            torch.randn(6, 4),
+            generator=torch.Generator().manual_seed(28),
+            materialize_metrics=False,
+        )
+        self.assertIsNone(metrics)
+        self.assertEqual(trainer.optimizer_step, 1)
+        self.assertTrue(
+            any(
+                not torch.equal(old, parameter.detach())
+                for old, parameter in zip(before, model.parameters())
+            )
+        )
+
     def test_manifold_step_converts_mask_and_clips_all_gradients(self) -> None:
         torch.manual_seed(17)
         batch = _batch()

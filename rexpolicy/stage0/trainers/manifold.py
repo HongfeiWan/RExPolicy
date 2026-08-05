@@ -123,9 +123,12 @@ class Stage0ManifoldTrainer:
         *,
         mode_ids: Sequence[Any] | None = None,
         generator: torch.Generator | None = None,
-    ) -> ManifoldStepMetrics:
+        materialize_metrics: bool = True,
+    ) -> ManifoldStepMetrics | None:
         if not isinstance(batch, Stage0WindowBatch):
             raise TypeError("batch must be a Stage0WindowBatch")
+        if not isinstance(materialize_metrics, bool):
+            raise TypeError("materialize_metrics must be boolean")
         self.model.train()
         device, dtype = module_device_dtype(self.model)
         batch = batch.to(device, dtype=dtype)
@@ -172,6 +175,8 @@ class Stage0ManifoldTrainer:
             gradient_clip_norm=self.config.gradient_clip_norm,
         )
         self.optimizer_step += 1
+        if not materialize_metrics:
+            return None
         values = materialize_finite_scalars(
             loss=losses.total,
             reconstruction=losses.reconstruction,

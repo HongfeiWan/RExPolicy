@@ -2648,7 +2648,8 @@ def _train_one_step(
     *,
     device: Any,
     normalization: Any,
-) -> dict[str, Any]:
+    materialize_metrics: bool,
+) -> dict[str, Any] | None:
     import torch
 
     from rexpolicy.stage0.trainers import collate_success_windows
@@ -2677,8 +2678,9 @@ def _train_one_step(
                 trajectory_modes[window.trajectory_id]["mode_id"] for window in windows
             ),
             generator=model_generator,
+            materialize_metrics=materialize_metrics,
         )
-        return asdict(metrics)
+        return None if metrics is None else asdict(metrics)
     candidate_windows = _phase_training_windows(train_windows, phase)
     windows = _sample_windows(
         candidate_windows,
@@ -2695,24 +2697,29 @@ def _train_one_step(
         use_episode_start_latent=phase is LongRunPhase.CONDITIONAL_POLICY,
     )
     if phase is LongRunPhase.SELECTOR:
-        return asdict(trainers[phase.value].step(batch.current_states, target_latents))
-    if phase is LongRunPhase.CONDITIONAL_POLICY:
-        return asdict(
-            trainers[phase.value].step(
-                batch,
-                target_latents,
-                generator=model_generator,
-            )
+        metrics = trainers[phase.value].step(
+            batch.current_states,
+            target_latents,
+            materialize_metrics=materialize_metrics,
         )
+        return None if metrics is None else asdict(metrics)
+    if phase is LongRunPhase.CONDITIONAL_POLICY:
+        metrics = trainers[phase.value].step(
+            batch,
+            target_latents,
+            generator=model_generator,
+            materialize_metrics=materialize_metrics,
+        )
+        return None if metrics is None else asdict(metrics)
     if phase is not LongRunPhase.NO_Z_POLICY:
         raise RuntimeError(f"unsupported training phase: {phase.value}")
-    return asdict(
-        trainers[phase.value].step(
-            batch,
-            torch.zeros_like(target_latents),
-            generator=model_generator,
-        )
+    metrics = trainers[phase.value].step(
+        batch,
+        torch.zeros_like(target_latents),
+        generator=model_generator,
+        materialize_metrics=materialize_metrics,
     )
+    return None if metrics is None else asdict(metrics)
 
 
 def _run_training(
@@ -2969,7 +2976,15 @@ def _run_training(
             selector_warm_started = True
             emit("selector_warm_started", detail=warm_start)
         before_phase = phase
-        latest_metrics = _train_one_step(
+        next_global_step = cursor.global_step + 1
+        phase_boundary_step = (
+            getattr(cursor, phase.value) + 1 == cursor.target(config.training, phase)
+        )
+        materialize_metrics = bool(
+            next_global_step % config.training.log_every_steps == 0
+            or phase_boundary_step
+        )
+        step_metrics = _train_one_step(
             config,
             cursor,
             phase,
@@ -2980,14 +2995,19 @@ def _run_training(
             trajectory_modes,
             device=device,
             normalization=normalization,
+            materialize_metrics=materialize_metrics,
         )
+        if step_metrics is not None:
+            latest_metrics = step_metrics
         cursor = cursor.advance(config.training, phase)
         next_phase = cursor.next_phase(config.training)
         phase_boundary = next_phase is not before_phase
         if cursor.global_step % config.training.log_every_steps == 0 or phase_boundary:
+            if step_metrics is None:
+                raise RuntimeError("logging step did not materialize training metrics")
             emit(
                 "training",
-                detail={"metrics": latest_metrics, "trained_phase": phase.value},
+                detail={"metrics": step_metrics, "trained_phase": phase.value},
             )
         should_evaluate = (
             cursor.global_step % config.training.eval_every_steps == 0
