@@ -13,6 +13,13 @@ from .config import (
     SUCCESS_MANIFOLD_CONFIG_SCHEMA_VERSION,
     SuccessManifoldConfig,
 )
+from .exploration import (
+    EXPLORATION_POLICY_SCHEMA_VERSION,
+    ExplorationPolicy,
+    ExplorationSchedulePoint,
+    ExplorationScore,
+    score_shadow_exploration,
+)
 from .memory import (
     LATENT_MEMORY_SCHEMA_VERSION,
     LatentAdmission,
@@ -93,6 +100,10 @@ __all__ = [
     "SUCCESS_OCCUPANCY_STATE_SCHEMA_VERSION",
     "DiagonalGaussian",
     "DiversityLosses",
+    "EXPLORATION_POLICY_SCHEMA_VERSION",
+    "ExplorationPolicy",
+    "ExplorationSchedulePoint",
+    "ExplorationScore",
     "FutureTrajectoryDecoder",
     "FutureTrajectoryEncoder",
     "FutureTrajectoryOutput",
@@ -123,6 +134,7 @@ __all__ = [
     "multi_positive_info_nce_loss",
     "success_manifold_losses",
     "success_selector_losses",
+    "score_shadow_exploration",
     "successor_losses",
     "variance_covariance_diversity_loss",
 ]
