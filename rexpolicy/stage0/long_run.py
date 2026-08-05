@@ -155,10 +155,10 @@ class LongRunTrainingConfig:
             minimum=math.nextafter(0.0, 1.0),
         )
         _finite_number(self.weight_decay, "training.weight_decay", minimum=0.0)
-        if self.batch_size < 4 or self.batch_size % 4:
+        if self.batch_size < 8 or self.batch_size % 8:
             raise ValueError(
-                "training.batch_size must be a multiple of four for grouped "
-                "contrastive quartets"
+                "training.batch_size must be a multiple of eight for paired "
+                "same-mode cross-reset contrastive groups"
             )
         if self.conditional_policy_steps != self.no_z_policy_steps:
             raise ValueError(
@@ -252,8 +252,7 @@ class Stage0LongRunConfig:
     def __post_init__(self) -> None:
         if self.schema_version != STAGE0_LONG_RUN_SCHEMA_VERSION:
             raise ValueError(
-                "long-run schema_version must be "
-                f"{STAGE0_LONG_RUN_SCHEMA_VERSION}"
+                f"long-run schema_version must be {STAGE0_LONG_RUN_SCHEMA_VERSION}"
             )
         if not isinstance(self.stage0, Stage0Config):
             raise TypeError("stage0 must be Stage0Config")
@@ -273,9 +272,7 @@ class Stage0LongRunConfig:
         if self.stage0.num_envs > self.corpus.reset_groups:
             raise ValueError("stage0.num_envs cannot exceed corpus.reset_groups")
         if self.corpus.reset_groups % self.stage0.num_envs:
-            raise ValueError(
-                "corpus.reset_groups must be divisible by stage0.num_envs"
-            )
+            raise ValueError("corpus.reset_groups must be divisible by stage0.num_envs")
 
     @classmethod
     def from_mapping(cls, value: Any) -> Stage0LongRunConfig:
@@ -313,7 +310,9 @@ def load_long_run_config(path: str | Path) -> Stage0LongRunConfig:
     try:
         value = json.loads(source.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
-        raise ValueError(f"cannot read Stage 0 long-run config {source}: {error}") from error
+        raise ValueError(
+            f"cannot read Stage 0 long-run config {source}: {error}"
+        ) from error
     return Stage0LongRunConfig.from_mapping(value)
 
 
@@ -325,7 +324,9 @@ class LongRunPhase(str, Enum):
     COMPLETE = "complete"
 
 
-_TRAINING_PHASES = tuple(phase for phase in LongRunPhase if phase is not LongRunPhase.COMPLETE)
+_TRAINING_PHASES = tuple(
+    phase for phase in LongRunPhase if phase is not LongRunPhase.COMPLETE
+)
 
 
 @dataclass(frozen=True)
@@ -382,7 +383,9 @@ class LongRunCursor:
                 return phase
         return LongRunPhase.COMPLETE
 
-    def advance(self, config: LongRunTrainingConfig, phase: LongRunPhase) -> LongRunCursor:
+    def advance(
+        self, config: LongRunTrainingConfig, phase: LongRunPhase
+    ) -> LongRunCursor:
         if phase is LongRunPhase.COMPLETE:
             raise ValueError("cannot advance the complete phase")
         expected = self.next_phase(config)
@@ -458,13 +461,16 @@ def atomic_write_json(path: str | Path, value: Mapping[str, Any]) -> Path:
         raise TypeError("atomic JSON value must be a mapping")
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps(
-        dict(value),
-        ensure_ascii=True,
-        allow_nan=False,
-        indent=2,
-        sort_keys=True,
-    ).encode("ascii") + b"\n"
+    payload = (
+        json.dumps(
+            dict(value),
+            ensure_ascii=True,
+            allow_nan=False,
+            indent=2,
+            sort_keys=True,
+        ).encode("ascii")
+        + b"\n"
+    )
     temporary = target.with_name(f".{target.name}.tmp-{os.getpid()}-{uuid.uuid4().hex}")
     try:
         with temporary.open("xb") as stream:

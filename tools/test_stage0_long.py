@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from rexpolicy.stage0.long_run import (
     AtomicJsonlLog,
@@ -18,6 +19,11 @@ from rexpolicy.stage0.long_run import (
     Stage0LongRunConfig,
     WallClockBudget,
     atomic_write_json,
+)
+from tools.run_stage0_long import (
+    _MANIFOLD_TRAINER_CONFIG,
+    _phase_training_windows,
+    _sample_contrastive_windows,
 )
 
 
@@ -63,7 +69,7 @@ def _record() -> dict[str, object]:
             "window_stride": 1,
         },
         "training": {
-            "batch_size": 4,
+            "batch_size": 8,
             "checkpoint_every_steps": 2,
             "conditional_policy_steps": 2,
             "eval_every_steps": 2,
@@ -105,6 +111,12 @@ class Stage0LongRunConfigTest(unittest.TestCase):
         record = _record()
         record["corpus"]["reset_groups"] = 5  # type: ignore[index]
         with self.assertRaisesRegex(ValueError, "divisible"):
+            Stage0LongRunConfig.from_mapping(record)
+
+    def test_manifold_batch_is_composed_of_complete_octets(self) -> None:
+        record = _record()
+        record["training"]["batch_size"] = 4  # type: ignore[index]
+        with self.assertRaisesRegex(ValueError, "multiple of eight"):
             Stage0LongRunConfig.from_mapping(record)
 
     def test_validate_only_cli_does_not_need_torch_or_newton(self) -> None:
@@ -192,6 +204,96 @@ class Stage0LongRunCursorTest(unittest.TestCase):
         exceeded = LongRunCursor(future_encoder=3)
         with self.assertRaisesRegex(ValueError, "exceeds"):
             exceeded.next_phase(self.training)
+
+
+class Stage0LongRunSamplingTest(unittest.TestCase):
+    def test_checkpointed_manifold_config_matches_runtime_config(self) -> None:
+        from dataclasses import asdict
+
+        from rexpolicy.stage0.trainers import Stage0ManifoldTrainerConfig
+
+        runtime_config = Stage0ManifoldTrainerConfig(**_MANIFOLD_TRAINER_CONFIG)
+        self.assertEqual(asdict(runtime_config), _MANIFOLD_TRAINER_CONFIG)
+
+    def test_manifold_octet_pairs_modes_across_resets(self) -> None:
+        import torch
+
+        modes = ("direct", "left_arc")
+        windows = []
+        trajectory_modes = {}
+        for reset_group_id in ("reset-0", "reset-1"):
+            for mode_id in modes:
+                trajectory_id = f"{reset_group_id}/{mode_id}"
+                trajectory_modes[trajectory_id] = {"mode_id": mode_id}
+                for start in (0, 1):
+                    windows.append(
+                        SimpleNamespace(
+                            reset_group_id=reset_group_id,
+                            start=start,
+                            trajectory_id=trajectory_id,
+                        )
+                    )
+        sampled = _sample_contrastive_windows(
+            windows,
+            trajectory_modes,
+            batch_size=8,
+            generator=torch.Generator().manual_seed(7),
+        )
+        self.assertEqual(len(sampled), 8)
+        for offset in (0, 4):
+            rows = sampled[offset : offset + 4]
+            self.assertEqual({row.start for row in rows}, {0, 1})
+            self.assertEqual(len({row.reset_group_id for row in rows}), 2)
+            self.assertEqual(
+                len({trajectory_modes[row.trajectory_id]["mode_id"] for row in rows}),
+                1,
+            )
+        self.assertEqual(
+            {trajectory_modes[row.trajectory_id]["mode_id"] for row in sampled},
+            set(modes),
+        )
+
+    def test_selector_only_samples_episode_starts(self) -> None:
+        windows = tuple(SimpleNamespace(start=start) for start in (0, 1, 0, 2))
+        selected = _phase_training_windows(windows, LongRunPhase.SELECTOR)
+        self.assertEqual(tuple(window.start for window in selected), (0, 0))
+        self.assertIs(
+            _phase_training_windows(windows, LongRunPhase.CONDITIONAL_POLICY),
+            windows,
+        )
+
+    def test_sparse_mode_groups_only_use_compatible_reset_pairs(self) -> None:
+        import torch
+
+        group_modes = {
+            "reset-0": ("direct", "left"),
+            "reset-1": ("left", "right"),
+            "reset-2": ("direct", "left"),
+        }
+        windows = []
+        trajectory_modes = {}
+        for reset_group_id, modes in group_modes.items():
+            for mode_id in modes:
+                trajectory_id = f"{reset_group_id}/{mode_id}"
+                trajectory_modes[trajectory_id] = {"mode_id": mode_id}
+                windows.extend(
+                    SimpleNamespace(
+                        reset_group_id=reset_group_id,
+                        start=start,
+                        trajectory_id=trajectory_id,
+                    )
+                    for start in (0, 1)
+                )
+        sampled = _sample_contrastive_windows(
+            windows,
+            trajectory_modes,
+            batch_size=16,
+            generator=torch.Generator().manual_seed(11),
+        )
+        self.assertEqual(
+            {window.reset_group_id for window in sampled},
+            {"reset-0", "reset-2"},
+        )
 
 
 class Stage0LongRunDurabilityTest(unittest.TestCase):

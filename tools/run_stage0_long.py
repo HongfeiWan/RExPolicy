@@ -49,10 +49,12 @@ _MODE_DIAGNOSTIC_PROTOCOL = {
     "selection": "complete-reset-groups-start-zero/v1",
 }
 _SELECTOR_DIAGNOSTIC_PROTOCOL = {
-    "average_component_mode_coverage_minimum": 3.0,
+    "all_components_cover_all_modes_per_reset": True,
     "component_count": "one_per_configured_mode",
+    "maximum_normalized_mode_to_component_distance": 1.0,
+    "minimum_component_probability_per_reset": 0.10,
     "nll_must_improve_over_held_out_global_diagonal_gaussian": True,
-    "schema_id": "rexpolicy/stage0-selector-gate/v1",
+    "schema_id": "rexpolicy/stage0-selector-gate/v2",
     "warm_start": "train-start-zero-mode-centroids/v1",
 }
 _ROLLOUT_PROTOCOL = {
@@ -63,12 +65,27 @@ _ROLLOUT_PROTOCOL = {
     "schema_id": "rexpolicy/stage0-newton-rollout-gate/v1",
 }
 _PATH_ADHERENCE_PROTOCOL = {
+    "all_selector_modes_must_be_sampled": True,
     "oracle_z_macro_f1_minimum": 0.75,
     "permuted_z_macro_f1_minimum": 0.75,
     "resample_points": 64,
-    "schema_id": "rexpolicy/stage0-rollout-path-adherence-gate/v1",
-    "selector_average_sampled_mode_coverage_minimum": 2.0,
-    "selector_z_macro_f1_minimum": 0.50,
+    "schema_id": "rexpolicy/stage0-rollout-path-adherence-gate/v2",
+    "selector_average_sampled_mode_coverage_minimum": 2.5,
+    "selector_z_macro_f1_minimum": 0.70,
+}
+_MANIFOLD_TRAINER_CONFIG = {
+    "contrastive_temperature": 0.1,
+    "contrastive_weight": 1.0,
+    "covariance_weight": 1.0,
+    "gather_distributed": False,
+    "gradient_clip_norm": 1.0,
+    "mode_alignment_weight": 1.0,
+    "reconstruction_probability": 0.25,
+    "reconstruction_weight": 1.0,
+    "temporal_radius": 1,
+    "variance_epsilon": 1.0e-4,
+    "variance_target_std": 1.0,
+    "variance_weight": 1.0,
 }
 _STOP_REASON: str | None = None
 
@@ -779,6 +796,7 @@ def _sample_windows(
 
 def _sample_contrastive_windows(
     windows: Sequence[Any],
+    trajectory_modes: Mapping[str, Mapping[str, str]],
     *,
     batch_size: int,
     generator: Any,
@@ -787,44 +805,68 @@ def _sample_contrastive_windows(
 
     by_group: dict[str, dict[str, list[Any]]] = {}
     for window in windows:
+        mode_id = trajectory_modes[window.trajectory_id]["mode_id"]
         by_group.setdefault(window.reset_group_id, {}).setdefault(
-            window.trajectory_id,
+            mode_id,
             [],
         ).append(window)
-    eligible: list[list[list[Any]]] = []
-    for trajectories in by_group.values():
-        items = [
-            sorted(rows, key=lambda item: item.start)
-            for rows in trajectories.values()
+    eligible = [
+        {
+            mode_id: sorted(rows, key=lambda item: item.start)
+            for mode_id, rows in modes.items()
             if len(rows) >= 2
-        ]
-        if len(items) >= 2:
-            eligible.append(items)
-    if not eligible:
+        }
+        for _, modes in sorted(by_group.items())
+    ]
+    eligible = [modes for modes in eligible if len(modes) >= 2]
+    if len(eligible) < 2:
         raise RuntimeError(
-            "manifold training requires a reset group with adjacent windows "
-            "from two successful trajectories"
+            "manifold training requires two reset groups sharing two success modes"
         )
-    if batch_size % 4:
-        raise ValueError("manifold batch_size must be divisible by four")
-    group_order = torch.randperm(len(eligible), generator=generator).tolist()
+    compatible_pairs = [
+        (left_group, right_group, tuple(sorted(set(left_group) & set(right_group))))
+        for left_index, left_group in enumerate(eligible)
+        for right_group in eligible[left_index + 1 :]
+        if len(set(left_group) & set(right_group)) >= 2
+    ]
+    if not compatible_pairs:
+        raise RuntimeError(
+            "manifold training requires a reset-group pair sharing two success modes"
+        )
+    if batch_size % 8:
+        raise ValueError("manifold batch_size must be divisible by eight")
+    pair_order = torch.randperm(
+        len(compatible_pairs),
+        generator=generator,
+    ).tolist()
     result: list[Any] = []
-    for quartet_index in range(batch_size // 4):
-        group = eligible[group_order[quartet_index % len(group_order)]]
-        trajectory_order = torch.randperm(
-            len(group),
+    for octet_index in range(batch_size // 8):
+        left_group, right_group, common_modes = compatible_pairs[
+            pair_order[octet_index % len(pair_order)]
+        ]
+        mode_order = torch.randperm(
+            len(common_modes),
             generator=generator,
         ).tolist()
-        for trajectory_index in trajectory_order[:2]:
-            trajectory = group[trajectory_index]
+        for mode_index in mode_order[:2]:
+            mode_id = common_modes[mode_index]
+            left_rows = left_group[mode_id]
+            right_rows = right_group[mode_id]
             start = int(
                 torch.randint(
-                    len(trajectory) - 1,
+                    min(len(left_rows), len(right_rows)) - 1,
                     (1,),
                     generator=generator,
                 )
             )
-            result.extend((trajectory[start], trajectory[start + 1]))
+            result.extend(
+                (
+                    left_rows[start],
+                    left_rows[start + 1],
+                    right_rows[start],
+                    right_rows[start + 1],
+                )
+            )
     return result
 
 
@@ -1134,10 +1176,7 @@ def _create_training_components(
         "future_encoder": Stage0ManifoldTrainer(
             encoder,
             optimizers["future_encoder"],
-            config=Stage0ManifoldTrainerConfig(
-                reconstruction_probability=0.25,
-                temporal_radius=1,
-            ),
+            config=Stage0ManifoldTrainerConfig(**_MANIFOLD_TRAINER_CONFIG),
         ),
         "selector": Stage0SelectorTrainer(selector, optimizers["selector"]),
         "conditional_policy": Stage0PolicyTrainer(
@@ -1381,6 +1420,7 @@ def _evaluate_offline(
         oracle_modes = oracle_latent.reshape(group_count, mode_count, -1)
         component_mode_coverages: list[int] = []
         maximum_mode_to_component_distances: list[float] = []
+        normalized_mode_to_component_distances: list[float] = []
         for group_index in range(group_count):
             distances = torch.cdist(
                 component_means[group_index],
@@ -1392,13 +1432,34 @@ def _evaluate_offline(
             maximum_mode_to_component_distances.append(
                 float(distances.min(dim=0).values.max())
             )
+            oracle_distances = torch.cdist(
+                oracle_modes[group_index],
+                oracle_modes[group_index],
+            )
+            minimum_mode_separation = oracle_distances.masked_fill(
+                torch.eye(mode_count, dtype=torch.bool, device=device),
+                float("inf"),
+            ).min()
+            normalized_mode_to_component_distances.append(
+                float(
+                    distances.min(dim=0).values.max()
+                    / minimum_mode_separation.clamp_min(1.0e-6)
+                )
+            )
         average_component_mode_coverage = sum(component_mode_coverages) / len(
             component_mode_coverages
         )
+        component_probabilities = distribution.weights[::mode_count]
+        minimum_component_probabilities = component_probabilities.min(dim=1).values
         selector_gate = bool(
             distribution.logits.shape[1] == mode_count
-            and average_component_mode_coverage
-            >= _SELECTOR_DIAGNOSTIC_PROTOCOL["average_component_mode_coverage_minimum"]
+            and all(coverage == mode_count for coverage in component_mode_coverages)
+            and max(normalized_mode_to_component_distances)
+            <= _SELECTOR_DIAGNOSTIC_PROTOCOL[
+                "maximum_normalized_mode_to_component_distance"
+            ]
+            and float(minimum_component_probabilities.min())
+            >= _SELECTOR_DIAGNOSTIC_PROTOCOL["minimum_component_probability_per_reset"]
             and selector_nll < global_gaussian_nll
         )
         selector_cosine = float(
@@ -1458,10 +1519,16 @@ def _evaluate_offline(
             "maximum_mode_to_component_distance_by_reset": (
                 maximum_mode_to_component_distances
             ),
+            "minimum_component_probability_by_reset": (
+                minimum_component_probabilities.tolist()
+            ),
             "mean_weight_entropy": float(
                 -(distribution.weights * distribution.log_weights).sum(dim=-1).mean()
             ),
             "negative_log_likelihood": selector_nll,
+            "normalized_mode_to_component_distance_by_reset": (
+                normalized_mode_to_component_distances
+            ),
             "protocol": dict(_SELECTOR_DIAGNOSTIC_PROTOCOL),
         },
         "split": split_name,
@@ -1676,6 +1743,9 @@ def _evaluate_newton_rollouts(
         for name, result in results.items()
     }
     average_selector_coverage = sum(selector_coverages) / len(selector_coverages)
+    selector_mode_support = {
+        mode_id: selector_modes.count(mode_id) for mode_id in config.corpus.mode_ids
+    }
     path_gate = bool(
         path_metrics["oracle-z"].macro_f1
         >= _PATH_ADHERENCE_PROTOCOL["oracle_z_macro_f1_minimum"]
@@ -1685,6 +1755,7 @@ def _evaluate_newton_rollouts(
         >= _PATH_ADHERENCE_PROTOCOL["selector_z_macro_f1_minimum"]
         and average_selector_coverage
         >= _PATH_ADHERENCE_PROTOCOL["selector_average_sampled_mode_coverage_minimum"]
+        and all(support > 0 for support in selector_mode_support.values())
     )
     safety_gate = all(
         not bool(result.contact_violation.any())
@@ -1719,6 +1790,7 @@ def _evaluate_newton_rollouts(
         "success_gate_passed": success_gate,
         "selector_sampled_mode_coverage_by_reset": selector_coverages,
         "selector_average_sampled_mode_coverage": average_selector_coverage,
+        "selector_sampled_mode_support": selector_mode_support,
     }
 
 
@@ -1737,9 +1809,13 @@ def _checkpoint_hashes(
             "normalization_sha256": normalization.sha256,
             "action_representation": "eef_delta_xyz/v1",
             "future_state_representation": "normalized_delta_from_current/v1",
+            "manifold_sampling": "paired-mode-cross-reset-octets/v1",
+            "mode_invariant_alignment": "raw-latent-squared-distance/v1",
+            "manifold_trainer_config": dict(_MANIFOLD_TRAINER_CONFIG),
             "mode_diagnostic_protocol": _MODE_DIAGNOSTIC_PROTOCOL,
             "no_z_control": "zero_latent_same_two_token_architecture/v1",
             "selector_diagnostic_protocol": _SELECTOR_DIAGNOSTIC_PROTOCOL,
+            "selector_training_windows": "start-zero-only/v1",
             "rollout_protocol": _ROLLOUT_PROTOCOL,
             "path_adherence_protocol": _PATH_ADHERENCE_PROTOCOL,
             "window_policy_sha256": window_splits.window_policy_sha256,
@@ -1784,6 +1860,18 @@ def _phase_seed_name(phase: LongRunPhase) -> str:
     return phase.value
 
 
+def _phase_training_windows(
+    windows: Sequence[Any],
+    phase: LongRunPhase,
+) -> Sequence[Any]:
+    if phase is not LongRunPhase.SELECTOR:
+        return windows
+    start_zero = tuple(window for window in windows if window.start == 0)
+    if not start_zero:
+        raise RuntimeError("selector training requires episode-start windows")
+    return start_zero
+
+
 def _train_one_step(
     config: Stage0LongRunConfig,
     cursor: LongRunCursor,
@@ -1792,6 +1880,7 @@ def _train_one_step(
     trainers: Mapping[str, Any],
     train_windows: Sequence[Any],
     latent_cache: Mapping[tuple[str, int], Any] | None,
+    trajectory_modes: Mapping[str, Mapping[str, str]],
     *,
     device: Any,
     normalization: Any,
@@ -1814,16 +1903,21 @@ def _train_one_step(
     if phase is LongRunPhase.FUTURE_ENCODER:
         windows = _sample_contrastive_windows(
             train_windows,
+            trajectory_modes,
             batch_size=config.training.batch_size,
             generator=batch_generator,
         )
         metrics = trainers[phase.value].step(
             _normalize_batch(collate_success_windows(windows), normalization),
+            mode_ids=tuple(
+                trajectory_modes[window.trajectory_id]["mode_id"] for window in windows
+            ),
             generator=model_generator,
         )
         return asdict(metrics)
+    candidate_windows = _phase_training_windows(train_windows, phase)
     windows = _sample_windows(
-        train_windows,
+        candidate_windows,
         batch_size=config.training.batch_size,
         generator=batch_generator,
     )
@@ -2099,6 +2193,7 @@ def _run_training(
             trainers,
             window_splits.train,
             latent_cache,
+            trajectory_modes,
             device=device,
             normalization=normalization,
         )
