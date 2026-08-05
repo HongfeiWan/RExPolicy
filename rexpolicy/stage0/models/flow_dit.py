@@ -28,6 +28,7 @@ class FlowMatchingOutput:
     noise: torch.Tensor
     timesteps: torch.Tensor
     action_mask: torch.Tensor
+    action_feature_mask: torch.Tensor
 
 
 class FourierTimeEmbedding(nn.Module):
@@ -174,6 +175,21 @@ class FlowDiT(nn.Module):
             raise ValueError("every action row must contain a valid step")
         return action_mask
 
+    def _action_feature_mask(
+        self,
+        action_feature_mask: torch.Tensor | None,
+        *,
+        device: torch.device,
+    ) -> torch.Tensor:
+        if action_feature_mask is None:
+            return torch.ones(self.action_dim, dtype=torch.bool, device=device)
+        return require_bool_mask(
+            action_feature_mask,
+            name="action_feature_mask",
+            shape=(self.action_dim,),
+            device=device,
+        )
+
     def _timesteps(
         self,
         timesteps: torch.Tensor | float,
@@ -276,6 +292,7 @@ class FlowDiT(nn.Module):
         conditions: ConditionTokens,
         *,
         action_mask: torch.Tensor | None = None,
+        action_feature_mask: torch.Tensor | None = None,
         generator: torch.Generator | None = None,
         noise: torch.Tensor | None = None,
         timesteps: torch.Tensor | None = None,
@@ -287,6 +304,12 @@ class FlowDiT(nn.Module):
             batch=batch,
             device=actions.device,
         )
+        action_feature_mask = self._action_feature_mask(
+            action_feature_mask,
+            device=actions.device,
+        )
+        if not bool(action_feature_mask.any()):
+            raise ValueError("action_feature_mask must retain at least one feature")
         if noise is None:
             noise = torch.randn(
                 actions.shape,
@@ -314,6 +337,9 @@ class FlowDiT(nn.Module):
             batch=batch,
             reference=actions,
         )
+        feature_mask = action_feature_mask.reshape(1, 1, self.action_dim)
+        actions = actions.masked_fill(~feature_mask, 0.0)
+        noise = noise.masked_fill(~feature_mask, 0.0)
         interpolation = timesteps[:, None, None]
         noisy_actions = (1.0 - interpolation) * noise + interpolation * actions
         target_velocity = actions - noise
@@ -332,7 +358,8 @@ class FlowDiT(nn.Module):
             action_mask=action_mask,
         )
         squared_error = (predicted_velocity - target_velocity).square()
-        loss = squared_error.masked_select(action_mask.unsqueeze(-1)).mean()
+        loss_mask = action_mask.unsqueeze(-1) & feature_mask
+        loss = squared_error.masked_select(loss_mask).mean()
         return FlowMatchingOutput(
             loss=loss,
             predicted_velocity=predicted_velocity,
@@ -341,6 +368,7 @@ class FlowDiT(nn.Module):
             noise=noise,
             timesteps=timesteps,
             action_mask=action_mask,
+            action_feature_mask=action_feature_mask,
         )
 
     @torch.no_grad()
@@ -350,6 +378,7 @@ class FlowDiT(nn.Module):
         *,
         steps: int = 16,
         action_mask: torch.Tensor | None = None,
+        action_feature_mask: torch.Tensor | None = None,
         generator: torch.Generator | None = None,
         initial_noise: torch.Tensor | None = None,
     ) -> torch.Tensor:
@@ -363,6 +392,12 @@ class FlowDiT(nn.Module):
             batch=batch,
             device=conditions.tokens.device,
         )
+        action_feature_mask = self._action_feature_mask(
+            action_feature_mask,
+            device=conditions.tokens.device,
+        )
+        if not bool(action_feature_mask.any()):
+            raise ValueError("action_feature_mask must retain at least one feature")
         shape = (batch, self.horizon, self.action_dim)
         if initial_noise is None:
             actions = torch.randn(
@@ -382,7 +417,12 @@ class FlowDiT(nn.Module):
                     "initial_noise must share condition batch, device, and dtype"
                 )
             actions = initial_noise.clone()
-        actions = actions.masked_fill(~action_mask.unsqueeze(-1), 0.0)
+        value_mask = action_mask.unsqueeze(-1) & action_feature_mask.reshape(
+            1,
+            1,
+            self.action_dim,
+        )
+        actions = actions.masked_fill(~value_mask, 0.0)
         step_size = 1.0 / float(steps)
         for index in range(steps):
             time = float(index) * step_size
@@ -393,7 +433,7 @@ class FlowDiT(nn.Module):
                 action_mask=action_mask,
             )
             actions = actions + step_size * velocity
-            actions = actions.masked_fill(~action_mask.unsqueeze(-1), 0.0)
+            actions = actions.masked_fill(~value_mask, 0.0)
         return actions
 
 

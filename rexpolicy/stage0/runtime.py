@@ -66,6 +66,7 @@ class Stage0FlowPolicy(nn.Module):
         *,
         success_latent: torch.Tensor | None,
         action_mask: torch.Tensor | None = None,
+        action_feature_mask: torch.Tensor | None = None,
         generator: torch.Generator | None = None,
         noise: torch.Tensor | None = None,
         timesteps: torch.Tensor | None = None,
@@ -76,6 +77,7 @@ class Stage0FlowPolicy(nn.Module):
             target_actions,
             success_latent=success_latent,
             action_mask=action_mask,
+            action_feature_mask=action_feature_mask,
             generator=generator,
             noise=noise,
             timesteps=timesteps,
@@ -88,6 +90,7 @@ class Stage0FlowPolicy(nn.Module):
         *,
         success_latent: torch.Tensor | None,
         action_mask: torch.Tensor | None = None,
+        action_feature_mask: torch.Tensor | None = None,
         generator: torch.Generator | None = None,
         noise: torch.Tensor | None = None,
         timesteps: torch.Tensor | None = None,
@@ -97,6 +100,7 @@ class Stage0FlowPolicy(nn.Module):
             target_actions,
             conditions,
             action_mask=action_mask,
+            action_feature_mask=action_feature_mask,
             generator=generator,
             noise=noise,
             timesteps=timesteps,
@@ -110,6 +114,7 @@ class Stage0FlowPolicy(nn.Module):
         success_latent: torch.Tensor | None,
         steps: int = 16,
         action_mask: torch.Tensor | None = None,
+        action_feature_mask: torch.Tensor | None = None,
         generator: torch.Generator | None = None,
         initial_noise: torch.Tensor | None = None,
     ) -> torch.Tensor:
@@ -118,6 +123,7 @@ class Stage0FlowPolicy(nn.Module):
             conditions,
             steps=steps,
             action_mask=action_mask,
+            action_feature_mask=action_feature_mask,
             generator=generator,
             initial_noise=initial_noise,
         )
@@ -131,6 +137,7 @@ class Stage0FlowPolicy(nn.Module):
         selector_latent: torch.Tensor,
         steps: int = 16,
         action_mask: torch.Tensor | None = None,
+        action_feature_mask: torch.Tensor | None = None,
         generator: torch.Generator | None = None,
         initial_noise: torch.Tensor | None = None,
     ) -> Stage0PolicySample:
@@ -151,6 +158,7 @@ class Stage0FlowPolicy(nn.Module):
                 success_latent=None,
                 steps=steps,
                 action_mask=action_mask,
+                action_feature_mask=action_feature_mask,
                 initial_noise=initial_noise,
             ),
             oracle_z=self.sample(
@@ -158,6 +166,7 @@ class Stage0FlowPolicy(nn.Module):
                 success_latent=oracle_latent,
                 steps=steps,
                 action_mask=action_mask,
+                action_feature_mask=action_feature_mask,
                 initial_noise=initial_noise,
             ),
             selector_z=self.sample(
@@ -165,6 +174,7 @@ class Stage0FlowPolicy(nn.Module):
                 success_latent=selector_latent,
                 steps=steps,
                 action_mask=action_mask,
+                action_feature_mask=action_feature_mask,
                 initial_noise=initial_noise,
             ),
         )

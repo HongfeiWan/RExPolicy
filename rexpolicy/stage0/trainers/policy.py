@@ -33,6 +33,7 @@ class Stage0PolicyTrainer:
         optimizer: torch.optim.Optimizer,
         *,
         gradient_clip_norm: float = 1.0,
+        action_feature_mask: torch.Tensor | None = None,
     ) -> None:
         if not isinstance(model, nn.Module):
             raise TypeError("model must be a torch module")
@@ -44,13 +45,23 @@ class Stage0PolicyTrainer:
             gradient_clip_norm,
             name="gradient_clip_norm",
         )
+        if action_feature_mask is not None:
+            if (
+                not isinstance(action_feature_mask, torch.Tensor)
+                or action_feature_mask.dtype is not torch.bool
+                or action_feature_mask.ndim != 1
+                or not bool(action_feature_mask.any())
+            ):
+                raise ValueError("action_feature_mask must be a non-empty bool vector")
+            action_feature_mask = action_feature_mask.detach().clone()
+        self.action_feature_mask = action_feature_mask
         self.optimizer_step = 0
         module_device_dtype(model)
 
     def step(
         self,
         batch: Stage0WindowBatch,
-        success_latents: torch.Tensor,
+        success_latents: torch.Tensor | None,
         *,
         generator: torch.Generator | None = None,
     ) -> PolicyStepMetrics:
@@ -59,11 +70,18 @@ class Stage0PolicyTrainer:
         self.model.train()
         device, dtype = module_device_dtype(self.model)
         batch = batch.to(device, dtype=dtype)
-        success_latents = success_latents.detach().to(device=device, dtype=dtype)
+        if success_latents is not None:
+            success_latents = success_latents.detach().to(
+                device=device,
+                dtype=dtype,
+            )
         self.optimizer.zero_grad(set_to_none=True)
         kwargs = {
             "success_latent": success_latents,
             "action_mask": batch.action_mask,
+            "action_feature_mask": None
+            if self.action_feature_mask is None
+            else self.action_feature_mask.to(device=device),
             "generator": generator,
         }
         if self.model.__class__.__name__ == "DistributedDataParallel":

@@ -245,6 +245,69 @@ class Stage0TrainerStepTest(unittest.TestCase):
             self.assertIsNotNone(parameter.grad, name)
             self.assertTrue(torch.isfinite(parameter.grad).all(), name)
 
+    def test_policy_trainer_supports_independently_trained_no_z_baseline(self) -> None:
+        torch.manual_seed(37)
+        batch = _batch()
+        model = Stage0FlowPolicy(
+            state_dim=5,
+            latent_dim=4,
+            action_dim=3,
+            action_horizon=3,
+            model_dim=16,
+            transformer_layers=1,
+            attention_heads=4,
+            feedforward_dim=24,
+            dropout=0.0,
+        )
+        for parameter in model.condition_encoder.latent_projector.parameters():
+            parameter.requires_grad_(False)
+        model.condition_encoder.latent_token_type.requires_grad_(False)
+        trainable = tuple(
+            parameter for parameter in model.parameters() if parameter.requires_grad
+        )
+        optimizer = torch.optim.AdamW(trainable, lr=1.0e-3)
+        trainer = Stage0PolicyTrainer(model, optimizer)
+        metrics = trainer.step(
+            batch,
+            None,
+            generator=torch.Generator().manual_seed(41),
+        )
+        self.assertEqual(metrics.optimizer_step, 1)
+        self.assertGreater(metrics.gradient_norm, 0.0)
+        for name, parameter in model.named_parameters():
+            if parameter.requires_grad:
+                self.assertIsNotNone(parameter.grad, name)
+            else:
+                self.assertIsNone(parameter.grad, name)
+
+    def test_policy_trainer_can_limit_loss_to_effective_action_features(self) -> None:
+        torch.manual_seed(43)
+        batch = _batch()
+        model = Stage0FlowPolicy(
+            state_dim=5,
+            latent_dim=4,
+            action_dim=3,
+            action_horizon=3,
+            model_dim=16,
+            transformer_layers=1,
+            attention_heads=4,
+            feedforward_dim=24,
+            dropout=0.0,
+        )
+        optimizer = torch.optim.AdamW(model.parameters(), lr=1.0e-3)
+        trainer = Stage0PolicyTrainer(
+            model,
+            optimizer,
+            action_feature_mask=torch.tensor([True, False, False]),
+        )
+        metrics = trainer.step(
+            batch,
+            torch.randn(6, 4),
+            generator=torch.Generator().manual_seed(47),
+        )
+        self.assertTrue(math.isfinite(metrics.loss))
+        self.assertGreater(metrics.gradient_norm, 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()
