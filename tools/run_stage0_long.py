@@ -230,6 +230,33 @@ def _prepare_output(
     atomic_write_json(contract_path, expected)
 
 
+def _write_once_json(path: Path, value: Mapping[str, Any]) -> None:
+    """Create a durable JSON claim exactly once, failing closed on repeats."""
+
+    payload = (
+        json.dumps(
+            dict(value),
+            allow_nan=False,
+            ensure_ascii=True,
+            indent=2,
+            sort_keys=True,
+            separators=(",", ": "),
+        )
+        + "\n"
+    ).encode("ascii")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+    except Exception:
+        # A partial claim is deliberately retained so a retry cannot silently
+        # consume the locked test for a second time.
+        raise
+
+
 def _environment_config(
     config: Stage0LongRunConfig, device: str, *, capture_graph: bool
 ):
@@ -1996,6 +2023,238 @@ def _evaluate_newton_rollouts(
     }
 
 
+def _conditional_candidate_step(
+    config: Stage0LongRunConfig,
+    manifest: Mapping[str, Any],
+) -> int | None:
+    if not isinstance(manifest, Mapping):
+        raise TypeError("checkpoint manifest must be a mapping")
+    try:
+        cursor = LongRunCursor.from_steps(manifest["steps"])
+        sequence = manifest["sequence"]
+    except (KeyError, TypeError, ValueError) as error:
+        raise RuntimeError("checkpoint manifest has invalid cursor metadata") from error
+    if type(sequence) is not int or sequence != cursor.global_step:
+        raise RuntimeError("checkpoint sequence and global cursor disagree")
+    training = config.training
+    if (
+        cursor.future_encoder != training.future_encoder_steps
+        or cursor.selector != training.selector_steps
+        or cursor.no_z_policy != 0
+        or not 1 <= cursor.conditional_policy <= training.conditional_policy_steps
+    ):
+        return None
+    return cursor.conditional_policy
+
+
+def _conditional_checkpoint_candidates(
+    config: Stage0LongRunConfig,
+    manager: Any,
+    hashes: Any,
+) -> tuple[dict[str, Any], ...]:
+    from rexpolicy.stage0.checkpoint import Stage0CheckpointHashes, file_sha256
+
+    candidates: dict[int, dict[str, Any]] = {}
+    for checkpoint_path in manager.completed_checkpoints():
+        manifest = manager.verify(checkpoint_path)
+        saved_hashes = Stage0CheckpointHashes.from_record(manifest["hashes"])
+        if saved_hashes != hashes:
+            raise RuntimeError(
+                f"checkpoint hashes changed within run: {checkpoint_path.name}"
+            )
+        conditional_step = _conditional_candidate_step(config, manifest)
+        if conditional_step is None:
+            continue
+        if conditional_step in candidates:
+            raise RuntimeError(
+                f"duplicate conditional checkpoint step: {conditional_step}"
+            )
+        model_path = checkpoint_path / "models" / "conditional_policy.pt"
+        candidates[conditional_step] = {
+            "checkpoint_path": checkpoint_path,
+            "conditional_model_sha256": file_sha256(model_path),
+            "conditional_step": conditional_step,
+            "manifest_sha256": file_sha256(checkpoint_path / "manifest.json"),
+            "sequence": manifest["sequence"],
+        }
+    final_step = config.training.conditional_policy_steps
+    if final_step not in candidates:
+        raise RuntimeError(
+            "checkpoint selection requires the final conditional-policy checkpoint"
+        )
+    return tuple(candidates[step] for step in sorted(candidates))
+
+
+def _validation_checkpoint_evidence(
+    conditional_step: int,
+    rollout_record: Mapping[str, Any],
+):
+    from rexpolicy.stage0.evaluation import Stage0ValidationCheckpointCandidate
+
+    try:
+        results = rollout_record["conditioning_results"]
+        paths = rollout_record["path_adherence"]
+        condition_names = ("no-z", "oracle-z", "selector-z", "permuted-z")
+        conditional_names = ("oracle-z", "selector-z", "permuted-z")
+        contact_violation = any(
+            any(bool(value) for value in results[name]["contact_violation"])
+            for name in condition_names
+        )
+        maximum_displacement = max(
+            max(
+                float(value) for value in results[name]["maximum_object_displacement_m"]
+            )
+            for name in condition_names
+        )
+        conservative_success = min(
+            float(results[name]["success_rate"]) for name in ("oracle-z", "selector-z")
+        )
+        conservative_path_f1 = min(
+            float(paths[name]["macro_f1"]) for name in conditional_names
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise RuntimeError("validation rollout record is incomplete") from error
+    return Stage0ValidationCheckpointCandidate(
+        conditional_step=conditional_step,
+        success_rate=conservative_success,
+        contact_violation=contact_violation,
+        maximum_object_displacement_m=maximum_displacement,
+        path_macro_f1=conservative_path_f1,
+    )
+
+
+def _select_conditional_checkpoint(
+    config: Stage0LongRunConfig,
+    manager: Any,
+    hashes: Any,
+    models: Mapping[str, Any],
+    validation_windows: Sequence[Any],
+    trajectories: Sequence[Any],
+    trajectory_modes: Mapping[str, Mapping[str, str]],
+    *,
+    training_final_checkpoint: Path,
+    output_dir: Path,
+    device_name: str,
+    normalization: Any,
+    on_candidate: Any | None = None,
+) -> dict[str, Any]:
+    from rexpolicy.stage0.evaluation import select_stage0_validation_checkpoint
+
+    candidate_metadata = _conditional_checkpoint_candidates(config, manager, hashes)
+    evidence = []
+    evaluation_records: dict[int, dict[str, Any]] = {}
+    for metadata in candidate_metadata:
+        step = metadata["conditional_step"]
+        checkpoint_path = metadata["checkpoint_path"]
+        manager.load_model_component(
+            hashes=hashes,
+            name="conditional_policy",
+            model=models["conditional_policy"],
+            checkpoint=checkpoint_path,
+        )
+        rollout_record = _evaluate_newton_rollouts(
+            config,
+            models,
+            validation_windows,
+            trajectories,
+            trajectory_modes,
+            device_name=device_name,
+            normalization=normalization,
+            split_name="validation",
+            seed_namespace="validation_checkpoint_selection_rollout",
+            maximum_windows=_CHECKPOINT_SELECTION_PROTOCOL[
+                "maximum_validation_windows"
+            ],
+        )
+        candidate = _validation_checkpoint_evidence(step, rollout_record)
+        evidence.append(candidate)
+        evaluation_path = (
+            output_dir
+            / "evaluations"
+            / f"validation-rollout-conditional-{step:012d}.json"
+        )
+        atomic_write_json(evaluation_path, rollout_record)
+        evaluation_records[step] = {
+            "checkpoint": str(checkpoint_path.relative_to(output_dir)),
+            "conditional_model_sha256": metadata["conditional_model_sha256"],
+            "evidence": candidate.to_record(),
+            "evaluation": str(evaluation_path.relative_to(output_dir)),
+            "manifest_sha256": metadata["manifest_sha256"],
+            "rollout_gate_passed": rollout_record["gate_passed"],
+            "sequence": metadata["sequence"],
+        }
+        if on_candidate is not None:
+            on_candidate(
+                {
+                    "candidate_count": len(candidate_metadata),
+                    "conditional_step": step,
+                    "evidence": candidate.to_record(),
+                }
+            )
+    selection = select_stage0_validation_checkpoint(
+        tuple(evidence),
+        maximum_object_displacement_m=_ROLLOUT_PROTOCOL[
+            "maximum_object_displacement_m"
+        ],
+    )
+    selected_step = selection.selected_conditional_step
+    if selected_step is None:
+        manager.load_model_component(
+            hashes=hashes,
+            name="conditional_policy",
+            model=models["conditional_policy"],
+            checkpoint=training_final_checkpoint,
+        )
+        selected_checkpoint = None
+    else:
+        selected_checkpoint = next(
+            metadata["checkpoint_path"]
+            for metadata in candidate_metadata
+            if metadata["conditional_step"] == selected_step
+        )
+        manager.load_model_component(
+            hashes=hashes,
+            name="conditional_policy",
+            model=models["conditional_policy"],
+            checkpoint=selected_checkpoint,
+        )
+    core = selection.to_record()
+    ranking_protocol = core.pop("protocol")
+    core.update(
+        {
+            "candidate_evaluations": {
+                str(step): evaluation_records[step]
+                for step in sorted(evaluation_records)
+            },
+            "component_composition": {
+                "conditional_policy": (
+                    None
+                    if selected_checkpoint is None
+                    else str(selected_checkpoint.relative_to(output_dir))
+                ),
+                "future_encoder": str(
+                    training_final_checkpoint.relative_to(output_dir)
+                ),
+                "no_z_policy": str(training_final_checkpoint.relative_to(output_dir)),
+                "selector": str(training_final_checkpoint.relative_to(output_dir)),
+            },
+            "protocol": dict(_CHECKPOINT_SELECTION_PROTOCOL),
+            "ranking_protocol": ranking_protocol,
+            "selected_checkpoint": (
+                None
+                if selected_checkpoint is None
+                else str(selected_checkpoint.relative_to(output_dir))
+            ),
+            "training_final_checkpoint": str(
+                training_final_checkpoint.relative_to(output_dir)
+            ),
+        }
+    )
+    core["selection_sha256"] = canonical_fingerprint(core)
+    atomic_write_json(output_dir / "checkpoint-selection.json", core)
+    return core
+
+
 def _checkpoint_hashes(
     config: Stage0LongRunConfig,
     window_splits: Any,
@@ -2212,12 +2471,6 @@ def _run_training(
         config.corpus.mode_ids,
         maximum_windows=config.runtime.eval_window_count,
     )
-    _select_complete_mode_groups(
-        window_splits.test,
-        trajectory_modes,
-        config.corpus.mode_ids,
-        maximum_windows=config.runtime.eval_window_count,
-    )
     models, optimizers, trainers = _create_training_components(
         config,
         device=device,
@@ -2345,7 +2598,6 @@ def _run_training(
             "resumed_from": resumed_from,
             "train_windows": len(window_splits.train),
             "validation_windows": len(window_splits.validation),
-            "test_windows": len(window_splits.test),
             "verification": dict(verification),
         },
     )
@@ -2442,10 +2694,58 @@ def _run_training(
         emit("complete", detail={"checkpoint": str(checkpoint)})
         status = "complete"
 
+    checkpoint_selection: dict[str, Any] | None = None
+    locked_test_claim: dict[str, Any] | None = None
     final_test_eval: dict[str, Any] | None = None
     final_temporal_eval: dict[str, Any] | None = None
     final_rollout_eval: dict[str, Any] | None = None
     if status == "complete":
+        if checkpoint is None:
+            raise RuntimeError("complete training must have a final checkpoint")
+        checkpoint_selection = _select_conditional_checkpoint(
+            config,
+            manager,
+            hashes,
+            models,
+            window_splits.validation,
+            trajectories,
+            trajectory_modes,
+            training_final_checkpoint=checkpoint,
+            output_dir=output_dir,
+            device_name=device_name,
+            normalization=normalization,
+            on_candidate=lambda detail: emit(
+                "validation_checkpoint_candidate",
+                detail=detail,
+            ),
+        )
+        emit(
+            "validation_checkpoint_selection",
+            detail={
+                "candidate_count": len(checkpoint_selection["candidate_evaluations"]),
+                "gate_passed": checkpoint_selection["gate_passed"],
+                "selected_checkpoint": checkpoint_selection["selected_checkpoint"],
+                "selected_conditional_step": checkpoint_selection[
+                    "selected_conditional_step"
+                ],
+            },
+        )
+    if checkpoint_selection is not None and checkpoint_selection["gate_passed"]:
+        locked_test_claim = {
+            "checkpoint_selection_sha256": checkpoint_selection["selection_sha256"],
+            "config_sha256": config.fingerprint,
+            "purpose": "single locked Stage 0 test evaluation attempt",
+            "schema_id": "rexpolicy/stage0-locked-test-claim/v1",
+            "utc_unix_seconds": time.time(),
+        }
+        locked_test_claim["claim_sha256"] = canonical_fingerprint(locked_test_claim)
+        _write_once_json(output_dir / "locked-test-claim.json", locked_test_claim)
+        _select_complete_mode_groups(
+            window_splits.test,
+            trajectory_modes,
+            config.corpus.mode_ids,
+            maximum_windows=config.runtime.eval_window_count,
+        )
         final_test_eval = _evaluate_offline(
             config,
             models,
@@ -2456,6 +2756,9 @@ def _run_training(
             normalization=normalization,
             split_name="test",
         )
+        final_test_eval["checkpoint_selection_sha256"] = checkpoint_selection[
+            "selection_sha256"
+        ]
         atomic_write_json(
             output_dir / "evaluations" / f"test-final-{cursor.global_step:012d}.json",
             final_test_eval,
@@ -2473,6 +2776,9 @@ def _run_training(
             global_step=cursor.global_step,
             normalization=normalization,
         )
+        final_temporal_eval["checkpoint_selection_sha256"] = checkpoint_selection[
+            "selection_sha256"
+        ]
         atomic_write_json(
             output_dir
             / "evaluations"
@@ -2504,6 +2810,9 @@ def _run_training(
             seed_namespace="locked_test_rollout",
             maximum_windows=_ROLLOUT_PROTOCOL["maximum_evaluation_windows"],
         )
+        final_rollout_eval["checkpoint_selection_sha256"] = checkpoint_selection[
+            "selection_sha256"
+        ]
         atomic_write_json(
             output_dir / "final-newton-rollouts.json",
             final_rollout_eval,
@@ -2535,9 +2844,24 @@ def _run_training(
         and final_temporal_eval["gate_passed"]
     )
     offline_gate = representation_gate and temporal_gate
+    selection_gate = bool(
+        checkpoint_selection is not None and checkpoint_selection["gate_passed"]
+    )
     report = {
         "schema_id": "rexpolicy/stage0-long-run-report/v2",
         "checkpoint": str(checkpoint),
+        "training_final_checkpoint": str(checkpoint),
+        "selected_conditional_checkpoint": (
+            None
+            if checkpoint_selection is None
+            else checkpoint_selection["selected_checkpoint"]
+        ),
+        "checkpoint_selection": checkpoint_selection,
+        "validation_checkpoint_selection_gate_passed": selection_gate,
+        "locked_test_claim": locked_test_claim,
+        "locked_test_status": (
+            "evaluated_once" if final_rollout_eval is not None else "not_consumed"
+        ),
         "config_sha256": config.fingerprint,
         "cursor": cursor.to_steps(),
         "elapsed_seconds": budget.elapsed_seconds,
@@ -2564,6 +2888,7 @@ def _run_training(
         "scientific_feasibility_status": (
             "supported"
             if offline_gate
+            and selection_gate
             and final_rollout_eval is not None
             and final_rollout_eval["gate_passed"]
             else "not_supported"
@@ -2574,7 +2899,7 @@ def _run_training(
         "stop_reason": stop_reason,
         "verification": dict(verification),
         "window_counts": {
-            "test": len(window_splits.test),
+            "test": len(window_splits.test) if selection_gate else None,
             "train": len(window_splits.train),
             "validation": len(window_splits.validation),
         },

@@ -23,10 +23,13 @@ from rexpolicy.stage0.long_run import (
 from tools.run_stage0_long import (
     _MANIFOLD_TRAINER_CONFIG,
     _cached_window_batch,
+    _conditional_candidate_step,
     _phase_training_windows,
     _policy_latent_key,
     _sample_contrastive_windows,
     _temporal_control_comparison,
+    _validation_checkpoint_evidence,
+    _write_once_json,
 )
 
 
@@ -232,6 +235,68 @@ class Stage0LongRunSamplingTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "finite"):
             _temporal_control_comparison(float("nan"), 1.0)
 
+    def test_conditional_checkpoint_candidates_exclude_no_z_training(self) -> None:
+        config = Stage0LongRunConfig.from_mapping(_record())
+        eligible = {
+            "sequence": 4,
+            "steps": {
+                "conditional_policy": 1,
+                "future_encoder": 2,
+                "global": 4,
+                "no_z_policy": 0,
+                "selector": 1,
+            },
+        }
+        self.assertEqual(_conditional_candidate_step(config, eligible), 1)
+
+        after_no_z = json.loads(json.dumps(eligible))
+        after_no_z["sequence"] = 5
+        after_no_z["steps"]["global"] = 5
+        after_no_z["steps"]["no_z_policy"] = 1
+        self.assertIsNone(_conditional_candidate_step(config, after_no_z))
+
+        inconsistent = json.loads(json.dumps(eligible))
+        inconsistent["sequence"] = 99
+        with self.assertRaisesRegex(RuntimeError, "disagree"):
+            _conditional_candidate_step(config, inconsistent)
+
+    def test_validation_checkpoint_evidence_is_conservative(self) -> None:
+        rollout = {
+            "conditioning_results": {
+                "no-z": {
+                    "contact_violation": [False, False],
+                    "maximum_object_displacement_m": [0.0, 0.001],
+                    "success_rate": 1.0,
+                },
+                "oracle-z": {
+                    "contact_violation": [False, False],
+                    "maximum_object_displacement_m": [0.0, 0.002],
+                    "success_rate": 0.9,
+                },
+                "selector-z": {
+                    "contact_violation": [False, False],
+                    "maximum_object_displacement_m": [0.0, 0.003],
+                    "success_rate": 0.8,
+                },
+                "permuted-z": {
+                    "contact_violation": [False, True],
+                    "maximum_object_displacement_m": [0.0, 0.004],
+                    "success_rate": 0.7,
+                },
+            },
+            "path_adherence": {
+                "oracle-z": {"macro_f1": 0.95},
+                "selector-z": {"macro_f1": 0.85},
+                "permuted-z": {"macro_f1": 0.75},
+            },
+        }
+        evidence = _validation_checkpoint_evidence(500, rollout)
+        self.assertEqual(evidence.conditional_step, 500)
+        self.assertEqual(evidence.success_rate, 0.8)
+        self.assertEqual(evidence.path_macro_f1, 0.75)
+        self.assertTrue(evidence.contact_violation)
+        self.assertEqual(evidence.maximum_object_displacement_m, 0.004)
+
     def test_manifold_octet_pairs_modes_across_resets(self) -> None:
         import torch
 
@@ -421,6 +486,21 @@ class Stage0LongRunDurabilityTest(unittest.TestCase):
                 heartbeat.records()
             with self.assertRaisesRegex(RuntimeError, "torn"):
                 heartbeat.append({"event": "training"})
+
+    def test_locked_test_claim_is_write_once(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "locked-test-claim.json"
+            _write_once_json(path, {"attempt": 1, "schema_id": "claim/v1"})
+            self.assertEqual(
+                json.loads(path.read_text(encoding="ascii")),
+                {"attempt": 1, "schema_id": "claim/v1"},
+            )
+            with self.assertRaises(FileExistsError):
+                _write_once_json(path, {"attempt": 2, "schema_id": "claim/v1"})
+            self.assertEqual(
+                json.loads(path.read_text(encoding="ascii"))["attempt"],
+                1,
+            )
 
 
 if __name__ == "__main__":
