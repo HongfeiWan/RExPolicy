@@ -17,6 +17,18 @@ from .metrics import (
     FixedEvaluationBudget,
     PolicyEvaluationRun,
 )
+from .mode_metrics import LatentModeMetrics, analyze_latent_modes
+from .path_metrics import (
+    ModePathAdherence,
+    PathAdherenceMetrics,
+    analyze_path_adherence,
+)
+from .rollout import (
+    ReachRolloutBudget,
+    ReachRolloutResult,
+    RolloutConditioningMode,
+    rollout_reach_policy,
+)
 
 
 __all__ = [
@@ -27,8 +39,17 @@ __all__ = [
     "DeterministicPCA",
     "FixedEvaluationBudget",
     "LatentStatistics",
+    "LatentModeMetrics",
+    "ModePathAdherence",
+    "PathAdherenceMetrics",
     "PolicyEvaluationRun",
+    "ReachRolloutBudget",
+    "ReachRolloutResult",
+    "RolloutConditioningMode",
     "analyze_latents",
+    "analyze_latent_modes",
+    "analyze_path_adherence",
     "compare_conditioning_runs",
     "deterministic_pca",
+    "rollout_reach_policy",
 ]
