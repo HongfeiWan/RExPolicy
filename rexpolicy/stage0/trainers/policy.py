@@ -8,7 +8,12 @@ import torch
 from torch import nn
 
 from .batch import Stage0WindowBatch
-from .common import finish_optimizer_step, module_device_dtype, positive_finite
+from .common import (
+    finish_optimizer_step,
+    materialize_finite_scalars,
+    module_device_dtype,
+    positive_finite,
+)
 
 
 @dataclass(frozen=True)
@@ -104,10 +109,13 @@ class Stage0PolicyTrainer:
             gradient_clip_norm=self.gradient_clip_norm,
         )
         self.optimizer_step += 1
-        value = float(loss.detach())
-        return PolicyStepMetrics(
-            loss=value,
-            flow_matching=value,
+        values = materialize_finite_scalars(
+            loss=loss,
             gradient_norm=gradient_norm,
+        )
+        return PolicyStepMetrics(
+            loss=values["loss"],
+            flow_matching=values["loss"],
+            gradient_norm=values["gradient_norm"],
             optimizer_step=self.optimizer_step,
         )

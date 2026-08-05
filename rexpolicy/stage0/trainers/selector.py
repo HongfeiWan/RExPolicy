@@ -7,7 +7,12 @@ from dataclasses import dataclass
 import torch
 from torch import nn
 
-from .common import finish_optimizer_step, module_device_dtype, positive_finite
+from .common import (
+    finish_optimizer_step,
+    materialize_finite_scalars,
+    module_device_dtype,
+    positive_finite,
+)
 
 
 @dataclass(frozen=True)
@@ -60,10 +65,13 @@ class Stage0SelectorTrainer:
             gradient_clip_norm=self.gradient_clip_norm,
         )
         self.optimizer_step += 1
-        value = float(loss.detach())
-        return SelectorStepMetrics(
-            loss=value,
-            negative_log_likelihood=value,
+        values = materialize_finite_scalars(
+            loss=loss,
             gradient_norm=gradient_norm,
+        )
+        return SelectorStepMetrics(
+            loss=values["loss"],
+            negative_log_likelihood=values["loss"],
+            gradient_norm=values["gradient_norm"],
             optimizer_step=self.optimizer_step,
         )

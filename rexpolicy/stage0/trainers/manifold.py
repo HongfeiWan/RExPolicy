@@ -10,7 +10,12 @@ import torch
 from torch import nn
 
 from .batch import Stage0WindowBatch
-from .common import finish_optimizer_step, module_device_dtype, positive_finite
+from .common import (
+    finish_optimizer_step,
+    materialize_finite_scalars,
+    module_device_dtype,
+    positive_finite,
+)
 from .losses import manifold_losses
 
 
@@ -167,13 +172,22 @@ class Stage0ManifoldTrainer:
             gradient_clip_norm=self.config.gradient_clip_norm,
         )
         self.optimizer_step += 1
-        return ManifoldStepMetrics(
-            loss=float(losses.total.detach()),
-            reconstruction=float(losses.reconstruction.detach()),
-            contrastive=float(losses.contrastive.detach()),
-            mode_alignment=float(losses.mode_alignment.detach()),
-            variance=float(losses.variance.detach()),
-            covariance=float(losses.covariance.detach()),
+        values = materialize_finite_scalars(
+            loss=losses.total,
+            reconstruction=losses.reconstruction,
+            contrastive=losses.contrastive,
+            mode_alignment=losses.mode_alignment,
+            variance=losses.variance,
+            covariance=losses.covariance,
             gradient_norm=gradient_norm,
+        )
+        return ManifoldStepMetrics(
+            loss=values["loss"],
+            reconstruction=values["reconstruction"],
+            contrastive=values["contrastive"],
+            mode_alignment=values["mode_alignment"],
+            variance=values["variance"],
+            covariance=values["covariance"],
+            gradient_norm=values["gradient_norm"],
             optimizer_step=self.optimizer_step,
         )

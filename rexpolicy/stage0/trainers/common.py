@@ -33,18 +33,60 @@ def module_device_dtype(module: nn.Module) -> tuple[torch.device, torch.dtype]:
     return next(iter(devices)), dtype
 
 
+def _non_finite_names(
+    named_tensors: tuple[tuple[str, torch.Tensor], ...],
+) -> tuple[str, ...]:
+    """Check any number of tensors with one device-to-host synchronization."""
+
+    if not named_tensors:
+        return ()
+    flags = torch.stack(
+        tuple(torch.isfinite(value.detach()).all() for _, value in named_tensors)
+    )
+    if bool(flags.all()):
+        return ()
+    finite = flags.detach().cpu().tolist()
+    return tuple(
+        name for (name, _), is_finite in zip(named_tensors, finite) if not is_finite
+    )
+
+
+def materialize_finite_scalars(
+    **values: torch.Tensor,
+) -> dict[str, float]:
+    """Materialize scalar metrics through one synchronized device transfer."""
+
+    if not values:
+        raise ValueError("at least one scalar metric is required")
+    items = tuple(values.items())
+    device = items[0][1].device if isinstance(items[0][1], torch.Tensor) else None
+    if any(
+        not isinstance(value, torch.Tensor)
+        or value.ndim != 0
+        or value.device != device
+        for _, value in items
+    ):
+        raise ValueError("metrics must be scalar tensors on one device")
+    materialized = torch.stack(tuple(value.detach().float() for _, value in items))
+    result = materialized.cpu().tolist()
+    non_finite = tuple(
+        name for (name, _), value in zip(items, result) if not math.isfinite(value)
+    )
+    if non_finite:
+        raise FloatingPointError(f"non-finite optimizer metrics: {non_finite}")
+    return {name: float(value) for (name, _), value in zip(items, result)}
+
+
 def finish_optimizer_step(
     *,
     loss: torch.Tensor,
     module: nn.Module,
     optimizer: torch.optim.Optimizer,
     gradient_clip_norm: float,
-) -> float:
+) -> torch.Tensor:
     """Backpropagate, reject missing/non-finite grads, clip, and update."""
     if not isinstance(loss, torch.Tensor) or loss.ndim != 0:
         raise ValueError("training loss must be a scalar tensor")
-    if not bool(torch.isfinite(loss.detach())):
-        raise FloatingPointError("training loss is non-finite")
     loss.backward()
     named = tuple(
         (name, parameter)
@@ -58,26 +100,31 @@ def finish_optimizer_step(
             "trainable parameters received no gradient; DDP must use "
             f"find_unused_parameters=False only with a complete graph: {missing}"
         )
-    non_finite = tuple(
-        name
-        for name, parameter in named
-        if not bool(torch.isfinite(parameter.grad).all())
+    non_finite = _non_finite_names(
+        (("training loss", loss),)
+        + tuple(
+            (f"gradient {name}", parameter.grad) for name, parameter in named
+        )
     )
     if non_finite:
         optimizer.zero_grad(set_to_none=True)
-        raise FloatingPointError(f"non-finite gradients: {non_finite}")
+        raise FloatingPointError(f"non-finite loss or gradients: {non_finite}")
     parameters = tuple(parameter for _, parameter in named)
     norm = torch.nn.utils.clip_grad_norm_(
         parameters,
         max_norm=gradient_clip_norm,
-        error_if_nonfinite=True,
+        error_if_nonfinite=False,
     )
-    gradient_norm = float(norm.detach())
-    if not math.isfinite(gradient_norm):
+    if not bool(torch.isfinite(norm.detach())):
         optimizer.zero_grad(set_to_none=True)
         raise FloatingPointError("gradient norm is non-finite")
     optimizer.step()
-    for name, parameter in named:
-        if not bool(torch.isfinite(parameter.detach()).all()):
-            raise FloatingPointError(f"optimizer produced non-finite parameter: {name}")
-    return gradient_norm
+    non_finite_parameters = _non_finite_names(
+        tuple((name, parameter) for name, parameter in named)
+    )
+    if non_finite_parameters:
+        raise FloatingPointError(
+            "optimizer produced non-finite parameters: "
+            f"{non_finite_parameters}"
+        )
+    return norm.detach()
