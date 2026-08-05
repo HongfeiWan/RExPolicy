@@ -3422,6 +3422,46 @@ class GrootNewtonEnv:
         """Return zero-copy CUDA Torch views for a Diffusion Policy encoder."""
         return self._to_torch_tree(self.policy_observation_warp())
 
+    def stage0_state_components_torch(self) -> dict[str, Any]:
+        """Return raw GPU state components for the independent Stage 0 path.
+
+        This is deliberately a component-level interface rather than another
+        legacy observation mode.  Pose and twist fields below are expressed in
+        the replicated world frame; :class:`Stage0StateOnlyEnv` owns the single
+        canonical conversion into the right-arm base frame.  Existing v1/v2
+        observations and rewards are therefore unchanged.
+        """
+        bodies_per_world = self.model.body_count // self.num_envs
+        if bodies_per_world * self.num_envs != self.model.body_count:
+            raise RuntimeError("Stage 0 state export requires equal body counts in every replicated world")
+
+        body_pose = wp.to_torch(self.state_0.body_q).reshape(self.num_envs, bodies_per_world, 7)
+        body_twist = wp.to_torch(self.state_0.body_qd).reshape(self.num_envs, bodies_per_world, 6)
+        has_hand_contact = (
+            self._reach_has_hand_contact
+            if self.task_mode == _TASK_MODE_REACH_GREEN_CAP
+            else self._has_hand_contact
+        )
+        return {
+            "agent_qpos": wp.to_torch(self._agent_qpos),
+            "agent_qvel": wp.to_torch(self._agent_qvel),
+            "eef_9d_base": wp.to_torch(self._eef_9d),
+            "object_pose_world": body_pose[:, self._bottle_body_local],
+            "object_twist_world": body_twist[:, self._bottle_body_local],
+            "base_pose_world": body_pose[:, self._right_world_body_local],
+            "base_twist_world": body_twist[:, self._right_world_body_local],
+            "goal_position_world": wp.to_torch(self._goal_pos),
+            "finger_contact_counts": wp.to_torch(self._finger_contacts),
+            "has_hand_contact": wp.to_torch(has_hand_contact),
+            "is_grasped": wp.to_torch(self._is_grasped),
+            "task_phase": wp.to_torch(self._task_phase),
+            "episode_step": wp.to_torch(self.episode_step),
+            "success": wp.to_torch(self._success),
+            "fail": wp.to_torch(self._fail),
+            "terminated": wp.to_torch(self.terminated),
+            "truncated": wp.to_torch(self.truncated),
+        }
+
     @staticmethod
     def _to_torch_tree(value: Any) -> Any:
         if isinstance(value, wp.array):
