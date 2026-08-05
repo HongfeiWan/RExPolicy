@@ -36,7 +36,7 @@ from rexpolicy.stage0.types import Stage0Outcome, canonical_fingerprint
 
 
 _CORPUS_MODE_SCHEMA_ID = "rexpolicy/stage0-reach-mode-corpus/v1"
-_RUN_CONTRACT_SCHEMA_ID = "rexpolicy/stage0-long-run-contract/v1"
+_RUN_CONTRACT_SCHEMA_ID = "rexpolicy/stage0-long-run-contract/v2"
 _RANK_STATE_SCHEMA_ID = "rexpolicy/stage0-long-run-rank-state/v1"
 _MODE_DIAGNOSTIC_PROTOCOL = {
     "classification_nmi_minimum": 0.65,
@@ -86,19 +86,25 @@ _TEMPORAL_CONTROL_PROTOCOL = {
     "start_bin_width": "action_horizon/v1",
 }
 _CHECKPOINT_SELECTION_PROTOCOL = {
+    "admission": [
+        "hard_safety_gate_passed",
+        "success_gate_passed",
+        "path_adherence_gate_passed",
+    ],
     "candidate_filter": (
         "encoder-and-selector-complete/conditional-positive/no-z-zero/v1"
     ),
     "conditions": ["no-z", "oracle-z", "selector-z", "permuted-z"],
     "hard_safety": "zero-contact-and-object-displacement-within-rollout-limit/v1",
     "maximum_validation_windows": 32,
+    "minimum_locked_test_budget_seconds": 1800.0,
     "ranking": [
-        "hard_safety_passed_desc",
+        "eligible_desc",
         "minimum_oracle_selector_success_rate_desc",
         "minimum_conditional_path_macro_f1_desc",
         "conditional_step_asc",
     ],
-    "schema_id": "rexpolicy/stage0-validation-checkpoint-selection/v1",
+    "schema_id": "rexpolicy/stage0-validation-checkpoint-selection/v2",
     "seed_namespace": "validation_checkpoint_selection_rollout",
     "selected_component": "conditional_policy_only_from_checkpoint/v1",
     "test_policy": "locked-test-only-after-selection-commit/v1",
@@ -118,6 +124,12 @@ _MANIFOLD_TRAINER_CONFIG = {
     "variance_weight": 1.0,
 }
 _STOP_REASON: str | None = None
+
+
+class _Stage0PostTrainingPause(RuntimeError):
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
 
 
 @dataclass(frozen=True)
@@ -192,6 +204,13 @@ def _install_stop_handlers() -> None:
 
 
 def _run_contract(config: Stage0LongRunConfig) -> dict[str, Any]:
+    from rexpolicy.stage0.implementation_fingerprint import (
+        capture_stage0_implementation_fingerprint,
+    )
+
+    implementation = capture_stage0_implementation_fingerprint(
+        Path(__file__).resolve().parents[1]
+    )
     scientific_protocol = {
         "checkpoint_selection": _CHECKPOINT_SELECTION_PROTOCOL,
         "mode_diagnostic": _MODE_DIAGNOSTIC_PROTOCOL,
@@ -203,9 +222,23 @@ def _run_contract(config: Stage0LongRunConfig) -> dict[str, Any]:
     return {
         "config": config.to_record(),
         "config_sha256": config.fingerprint,
+        "implementation": implementation.to_record(),
+        "implementation_sha256": implementation.sha256,
         "schema_id": _RUN_CONTRACT_SCHEMA_ID,
         "scientific_protocol_sha256": canonical_fingerprint(scientific_protocol),
     }
+
+
+def _assert_implementation_unchanged(expected_sha256: str) -> None:
+    from rexpolicy.stage0.implementation_fingerprint import (
+        capture_stage0_implementation_fingerprint,
+    )
+
+    actual = capture_stage0_implementation_fingerprint(
+        Path(__file__).resolve().parents[1]
+    )
+    if actual.sha256 != expected_sha256:
+        raise RuntimeError("Stage 0 implementation changed during the scientific run")
 
 
 def _prepare_output(
@@ -256,6 +289,121 @@ def _write_once_json(path: Path, value: Mapping[str, Any]) -> None:
         # A partial claim is deliberately retained so a retry cannot silently
         # consume the locked test for a second time.
         raise
+    directory_descriptor = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory_descriptor)
+    finally:
+        os.close(directory_descriptor)
+
+
+def _verify_embedded_sha256(
+    record: Mapping[str, Any],
+    *,
+    field: str,
+    label: str,
+) -> str:
+    if not isinstance(record, Mapping):
+        raise RuntimeError(f"{label} must be a JSON object")
+    value = dict(record)
+    digest = value.pop(field, None)
+    if (
+        not isinstance(digest, str)
+        or len(digest) != 64
+        or any(character not in "0123456789abcdef" for character in digest)
+        or canonical_fingerprint(value) != digest
+    ):
+        raise RuntimeError(f"{label} embedded SHA-256 is invalid")
+    return digest
+
+
+def _safe_output_path(output_dir: Path, relative: str) -> Path:
+    if not isinstance(relative, str) or not relative:
+        raise RuntimeError("artifact path must be non-empty text")
+    candidate = (output_dir / relative).resolve()
+    if not candidate.is_relative_to(output_dir.resolve()):
+        raise RuntimeError("artifact path escapes the run output directory")
+    return candidate
+
+
+def _completed_report_for_resume(
+    output_dir: Path,
+    config: Stage0LongRunConfig,
+) -> dict[str, Any] | None:
+    from rexpolicy.stage0.checkpoint import file_sha256
+
+    report_path = output_dir / "long-run-report.json"
+    if not report_path.is_file():
+        return None
+    try:
+        report = json.loads(report_path.read_text(encoding="ascii"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise RuntimeError("cannot parse existing long-run report") from error
+    if report.get("status") != "complete":
+        return None
+    if (
+        report.get("schema_id") != "rexpolicy/stage0-long-run-report/v3"
+        or report.get("config_sha256") != config.fingerprint
+    ):
+        raise RuntimeError("completed long-run report contract changed")
+    run_contract = json.loads(
+        (output_dir / "run-contract.json").read_text(encoding="ascii")
+    )
+    if report.get("implementation_sha256") != run_contract.get(
+        "implementation_sha256"
+    ) or report.get("implementation") != run_contract.get("implementation"):
+        raise RuntimeError("completed report implementation provenance changed")
+    _verify_embedded_sha256(
+        report,
+        field="report_sha256",
+        label="completed long-run report",
+    )
+    selection = report.get("checkpoint_selection")
+    if not isinstance(selection, Mapping):
+        raise RuntimeError("completed report is missing checkpoint selection")
+    selection_sha256 = _verify_embedded_sha256(
+        selection,
+        field="selection_sha256",
+        label="checkpoint selection",
+    )
+    selection_file_sha256 = report.get("checkpoint_selection_file_sha256")
+    if file_sha256(output_dir / "checkpoint-selection.json") != selection_file_sha256:
+        raise RuntimeError("checkpoint selection sidecar hash mismatch")
+    if report.get("locked_test_status") == "evaluated_once":
+        claim = report.get("locked_test_claim")
+        if not isinstance(claim, Mapping):
+            raise RuntimeError("completed locked test is missing its claim")
+        claim_sha256 = _verify_embedded_sha256(
+            claim,
+            field="claim_sha256",
+            label="locked-test claim",
+        )
+        if claim.get("checkpoint_selection_sha256") != selection_sha256:
+            raise RuntimeError("locked-test claim selected a different checkpoint")
+        artifacts = report.get("locked_test_artifacts")
+        if not isinstance(artifacts, Mapping) or not artifacts:
+            raise RuntimeError("completed locked test is missing artifact hashes")
+        for relative, expected_sha256 in artifacts.items():
+            path = _safe_output_path(output_dir, relative)
+            if file_sha256(path) != expected_sha256:
+                raise RuntimeError(f"locked-test artifact hash mismatch: {relative}")
+        for record_name in (
+            "final_test_evaluation",
+            "final_test_temporal_control",
+            "final_newton_rollouts",
+        ):
+            value = report.get(record_name)
+            if (
+                not isinstance(value, Mapping)
+                or value.get("checkpoint_selection_sha256") != selection_sha256
+                or value.get("locked_test_claim_sha256") != claim_sha256
+            ):
+                raise RuntimeError(f"completed report has invalid {record_name}")
+    elif report.get("locked_test_status") == "not_consumed":
+        if report.get("locked_test_claim") is not None or selection.get("gate_passed"):
+            raise RuntimeError("unconsumed locked-test report has invalid state")
+    else:
+        raise RuntimeError("completed report has an unknown locked-test state")
+    return dict(report)
 
 
 def _environment_config(
@@ -2127,6 +2275,10 @@ def _validation_checkpoint_evidence(
         conservative_path_f1 = min(
             float(paths[name]["macro_f1"]) for name in conditional_names
         )
+        success_gate_passed = rollout_record["success_gate_passed"]
+        path_gate_passed = rollout_record["path_adherence_gate_passed"]
+        if type(success_gate_passed) is not bool or type(path_gate_passed) is not bool:
+            raise TypeError("validation rollout gates must be strict booleans")
     except (KeyError, TypeError, ValueError) as error:
         raise RuntimeError("validation rollout record is incomplete") from error
     return Stage0ValidationCheckpointCandidate(
@@ -2135,6 +2287,8 @@ def _validation_checkpoint_evidence(
         contact_violation=contact_violation,
         maximum_object_displacement_m=maximum_displacement,
         path_macro_f1=conservative_path_f1,
+        success_gate_passed=success_gate_passed,
+        path_gate_passed=path_gate_passed,
     )
 
 
@@ -2152,6 +2306,7 @@ def _select_conditional_checkpoint(
     device_name: str,
     normalization: Any,
     on_candidate: Any | None = None,
+    should_stop: Any | None = None,
 ) -> dict[str, Any]:
     from rexpolicy.stage0.checkpoint import file_sha256
     from rexpolicy.stage0.evaluation import select_stage0_validation_checkpoint
@@ -2172,6 +2327,9 @@ def _select_conditional_checkpoint(
     evidence = []
     evaluation_records: dict[int, dict[str, Any]] = {}
     for metadata in candidate_metadata:
+        stop_reason = should_stop() if should_stop is not None else None
+        if stop_reason is not None:
+            raise _Stage0PostTrainingPause(stop_reason)
         step = metadata["conditional_step"]
         checkpoint_path = metadata["checkpoint_path"]
         manager.load_model_component(
@@ -2207,6 +2365,7 @@ def _select_conditional_checkpoint(
             "conditional_model_sha256": metadata["conditional_model_sha256"],
             "evidence": candidate.to_record(),
             "evaluation": str(evaluation_path.relative_to(output_dir)),
+            "evaluation_sha256": file_sha256(evaluation_path),
             "manifest_sha256": metadata["manifest_sha256"],
             "rollout_gate_passed": rollout_record["gate_passed"],
             "sequence": metadata["sequence"],
@@ -2219,6 +2378,9 @@ def _select_conditional_checkpoint(
                     "evidence": candidate.to_record(),
                 }
             )
+        stop_reason = should_stop() if should_stop is not None else None
+        if stop_reason is not None:
+            raise _Stage0PostTrainingPause(stop_reason)
     selection = select_stage0_validation_checkpoint(
         tuple(evidence),
         maximum_object_displacement_m=_ROLLOUT_PROTOCOL[
@@ -2257,6 +2419,7 @@ def _select_conditional_checkpoint(
                 str(step): evaluation_records[step]
                 for step in sorted(evaluation_records)
             },
+            "checkpoint_hashes": hashes.to_record(),
             "component_composition": {
                 "conditional_policy": (
                     None
@@ -2274,6 +2437,7 @@ def _select_conditional_checkpoint(
                 **final_component_hashes,
             },
             "protocol": dict(_CHECKPOINT_SELECTION_PROTOCOL),
+            "config_sha256": config.fingerprint,
             "ranking_protocol": ranking_protocol,
             "selected_checkpoint": (
                 None
@@ -2283,11 +2447,85 @@ def _select_conditional_checkpoint(
             "training_final_checkpoint": str(
                 training_final_checkpoint.relative_to(output_dir)
             ),
+            "training_final_manifest_sha256": file_sha256(
+                training_final_checkpoint / "manifest.json"
+            ),
         }
     )
     core["selection_sha256"] = canonical_fingerprint(core)
-    atomic_write_json(output_dir / "checkpoint-selection.json", core)
+    _write_once_json(output_dir / "checkpoint-selection.json", core)
     return core
+
+
+def _load_checkpoint_selection(
+    output_dir: Path,
+    config: Stage0LongRunConfig,
+    hashes: Any,
+) -> dict[str, Any] | None:
+    from rexpolicy.stage0.checkpoint import file_sha256
+
+    path = output_dir / "checkpoint-selection.json"
+    if not path.is_file():
+        return None
+    try:
+        record = json.loads(path.read_text(encoding="ascii"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise RuntimeError("cannot parse checkpoint selection artifact") from error
+    _verify_embedded_sha256(
+        record,
+        field="selection_sha256",
+        label="checkpoint selection",
+    )
+    if (
+        record.get("config_sha256") != config.fingerprint
+        or record.get("checkpoint_hashes") != hashes.to_record()
+        or record.get("protocol") != _CHECKPOINT_SELECTION_PROTOCOL
+    ):
+        raise RuntimeError("checkpoint selection contract changed")
+    training_final = _safe_output_path(
+        output_dir,
+        record.get("training_final_checkpoint"),
+    )
+    if file_sha256(training_final / "manifest.json") != record.get(
+        "training_final_manifest_sha256"
+    ):
+        raise RuntimeError("training-final checkpoint manifest hash changed")
+    return dict(record)
+
+
+def _restore_checkpoint_selection_models(
+    manager: Any,
+    hashes: Any,
+    models: Mapping[str, Any],
+    output_dir: Path,
+    selection: Mapping[str, Any],
+) -> None:
+    from rexpolicy.stage0.checkpoint import file_sha256
+
+    composition = selection.get("component_composition")
+    model_hashes = selection.get("component_model_sha256")
+    if not isinstance(composition, Mapping) or not isinstance(model_hashes, Mapping):
+        raise RuntimeError("checkpoint selection component provenance is incomplete")
+    expected_names = {"conditional_policy", "future_encoder", "no_z_policy", "selector"}
+    if set(composition) != expected_names or set(model_hashes) != expected_names:
+        raise RuntimeError("checkpoint selection component inventory changed")
+    for name in sorted(expected_names):
+        relative = composition[name]
+        expected_sha256 = model_hashes[name]
+        if relative is None:
+            if name != "conditional_policy" or selection.get("gate_passed"):
+                raise RuntimeError("checkpoint selection omitted a required component")
+            continue
+        checkpoint_path = _safe_output_path(output_dir, relative)
+        model_path = checkpoint_path / "models" / f"{name}.pt"
+        if file_sha256(model_path) != expected_sha256:
+            raise RuntimeError(f"selected model hash mismatch: {name}")
+        manager.load_model_component(
+            hashes=hashes,
+            name=name,
+            model=models[name],
+            checkpoint=checkpoint_path,
+        )
 
 
 def _checkpoint_hashes(
@@ -2295,6 +2533,7 @@ def _checkpoint_hashes(
     window_splits: Any,
     normalization: Any,
     mode_manifest_sha256: str,
+    implementation_sha256: str,
 ):
     from rexpolicy.stage0.checkpoint import Stage0CheckpointHashes
     from rexpolicy.stage0.envs.state_schema import DEFAULT_STAGE0_STATE_SCHEMA
@@ -2305,6 +2544,7 @@ def _checkpoint_hashes(
             "normalization_sha256": normalization.sha256,
             "action_representation": "eef_delta_xyz/v1",
             "future_state_representation": "normalized_delta_from_current/v1",
+            "implementation_sha256": implementation_sha256,
             "manifold_sampling": "paired-mode-cross-reset-octets/v1",
             "mode_invariant_alignment": "raw-latent-squared-distance/v1",
             "manifold_trainer_config": dict(_MANIFOLD_TRAINER_CONFIG),
@@ -2461,9 +2701,28 @@ def _run_training(
     resume_checkpoint: str | None,
     max_wall_seconds: float,
 ) -> dict[str, Any]:
+    if resume_checkpoint is not None:
+        completed_report = _completed_report_for_resume(output_dir, config)
+        if completed_report is not None:
+            return completed_report
+        claim_path = output_dir / "locked-test-claim.json"
+        if claim_path.exists():
+            atomic_write_json(
+                output_dir / "locked-test-aborted.json",
+                {
+                    "config_sha256": config.fingerprint,
+                    "reason": "locked test was claimed but no complete report exists",
+                    "schema_id": "rexpolicy/stage0-locked-test-aborted/v1",
+                    "utc_unix_seconds": time.time(),
+                },
+            )
+            raise RuntimeError(
+                "locked test was already consumed by an incomplete attempt; "
+                "refusing to rerun or overwrite checkpoint selection"
+            )
     import torch
 
-    from rexpolicy.stage0.checkpoint import Stage0CheckpointManager
+    from rexpolicy.stage0.checkpoint import Stage0CheckpointManager, file_sha256
     from rexpolicy.stage0.data import (
         Stage0SplitPolicy,
         Stage0WindowPolicy,
@@ -2511,11 +2770,18 @@ def _run_training(
         device=device,
         action_feature_mask=normalization.effective_action_mask,
     )
+    run_contract = json.loads(
+        (output_dir / "run-contract.json").read_text(encoding="ascii")
+    )
+    implementation_sha256 = run_contract.get("implementation_sha256")
+    if not isinstance(implementation_sha256, str) or len(implementation_sha256) != 64:
+        raise RuntimeError("run contract is missing implementation provenance")
     hashes = _checkpoint_hashes(
         config,
         window_splits,
         normalization,
         verification["mode_manifest_sha256"],
+        implementation_sha256,
     )
     manager = Stage0CheckpointManager(output_dir)
     cursor = LongRunCursor()
@@ -2731,50 +2997,112 @@ def _run_training(
 
     checkpoint_selection: dict[str, Any] | None = None
     locked_test_claim: dict[str, Any] | None = None
+    locked_test_artifacts: dict[str, str] = {}
     final_test_eval: dict[str, Any] | None = None
     final_temporal_eval: dict[str, Any] | None = None
     final_rollout_eval: dict[str, Any] | None = None
+
+    def post_training_stop_reason() -> str | None:
+        if _STOP_REASON is not None:
+            return _STOP_REASON
+        if budget.expired:
+            return "max_wall_seconds"
+        return None
+
     if status == "complete":
         if checkpoint is None:
             raise RuntimeError("complete training must have a final checkpoint")
-        checkpoint_selection = _select_conditional_checkpoint(
-            config,
-            manager,
-            hashes,
-            models,
-            window_splits.validation,
-            trajectories,
-            trajectory_modes,
-            training_final_checkpoint=checkpoint,
-            output_dir=output_dir,
-            device_name=device_name,
-            normalization=normalization,
-            on_candidate=lambda detail: emit(
-                "validation_checkpoint_candidate",
-                detail=detail,
-            ),
-        )
-        emit(
-            "validation_checkpoint_selection",
-            detail={
-                "candidate_count": len(checkpoint_selection["candidate_evaluations"]),
-                "gate_passed": checkpoint_selection["gate_passed"],
-                "selected_checkpoint": checkpoint_selection["selected_checkpoint"],
-                "selected_conditional_step": checkpoint_selection[
-                    "selected_conditional_step"
-                ],
-            },
-        )
-    if checkpoint_selection is not None and checkpoint_selection["gate_passed"]:
+        _assert_implementation_unchanged(implementation_sha256)
+        checkpoint_selection = _load_checkpoint_selection(output_dir, config, hashes)
+        try:
+            if checkpoint_selection is None:
+                checkpoint_selection = _select_conditional_checkpoint(
+                    config,
+                    manager,
+                    hashes,
+                    models,
+                    window_splits.validation,
+                    trajectories,
+                    trajectory_modes,
+                    training_final_checkpoint=checkpoint,
+                    output_dir=output_dir,
+                    device_name=device_name,
+                    normalization=normalization,
+                    on_candidate=lambda detail: emit(
+                        "validation_checkpoint_candidate",
+                        detail=detail,
+                    ),
+                    should_stop=post_training_stop_reason,
+                )
+            else:
+                _restore_checkpoint_selection_models(
+                    manager,
+                    hashes,
+                    models,
+                    output_dir,
+                    checkpoint_selection,
+                )
+                emit(
+                    "validation_checkpoint_selection_reused",
+                    detail={
+                        "selection_sha256": checkpoint_selection["selection_sha256"]
+                    },
+                )
+        except _Stage0PostTrainingPause as pause:
+            status = "paused"
+            stop_reason = f"post_training_{pause.reason}"
+            checkpoint_selection = None
+            emit("post_training_paused", detail={"stop_reason": stop_reason})
+        if checkpoint_selection is not None:
+            emit(
+                "validation_checkpoint_selection",
+                detail={
+                    "candidate_count": len(
+                        checkpoint_selection["candidate_evaluations"]
+                    ),
+                    "gate_passed": checkpoint_selection["gate_passed"],
+                    "selected_checkpoint": checkpoint_selection["selected_checkpoint"],
+                    "selected_conditional_step": checkpoint_selection[
+                        "selected_conditional_step"
+                    ],
+                },
+            )
+    if (
+        status == "complete"
+        and checkpoint_selection is not None
+        and checkpoint_selection["gate_passed"]
+    ):
+        pause_reason = post_training_stop_reason()
+        if (
+            pause_reason is None
+            and budget.remaining_seconds
+            < _CHECKPOINT_SELECTION_PROTOCOL["minimum_locked_test_budget_seconds"]
+        ):
+            pause_reason = "insufficient_locked_test_budget"
+        if pause_reason is not None:
+            status = "paused"
+            stop_reason = f"post_training_{pause_reason}"
+            emit("post_training_paused", detail={"stop_reason": stop_reason})
+    if (
+        status == "complete"
+        and checkpoint_selection is not None
+        and checkpoint_selection["gate_passed"]
+    ):
+        _assert_implementation_unchanged(implementation_sha256)
         locked_test_claim = {
             "checkpoint_selection_sha256": checkpoint_selection["selection_sha256"],
             "config_sha256": config.fingerprint,
+            "implementation_sha256": implementation_sha256,
             "purpose": "single locked Stage 0 test evaluation attempt",
             "schema_id": "rexpolicy/stage0-locked-test-claim/v1",
             "utc_unix_seconds": time.time(),
         }
         locked_test_claim["claim_sha256"] = canonical_fingerprint(locked_test_claim)
-        _write_once_json(output_dir / "locked-test-claim.json", locked_test_claim)
+        locked_test_claim_path = output_dir / "locked-test-claim.json"
+        _write_once_json(locked_test_claim_path, locked_test_claim)
+        locked_test_artifacts[str(locked_test_claim_path.relative_to(output_dir))] = (
+            file_sha256(locked_test_claim_path)
+        )
         _select_complete_mode_groups(
             window_splits.test,
             trajectory_modes,
@@ -2794,9 +3122,13 @@ def _run_training(
         final_test_eval["checkpoint_selection_sha256"] = checkpoint_selection[
             "selection_sha256"
         ]
-        atomic_write_json(
-            output_dir / "evaluations" / f"test-final-{cursor.global_step:012d}.json",
-            final_test_eval,
+        final_test_eval["locked_test_claim_sha256"] = locked_test_claim["claim_sha256"]
+        final_test_path = (
+            output_dir / "evaluations" / f"test-final-{cursor.global_step:012d}.json"
+        )
+        atomic_write_json(final_test_path, final_test_eval)
+        locked_test_artifacts[str(final_test_path.relative_to(output_dir))] = (
+            file_sha256(final_test_path)
         )
         emit(
             "final_test_evaluation",
@@ -2812,11 +3144,17 @@ def _run_training(
             normalization=normalization,
             checkpoint_selection_sha256=checkpoint_selection["selection_sha256"],
         )
-        atomic_write_json(
+        final_temporal_eval["locked_test_claim_sha256"] = locked_test_claim[
+            "claim_sha256"
+        ]
+        final_temporal_path = (
             output_dir
             / "evaluations"
-            / f"test-temporal-control-final-{cursor.global_step:012d}.json",
-            final_temporal_eval,
+            / f"test-temporal-control-final-{cursor.global_step:012d}.json"
+        )
+        atomic_write_json(final_temporal_path, final_temporal_eval)
+        locked_test_artifacts[str(final_temporal_path.relative_to(output_dir))] = (
+            file_sha256(final_temporal_path)
         )
         emit(
             "final_test_temporal_control",
@@ -2846,9 +3184,13 @@ def _run_training(
         final_rollout_eval["checkpoint_selection_sha256"] = checkpoint_selection[
             "selection_sha256"
         ]
-        atomic_write_json(
-            output_dir / "final-newton-rollouts.json",
-            final_rollout_eval,
+        final_rollout_eval["locked_test_claim_sha256"] = locked_test_claim[
+            "claim_sha256"
+        ]
+        final_rollout_path = output_dir / "final-newton-rollouts.json"
+        atomic_write_json(final_rollout_path, final_rollout_eval)
+        locked_test_artifacts[str(final_rollout_path.relative_to(output_dir))] = (
+            file_sha256(final_rollout_path)
         )
         emit(
             "final_newton_rollouts",
@@ -2881,7 +3223,7 @@ def _run_training(
         checkpoint_selection is not None and checkpoint_selection["gate_passed"]
     )
     report = {
-        "schema_id": "rexpolicy/stage0-long-run-report/v2",
+        "schema_id": "rexpolicy/stage0-long-run-report/v3",
         "checkpoint": str(checkpoint),
         "training_final_checkpoint": str(checkpoint),
         "selected_conditional_checkpoint": (
@@ -2890,12 +3232,20 @@ def _run_training(
             else checkpoint_selection["selected_checkpoint"]
         ),
         "checkpoint_selection": checkpoint_selection,
+        "checkpoint_selection_file_sha256": (
+            None
+            if checkpoint_selection is None
+            else file_sha256(output_dir / "checkpoint-selection.json")
+        ),
         "validation_checkpoint_selection_gate_passed": selection_gate,
         "locked_test_claim": locked_test_claim,
+        "locked_test_artifacts": locked_test_artifacts,
         "locked_test_status": (
             "evaluated_once" if final_rollout_eval is not None else "not_consumed"
         ),
         "config_sha256": config.fingerprint,
+        "implementation": run_contract["implementation"],
+        "implementation_sha256": implementation_sha256,
         "cursor": cursor.to_steps(),
         "elapsed_seconds": budget.elapsed_seconds,
         "latest_evaluation": latest_eval,
@@ -2932,11 +3282,12 @@ def _run_training(
         "stop_reason": stop_reason,
         "verification": dict(verification),
         "window_counts": {
-            "test": len(window_splits.test) if selection_gate else None,
+            "test": len(window_splits.test) if final_test_eval is not None else None,
             "train": len(window_splits.train),
             "validation": len(window_splits.validation),
         },
     }
+    report["report_sha256"] = canonical_fingerprint(report)
     atomic_write_json(output_dir / "long-run-report.json", report)
     return report
 
