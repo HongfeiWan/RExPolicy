@@ -107,8 +107,13 @@ class TestSuccessManifoldRuntime(unittest.TestCase):
                 policy=self._policy(),
                 conditions=self._conditions(),
                 memory_candidates=1,
+                selector_temperature=4.0,
             )
             self.assertEqual(recalled.sources, ("latent_memory", "selector"))
+            self.torch.testing.assert_close(
+                recalled.latents[0],
+                generated.latents[0],
+            )
 
             restored = SuccessManifoldRuntime.load(
                 path,
@@ -117,6 +122,53 @@ class TestSuccessManifoldRuntime(unittest.TestCase):
             )
             restored.load_state_dict(runtime.state_dict())
             self.assertEqual(restored.memory.state_dict(), runtime.memory.state_dict())
+
+    def test_selector_temperature_is_threaded_without_changing_t1(self) -> None:
+        from rexpolicy.manifold.runtime import (
+            SuccessManifoldRuntime,
+            save_success_manifold_bundle,
+        )
+
+        config, encoder, selector = self._components()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "manifold.pt"
+            digest = save_success_manifold_bundle(
+                path,
+                config=config,
+                encoder=encoder,
+                selector=selector,
+            )
+            runtime = SuccessManifoldRuntime.load(
+                path,
+                expected_sha256=digest,
+                device="cpu",
+            )
+            conditions = self._conditions()
+            states = self.torch.stack([item.state for item in conditions]).flatten(1)
+            with self.torch.inference_mode():
+                mean = runtime.selector.predict(states).cpu()
+            baseline = runtime.condition(
+                policy=self._policy(),
+                conditions=conditions,
+                selector_temperature=1.0,
+                generator=self.torch.Generator().manual_seed(41),
+            )
+            hot = runtime.condition(
+                policy=self._policy(),
+                conditions=conditions,
+                selector_temperature=4.0,
+                generator=self.torch.Generator().manual_seed(41),
+            )
+            self.torch.testing.assert_close(
+                hot.latents - mean,
+                2.0 * (baseline.latents - mean),
+            )
+            with self.assertRaisesRegex(ValueError, "temperature"):
+                runtime.condition(
+                    policy=self._policy(),
+                    conditions=conditions,
+                    selector_temperature=0.0,
+                )
 
     def test_bundle_checksum_and_condition_width_fail_closed(self) -> None:
         from rexpolicy.manifold.runtime import (

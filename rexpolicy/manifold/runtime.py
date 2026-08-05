@@ -170,6 +170,7 @@ class SuccessManifoldRuntime:
         conditions: Sequence[CachedCondition],
         memory_candidates: int = 0,
         deterministic_selector: bool = False,
+        selector_temperature: float = 1.0,
         generator: Any | None = None,
     ) -> ConditionedLatentBatch:
         """Sample reachable modes, optionally reserving bounded memory slots."""
@@ -190,6 +191,7 @@ class SuccessManifoldRuntime:
             latents = self.selector.sample(
                 states,
                 deterministic=deterministic_selector,
+                temperature=selector_temperature,
                 generator=generator,
             )
             sources = ["selector"] * len(conditions)
