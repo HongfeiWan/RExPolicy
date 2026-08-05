@@ -1,0 +1,23 @@
+{
+  "action_dim": 19,
+  "action_horizon": 4,
+  "attention_heads": 4,
+  "dropout": 0.0,
+  "enabled": true,
+  "feedforward_dim": 128,
+  "future_horizon": 8,
+  "latent_dim": 16,
+  "max_episode_steps": 8,
+  "model_dim": 64,
+  "num_envs": 64,
+  "render_images": false,
+  "schema_version": 1,
+  "seed": 20260805,
+  "state_dim": 79,
+  "state_schema_id": "stage0/newton-state/v1",
+  "system_path": "stage0_state",
+  "task": "reach",
+  "transformer_layers": 2,
+  "use_groot": false,
+  "window_stride": 1
+}
