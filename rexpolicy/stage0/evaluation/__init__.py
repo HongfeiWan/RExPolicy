@@ -1,5 +1,11 @@
 """Quality diagnostics and fixed-budget controls for Stage 0."""
 
+from .checkpoint_selection import (
+    Stage0RankedValidationCheckpoint,
+    Stage0ValidationCheckpointCandidate,
+    Stage0ValidationCheckpointSelection,
+    select_stage0_validation_checkpoint,
+)
 from .evaluator import (
     ConditioningComparison,
     ConditioningModeSummary,
@@ -30,7 +36,6 @@ from .rollout import (
     rollout_reach_policy,
 )
 
-
 __all__ = [
     "CollapseGate",
     "ConditioningComparison",
@@ -38,18 +43,22 @@ __all__ = [
     "ConditioningModeSummary",
     "DeterministicPCA",
     "FixedEvaluationBudget",
-    "LatentStatistics",
     "LatentModeMetrics",
+    "LatentStatistics",
     "ModePathAdherence",
     "PathAdherenceMetrics",
     "PolicyEvaluationRun",
     "ReachRolloutBudget",
     "ReachRolloutResult",
     "RolloutConditioningMode",
-    "analyze_latents",
+    "Stage0RankedValidationCheckpoint",
+    "Stage0ValidationCheckpointCandidate",
+    "Stage0ValidationCheckpointSelection",
     "analyze_latent_modes",
+    "analyze_latents",
     "analyze_path_adherence",
     "compare_conditioning_runs",
     "deterministic_pca",
     "rollout_reach_policy",
+    "select_stage0_validation_checkpoint",
 ]
