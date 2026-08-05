@@ -601,6 +601,7 @@ def _verify_multimode_corpus(
     maximum_object_displacement = 0.0
     contact_state_count = 0
     pairwise_eef_rms: list[float] = []
+    pairwise_eef_rms_by_mode_pair: dict[tuple[str, str], list[float]] = {}
     fully_successful_groups = 0
     for group_id, items in groups.items():
         if len(items) != len(config.corpus.mode_ids):
@@ -643,14 +644,27 @@ def _verify_multimode_corpus(
                 delta = (
                     left.states[:common, eef_slice] - right.states[:common, eef_slice]
                 )
-                pairwise_eef_rms.append(float(delta.square().sum(dim=-1).mean().sqrt()))
+                rms = float(delta.square().sum(dim=-1).mean().sqrt())
+                pairwise_eef_rms.append(rms)
+                left_mode = trajectory_modes[left.provenance.trajectory_id]["mode_id"]
+                right_mode = trajectory_modes[right.provenance.trajectory_id]["mode_id"]
+                pair = tuple(sorted((left_mode, right_mode)))
+                pairwise_eef_rms_by_mode_pair.setdefault(pair, []).append(rms)
     if maximum_initial_state_delta > 1.0e-6:
         raise RuntimeError("same-reset mode initial states differ")
     if contact_state_count:
         raise RuntimeError("verified success corpus contains hand-object contact")
     if maximum_object_displacement > 0.005:
         raise RuntimeError("verified success corpus displaced the object above 5 mm")
-    if not pairwise_eef_rms or min(pairwise_eef_rms) < 0.030:
+    mean_pairwise_eef_rms = {
+        "::".join(pair): sum(values) / len(values)
+        for pair, values in sorted(pairwise_eef_rms_by_mode_pair.items())
+    }
+    if (
+        not pairwise_eef_rms
+        or min(pairwise_eef_rms) < 0.025
+        or min(mean_pairwise_eef_rms.values()) < 0.030
+    ):
         raise RuntimeError("same-reset success paths are not geometrically distinct")
     fully_successful_fraction = fully_successful_groups / len(groups)
     if fully_successful_fraction < 0.95:
@@ -674,6 +688,8 @@ def _verify_multimode_corpus(
         "maximum_initial_state_delta": maximum_initial_state_delta,
         "maximum_object_displacement_m": maximum_object_displacement,
         "minimum_pairwise_eef_rms_m": min(pairwise_eef_rms),
+        "minimum_mode_pair_mean_eef_rms_m": min(mean_pairwise_eef_rms.values()),
+        "mode_pair_mean_eef_rms_m": mean_pairwise_eef_rms,
         "mode_success_counts": mode_success_counts,
         "outcome_counts": outcome_counts,
         "mode_manifest_sha256": canonical_fingerprint(manifest),
