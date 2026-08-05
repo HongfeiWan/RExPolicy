@@ -43,12 +43,12 @@
   "training": {
     "batch_size": 128,
     "checkpoint_every_steps": 500,
-    "conditional_policy_steps": 3000,
+    "conditional_policy_steps": 6000,
     "eval_every_steps": 500,
     "future_encoder_steps": 2000,
     "learning_rate": 0.0003,
     "log_every_steps": 50,
-    "no_z_policy_steps": 3000,
+    "no_z_policy_steps": 6000,
     "selector_steps": 1000,
     "weight_decay": 0.0001
   }
