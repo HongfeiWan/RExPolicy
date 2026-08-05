@@ -13,12 +13,14 @@ from .future_encoder import (
     FutureTrajectoryEncoding,
     masked_reconstruction_loss,
 )
+from .mixture_selector import DiagonalGaussianMixture, MixtureSuccessModeSelector
 from .selector import DiagonalGaussian, SuccessModeSelector
 
 
 __all__ = [
     "ConditionTokens",
     "DiagonalGaussian",
+    "DiagonalGaussianMixture",
     "FlowDiT",
     "FlowMatchingOutput",
     "FourierTimeEmbedding",
@@ -26,6 +28,7 @@ __all__ = [
     "FutureTrajectoryEncoder",
     "FutureTrajectoryEncoding",
     "LightweightFlowDiT",
+    "MixtureSuccessModeSelector",
     "StateLatentConditionEncoder",
     "SuccessModeSelector",
     "masked_reconstruction_loss",
