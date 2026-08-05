@@ -259,12 +259,20 @@ def fit_stage0_normalization(
     actions64 = actions.detach().to(device="cpu", dtype=torch.float64)
     effective = effective_action_mask.detach().to(device="cpu").contiguous()
     state_mean = states64.mean(dim=0)
-    state_std = states64.std(dim=0, unbiased=False).clamp_min(epsilon)
+    raw_state_std = states64.std(dim=0, unbiased=False)
+    state_std = torch.where(
+        raw_state_std < epsilon,
+        torch.ones_like(raw_state_std),
+        raw_state_std,
+    )
     action_mean = torch.zeros(actions.shape[1], dtype=torch.float64)
     action_std = torch.ones(actions.shape[1], dtype=torch.float64)
     action_mean[effective] = actions64[:, effective].mean(dim=0)
-    action_std[effective] = (
-        actions64[:, effective].std(dim=0, unbiased=False).clamp_min(epsilon)
+    raw_action_std = actions64[:, effective].std(dim=0, unbiased=False)
+    action_std[effective] = torch.where(
+        raw_action_std < epsilon,
+        torch.ones_like(raw_action_std),
+        raw_action_std,
     )
     return Stage0Normalization(
         state_mean=state_mean.to(torch.float32).contiguous(),

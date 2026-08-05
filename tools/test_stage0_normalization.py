@@ -40,6 +40,7 @@ class Stage0NormalizationTests(unittest.TestCase):
         normalized_states = self.normalization.normalize_states(self.states)
         self.assertLess(abs(float(normalized_states[:, 0].mean())), 1.0e-6)
         self.assertTrue(torch.equal(normalized_states[:, 1], torch.zeros(3)))
+        self.assertEqual(float(self.normalization.state_std[1]), 1.0)
 
     def test_padding_is_zero_after_normalization(self) -> None:
         states = self.states[:2].reshape(1, 2, 2)
