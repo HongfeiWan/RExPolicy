@@ -34,6 +34,9 @@ _NEURAL_EXPORTS = {
     ),
     "SelfSupervisedLosses": ("losses", "SelfSupervisedLosses"),
     "SelectorLosses": ("losses", "SelectorLosses"),
+    "SuccessorLosses": ("successor", "SuccessorLosses"),
+    "SuccessorModel": ("successor", "SuccessorModel"),
+    "SuccessorTrainingConfig": ("successor", "SuccessorTrainingConfig"),
     "ManifoldUpdateMetrics": ("trainer", "ManifoldUpdateMetrics"),
     "SuccessManifoldDdpTrainer": (
         "trainer",
@@ -48,6 +51,7 @@ _NEURAL_EXPORTS = {
     ),
     "success_manifold_losses": ("losses", "success_manifold_losses"),
     "success_selector_losses": ("losses", "success_selector_losses"),
+    "successor_losses": ("successor", "successor_losses"),
     "variance_covariance_diversity_loss": (
         "losses",
         "variance_covariance_diversity_loss",
@@ -86,10 +90,14 @@ __all__ = [
     "SuccessManifoldConfig",
     "SuccessManifoldDdpTrainer",
     "SuccessModeSelector",
+    "SuccessorLosses",
+    "SuccessorModel",
+    "SuccessorTrainingConfig",
     "all_gather_tensor",
     "masked_reconstruction_loss",
     "multi_positive_info_nce_loss",
     "success_manifold_losses",
     "success_selector_losses",
+    "successor_losses",
     "variance_covariance_diversity_loss",
 ]
