@@ -1,0 +1,55 @@
+{
+  "corpus": {
+    "minimum_success_modes_per_reset": 3,
+    "mode_ids": [
+      "stage0/reach/direct/v1",
+      "stage0/reach/left_arc/v1",
+      "stage0/reach/right_arc/v1",
+      "stage0/reach/over_arc/v1"
+    ],
+    "reset_groups": 64
+  },
+  "runtime": {
+    "cpu_threads": 16,
+    "eval_window_count": 32,
+    "flow_sample_steps": 2,
+    "max_wall_seconds": 1800.0,
+    "seed": 20260806
+  },
+  "schema_version": 1,
+  "stage0": {
+    "action_dim": 19,
+    "action_horizon": 4,
+    "attention_heads": 4,
+    "dropout": 0.0,
+    "enabled": true,
+    "feedforward_dim": 128,
+    "future_horizon": 16,
+    "latent_dim": 16,
+    "max_episode_steps": 32,
+    "model_dim": 64,
+    "num_envs": 64,
+    "render_images": false,
+    "schema_version": 1,
+    "seed": 20260806,
+    "state_dim": 79,
+    "state_schema_id": "stage0/newton-state/v1",
+    "system_path": "stage0_state",
+    "task": "reach",
+    "transformer_layers": 2,
+    "use_groot": false,
+    "window_stride": 1
+  },
+  "training": {
+    "batch_size": 16,
+    "checkpoint_every_steps": 2,
+    "conditional_policy_steps": 2,
+    "eval_every_steps": 2,
+    "future_encoder_steps": 2,
+    "learning_rate": 0.0003,
+    "log_every_steps": 1,
+    "no_z_policy_steps": 2,
+    "selector_steps": 2,
+    "weight_decay": 0.0001
+  }
+}
