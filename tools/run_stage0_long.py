@@ -80,7 +80,8 @@ _TEMPORAL_CONTROL_PROTOCOL = {
     "noise_pairing": "identical-initial-noise-conditional-vs-no-z/v1",
     "sample_batch_size": "training_batch_size/v1",
     "schema_id": "rexpolicy/stage0-temporal-control-gate/v1",
-    "seed_namespace": "final_temporal_control/initial_noise/v1",
+    "seed_phase": "final_temporal_control",
+    "seed_stream": "initial_noise",
     "split": "all-locked-test-windows/v1",
     "start_bin_width": "action_horizon/v1",
 }
@@ -98,7 +99,7 @@ _CHECKPOINT_SELECTION_PROTOCOL = {
         "conditional_step_asc",
     ],
     "schema_id": "rexpolicy/stage0-validation-checkpoint-selection/v1",
-    "seed_namespace": "validation_checkpoint_selection_rollout/v1",
+    "seed_namespace": "validation_checkpoint_selection_rollout",
     "selected_component": "conditional_policy_only_from_checkpoint/v1",
     "test_policy": "locked-test-only-after-selection-commit/v1",
 }
@@ -1668,6 +1669,7 @@ def _evaluate_temporal_control(
     device: Any,
     global_step: int,
     normalization: Any,
+    checkpoint_selection_sha256: str,
 ) -> dict[str, Any]:
     import torch
 
@@ -1675,6 +1677,16 @@ def _evaluate_temporal_control(
         evaluate_fixed_start_latent_first_action_mse,
     )
     from rexpolicy.stage0.trainers import collate_success_windows
+
+    if (
+        not isinstance(checkpoint_selection_sha256, str)
+        or len(checkpoint_selection_sha256) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in checkpoint_selection_sha256
+        )
+    ):
+        raise ValueError("checkpoint_selection_sha256 must be a SHA-256 digest")
 
     ordered = tuple(
         sorted(windows, key=lambda window: (window.trajectory_id, window.start))
@@ -1714,8 +1726,8 @@ def _evaluate_temporal_control(
     batch = _normalize_batch(collate_success_windows(ordered), normalization)
     noise_seed = _step_seed(
         config.runtime.seed,
-        "final_temporal_control",
-        "initial_noise",
+        _TEMPORAL_CONTROL_PROTOCOL["seed_phase"],
+        _TEMPORAL_CONTROL_PROTOCOL["seed_stream"],
         global_step,
     )
     initial_noise = torch.randn(
@@ -1747,15 +1759,18 @@ def _evaluate_temporal_control(
         no_z.nonzero_start.first_action_mse,
     )
     contract = {
+        "checkpoint_selection_sha256": checkpoint_selection_sha256,
         "corpus_sha256": batch.corpus_sha256,
         "global_step": global_step,
         "noise_seed": noise_seed,
+        "normalization_sha256": normalization.sha256,
         "protocol": _TEMPORAL_CONTROL_PROTOCOL,
         "window_keys": [[window.trajectory_id, window.start] for window in ordered],
         "window_policy_sha256": batch.window_policy_sha256,
     }
     return {
         "comparison": comparison,
+        "checkpoint_selection_sha256": checkpoint_selection_sha256,
         "conditional_policy": conditional.to_record(),
         "evaluation_contract_sha256": canonical_fingerprint(contract),
         "gate_passed": comparison["gate_passed"],
@@ -1763,7 +1778,7 @@ def _evaluate_temporal_control(
         "no_z_policy": no_z.to_record(),
         "noise_seed": noise_seed,
         "protocol": dict(_TEMPORAL_CONTROL_PROTOCOL),
-        "schema_id": "rexpolicy/stage0-final-temporal-control/v1",
+        "schema_id": "rexpolicy/stage0-final-temporal-control/v2",
         "shared_initial_noise": True,
         "split": "test",
         "trajectory_count": len(trajectory_ids),
@@ -2138,8 +2153,21 @@ def _select_conditional_checkpoint(
     normalization: Any,
     on_candidate: Any | None = None,
 ) -> dict[str, Any]:
+    from rexpolicy.stage0.checkpoint import file_sha256
     from rexpolicy.stage0.evaluation import select_stage0_validation_checkpoint
 
+    final_component_names = ("future_encoder", "no_z_policy", "selector")
+    final_component_hashes: dict[str, str] = {}
+    for name in final_component_names:
+        manager.load_model_component(
+            hashes=hashes,
+            name=name,
+            model=models[name],
+            checkpoint=training_final_checkpoint,
+        )
+        final_component_hashes[name] = file_sha256(
+            training_final_checkpoint / "models" / f"{name}.pt"
+        )
     candidate_metadata = _conditional_checkpoint_candidates(config, manager, hashes)
     evidence = []
     evaluation_records: dict[int, dict[str, Any]] = {}
@@ -2161,7 +2189,7 @@ def _select_conditional_checkpoint(
             device_name=device_name,
             normalization=normalization,
             split_name="validation",
-            seed_namespace="validation_checkpoint_selection_rollout",
+            seed_namespace=_CHECKPOINT_SELECTION_PROTOCOL["seed_namespace"],
             maximum_windows=_CHECKPOINT_SELECTION_PROTOCOL[
                 "maximum_validation_windows"
             ],
@@ -2206,12 +2234,15 @@ def _select_conditional_checkpoint(
             checkpoint=training_final_checkpoint,
         )
         selected_checkpoint = None
+        selected_conditional_hash = None
     else:
-        selected_checkpoint = next(
-            metadata["checkpoint_path"]
+        selected_metadata = next(
+            metadata
             for metadata in candidate_metadata
             if metadata["conditional_step"] == selected_step
         )
+        selected_checkpoint = selected_metadata["checkpoint_path"]
+        selected_conditional_hash = selected_metadata["conditional_model_sha256"]
         manager.load_model_component(
             hashes=hashes,
             name="conditional_policy",
@@ -2237,6 +2268,10 @@ def _select_conditional_checkpoint(
                 ),
                 "no_z_policy": str(training_final_checkpoint.relative_to(output_dir)),
                 "selector": str(training_final_checkpoint.relative_to(output_dir)),
+            },
+            "component_model_sha256": {
+                "conditional_policy": selected_conditional_hash,
+                **final_component_hashes,
             },
             "protocol": dict(_CHECKPOINT_SELECTION_PROTOCOL),
             "ranking_protocol": ranking_protocol,
@@ -2775,10 +2810,8 @@ def _run_training(
             device=device,
             global_step=cursor.global_step,
             normalization=normalization,
+            checkpoint_selection_sha256=checkpoint_selection["selection_sha256"],
         )
-        final_temporal_eval["checkpoint_selection_sha256"] = checkpoint_selection[
-            "selection_sha256"
-        ]
         atomic_write_json(
             output_dir
             / "evaluations"
