@@ -133,8 +133,28 @@ class Stage0LongRunConfigTest(unittest.TestCase):
                 )
                 payload = json.loads(result.stdout)
                 self.assertEqual(len(payload["config_sha256"]), 64)
-        self.assertNotIn("torch", sys.modules)
-        self.assertNotIn("newton", sys.modules)
+        audit = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import json, runpy, sys; "
+                    "sys.argv=['tools/run_stage0_long.py', "
+                    "'--validate-config-only', '--config', "
+                    "'configs/stage0/reach_tiny.json']; "
+                    "runpy.run_path(sys.argv[0], run_name='__main__'); "
+                    "print(json.dumps({'torch': 'torch' in sys.modules, "
+                    "'newton': 'newton' in sys.modules}))"
+                ),
+            ],
+            cwd=repository,
+            env=env,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        imported = json.loads(audit.stdout.splitlines()[-1])
+        self.assertEqual(imported, {"newton": False, "torch": False})
 
 
 class Stage0LongRunCursorTest(unittest.TestCase):
