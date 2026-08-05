@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Sequence
 
 import torch
 from torch import nn
@@ -38,6 +38,7 @@ class Stage0ManifoldTrainerConfig:
     variance_epsilon: float = 1.0e-4
     gradient_clip_norm: float = 1.0
     gather_distributed: bool = False
+    mode_alignment_weight: float = 1.0
 
     def __post_init__(self) -> None:
         if (
@@ -49,6 +50,7 @@ class Stage0ManifoldTrainerConfig:
         for name in (
             "reconstruction_weight",
             "contrastive_weight",
+            "mode_alignment_weight",
             "variance_weight",
             "covariance_weight",
         ):
@@ -85,6 +87,7 @@ class ManifoldStepMetrics:
     covariance: float
     gradient_norm: float
     optimizer_step: int
+    mode_alignment: float = 0.0
 
 
 class Stage0ManifoldTrainer:
@@ -113,6 +116,7 @@ class Stage0ManifoldTrainer:
         self,
         batch: Stage0WindowBatch,
         *,
+        mode_ids: Sequence[Any] | None = None,
         generator: torch.Generator | None = None,
     ) -> ManifoldStepMetrics:
         if not isinstance(batch, Stage0WindowBatch):
@@ -143,8 +147,10 @@ class Stage0ManifoldTrainer:
             batch.trajectory_ids,
             batch.reset_group_ids,
             batch.starts,
+            mode_ids=mode_ids,
             reconstruction_weight=self.config.reconstruction_weight,
             contrastive_weight=self.config.contrastive_weight,
+            mode_alignment_weight=self.config.mode_alignment_weight,
             variance_weight=self.config.variance_weight,
             covariance_weight=self.config.covariance_weight,
             temporal_radius=self.config.temporal_radius,
@@ -165,6 +171,7 @@ class Stage0ManifoldTrainer:
             loss=float(losses.total.detach()),
             reconstruction=float(losses.reconstruction.detach()),
             contrastive=float(losses.contrastive.detach()),
+            mode_alignment=float(losses.mode_alignment.detach()),
             variance=float(losses.variance.detach()),
             covariance=float(losses.covariance.detach()),
             gradient_norm=gradient_norm,

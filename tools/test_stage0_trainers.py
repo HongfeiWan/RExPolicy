@@ -19,6 +19,7 @@ from rexpolicy.stage0.trainers import (
     Stage0PolicyTrainer,
     Stage0SelectorTrainer,
     collate_success_windows,
+    mode_invariant_alignment_loss,
     temporal_group_contrastive_loss,
     variance_covariance_losses,
 )
@@ -76,6 +77,48 @@ def _batch():
             _window("trajectory-c", "reset-shared", 1),
         )
     )
+
+
+def _mode_batch():
+    return collate_success_windows(
+        (
+            _window("trajectory-a0", "reset-0", 0),
+            _window("trajectory-a0", "reset-0", 1),
+            _window("trajectory-b0", "reset-0", 0),
+            _window("trajectory-b0", "reset-0", 1),
+            _window("trajectory-a1", "reset-1", 0),
+            _window("trajectory-a1", "reset-1", 1),
+            _window("trajectory-b1", "reset-1", 0),
+            _window("trajectory-b1", "reset-1", 1),
+        )
+    )
+
+
+def _mode_metadata():
+    return {
+        "trajectory_ids": (
+            "trajectory-a0",
+            "trajectory-a0",
+            "trajectory-b0",
+            "trajectory-b0",
+            "trajectory-a1",
+            "trajectory-a1",
+            "trajectory-b1",
+            "trajectory-b1",
+        ),
+        "reset_group_ids": (
+            "reset-0",
+            "reset-0",
+            "reset-0",
+            "reset-0",
+            "reset-1",
+            "reset-1",
+            "reset-1",
+            "reset-1",
+        ),
+        "starts": (0, 1, 0, 1, 0, 1, 0, 1),
+        "mode_ids": ("left", "left", "right", "right") * 2,
+    }
 
 
 def _gradient_norm(module: torch.nn.Module) -> float:
@@ -145,6 +188,107 @@ class Stage0BatchAndLossTest(unittest.TestCase):
                 temporal_radius=1,
                 temperature=0.2,
             )
+
+    def test_mode_supervision_penalizes_reset_coded_embeddings(self) -> None:
+        metadata = _mode_metadata()
+        aligned = torch.tensor(
+            (
+                (1.0, 0.0, 0.0),
+                (1.0, 0.0, 0.0),
+                (-1.0, 0.0, 0.0),
+                (-1.0, 0.0, 0.0),
+                (1.0, 0.0, 0.0),
+                (1.0, 0.0, 0.0),
+                (-1.0, 0.0, 0.0),
+                (-1.0, 0.0, 0.0),
+            )
+        )
+        reset_coded = aligned.clone()
+        reset_coded[:4, 1] = 10.0
+        reset_coded[4:, 1] = -10.0
+        reset_coded.requires_grad_(True)
+        aligned_contrastive = temporal_group_contrastive_loss(
+            aligned,
+            **metadata,
+            temporal_radius=1,
+            temperature=0.1,
+        )
+        reset_coded_contrastive = temporal_group_contrastive_loss(
+            reset_coded,
+            **metadata,
+            temporal_radius=1,
+            temperature=0.1,
+        )
+        aligned_raw = mode_invariant_alignment_loss(
+            aligned,
+            **metadata,
+            temporal_radius=1,
+        )
+        reset_coded_raw = mode_invariant_alignment_loss(
+            reset_coded,
+            **metadata,
+            temporal_radius=1,
+        )
+        self.assertLess(float(aligned_contrastive), float(reset_coded_contrastive))
+        self.assertEqual(float(aligned_raw), 0.0)
+        self.assertGreater(float(reset_coded_raw), 100.0)
+        reset_coded_raw.backward()
+        self.assertIsNotNone(reset_coded.grad)
+        self.assertGreater(float(reset_coded.grad[:, 1].abs().sum()), 0.0)
+
+    def test_mode_supervision_is_strict_and_legacy_path_is_exact(self) -> None:
+        metadata = _mode_metadata()
+        embeddings = torch.randn(8, 4)
+        legacy = temporal_group_contrastive_loss(
+            embeddings[:4],
+            metadata["trajectory_ids"][:4],
+            metadata["reset_group_ids"][:4],
+            metadata["starts"][:4],
+            temporal_radius=1,
+            temperature=0.2,
+        )
+        explicit_none = temporal_group_contrastive_loss(
+            embeddings[:4],
+            metadata["trajectory_ids"][:4],
+            metadata["reset_group_ids"][:4],
+            metadata["starts"][:4],
+            temporal_radius=1,
+            temperature=0.2,
+            mode_ids=None,
+        )
+        self.assertTrue(torch.equal(legacy, explicit_none))
+        with self.assertRaisesRegex(ValueError, "mode_ids length"):
+            temporal_group_contrastive_loss(
+                embeddings,
+                metadata["trajectory_ids"],
+                metadata["reset_group_ids"],
+                metadata["starts"],
+                temporal_radius=1,
+                temperature=0.2,
+                mode_ids=metadata["mode_ids"][:-1],
+            )
+        inconsistent_modes = list(metadata["mode_ids"])
+        inconsistent_modes[1] = "right"
+        with self.assertRaisesRegex(ValueError, "exactly one mode_id"):
+            temporal_group_contrastive_loss(
+                embeddings,
+                metadata["trajectory_ids"],
+                metadata["reset_group_ids"],
+                metadata["starts"],
+                temporal_radius=1,
+                temperature=0.2,
+                mode_ids=inconsistent_modes,
+            )
+        with self.assertRaisesRegex(ValueError, "cross-reset positive"):
+            temporal_group_contrastive_loss(
+                embeddings[:4],
+                metadata["trajectory_ids"][:4],
+                metadata["reset_group_ids"][:4],
+                metadata["starts"][:4],
+                temporal_radius=1,
+                temperature=0.2,
+                mode_ids=metadata["mode_ids"][:4],
+            )
         with self.assertRaisesRegex(ValueError, "same-reset negative"):
             temporal_group_contrastive_loss(
                 torch.randn(4, 4),
@@ -200,6 +344,40 @@ class Stage0TrainerStepTest(unittest.TestCase):
         for name, parameter in model.named_parameters():
             self.assertIsNotNone(parameter.grad, name)
             self.assertTrue(torch.isfinite(parameter.grad).all(), name)
+
+    def test_manifold_step_accepts_supervised_mode_ids(self) -> None:
+        torch.manual_seed(41)
+        batch = _mode_batch()
+        model = FutureTrajectoryEncoder(
+            5,
+            3,
+            latent_dim=4,
+            projection_dim=4,
+            model_dim=16,
+            max_future_steps=4,
+            transformer_layers=1,
+            attention_heads=4,
+            feedforward_dim=24,
+            dropout=0.0,
+        )
+        optimizer = torch.optim.AdamW(model.parameters(), lr=1.0e-3)
+        trainer = Stage0ManifoldTrainer(
+            model,
+            optimizer,
+            config=Stage0ManifoldTrainerConfig(
+                reconstruction_probability=0.5,
+                temporal_radius=1,
+                mode_alignment_weight=2.0,
+            ),
+        )
+        metrics = trainer.step(
+            batch,
+            mode_ids=_mode_metadata()["mode_ids"],
+            generator=torch.Generator().manual_seed(43),
+        )
+        self.assertEqual(metrics.optimizer_step, 1)
+        self.assertTrue(math.isfinite(metrics.loss))
+        self.assertGreater(metrics.mode_alignment, 0.0)
 
     def test_selector_nll_step_detaches_targets_and_clips(self) -> None:
         torch.manual_seed(23)

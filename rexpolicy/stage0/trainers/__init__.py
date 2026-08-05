@@ -4,6 +4,7 @@ from .batch import Stage0WindowBatch, collate_success_windows
 from .losses import (
     DiversityLosses,
     ManifoldLosses,
+    mode_invariant_alignment_loss,
     temporal_group_contrastive_loss,
     variance_covariance_losses,
 )
@@ -28,6 +29,7 @@ __all__ = [
     "Stage0SelectorTrainer",
     "Stage0WindowBatch",
     "collate_success_windows",
+    "mode_invariant_alignment_loss",
     "temporal_group_contrastive_loss",
     "variance_covariance_losses",
 ]
