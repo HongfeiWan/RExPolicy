@@ -78,6 +78,11 @@ class Stage0LatentModeMetricsTest(unittest.TestCase):
         self.assertEqual(record["nearest_centroid"]["protocol"], "leave_one_reset_out")
         self.assertEqual(record["space"], "original_latent")
         self.assertEqual(record["authority"], "diagnostic_only")
+        self.assertEqual(record["schema_version"], 2)
+        self.assertEqual(
+            record["reset_geometry_linear_probe"]["interpretation"],
+            "diagnostic_only_causal_task_geometry_not_identity_leakage",
+        )
         json.dumps(record, allow_nan=False, sort_keys=True)
 
     def test_reset_coded_latents_have_a_high_held_out_ridge_probe(self) -> None:
@@ -120,7 +125,7 @@ class Stage0LatentModeMetricsTest(unittest.TestCase):
         second = analyze_latent_modes(latents, modes, resets)
         self.assertEqual(first, second)
         self.assertIsNone(first.reset_xy_linear_probe_r2)
-        self.assertIsNone(first.to_record()["reset_xy_linear_probe"])
+        self.assertIsNone(first.to_record()["reset_geometry_linear_probe"])
 
     def test_inputs_and_factorial_design_are_strict(self) -> None:
         latents, modes, resets, reset_xy = _mode_separated_fixture()

@@ -23,6 +23,7 @@ from rexpolicy.stage0.long_run import (
 from tools.run_stage0_long import (
     _MANIFOLD_TRAINER_CONFIG,
     _phase_training_windows,
+    _policy_latent_key,
     _sample_contrastive_windows,
 )
 
@@ -260,6 +261,23 @@ class Stage0LongRunSamplingTest(unittest.TestCase):
         self.assertIs(
             _phase_training_windows(windows, LongRunPhase.CONDITIONAL_POLICY),
             windows,
+        )
+
+    def test_conditional_policy_reuses_fixed_episode_start_latent(self) -> None:
+        later_window = SimpleNamespace(trajectory_id="trajectory-7", start=13)
+        self.assertEqual(
+            _policy_latent_key(
+                later_window,
+                use_episode_start_latent=True,
+            ),
+            ("trajectory-7", 0),
+        )
+        self.assertEqual(
+            _policy_latent_key(
+                later_window,
+                use_episode_start_latent=False,
+            ),
+            ("trajectory-7", 13),
         )
 
     def test_sparse_mode_groups_only_use_compatible_reset_pairs(self) -> None:

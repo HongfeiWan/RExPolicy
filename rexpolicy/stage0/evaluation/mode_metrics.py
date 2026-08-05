@@ -1,4 +1,4 @@
-"""Held-out mode and reset-identity diagnostics for Stage 0 latents.
+"""Held-out mode and reset-geometry diagnostics for Stage 0 latents.
 
 The metrics in this module are diagnostic only.  They operate in the original
 latent space and use reset-group holdouts so repeated windows from the same
@@ -361,18 +361,22 @@ class LatentModeMetrics:
                 "protocol": "leave_one_reset_out",
             },
             "reset_group_count": self.reset_group_count,
-            "reset_xy_linear_probe": (
+            "reset_geometry_linear_probe": (
                 None
                 if self.reset_xy_linear_probe_r2 is None
                 else {
+                    "interpretation": (
+                        "diagnostic_only_causal_task_geometry_not_identity_leakage"
+                    ),
                     "r2": self.reset_xy_linear_probe_r2,
                     "r2_by_axis": list(self.reset_xy_linear_probe_r2_by_axis or ()),
                     "ridge_alpha": self.ridge_alpha,
                     "protocol": "leave_one_reset_out",
+                    "target": "object_position_xy_m",
                 }
             ),
             "sample_count": self.sample_count,
-            "schema_version": 1,
+            "schema_version": 2,
             "space": "original_latent",
         }
 

@@ -43,9 +43,9 @@ _MODE_DIAGNOSTIC_PROTOCOL = {
     "euclidean_silhouette_minimum": 0.25,
     "macro_f1_minimum": 0.75,
     "mode_to_reset_distance_ratio_minimum": 2.0,
-    "reset_xy_linear_probe_r2_maximum": 0.20,
+    "reset_geometry_probe": "diagnostic_only_causal_task_geometry/v1",
     "ridge_alpha": 1.0e-3,
-    "schema_id": "rexpolicy/stage0-held-out-mode-gate/v1",
+    "schema_id": "rexpolicy/stage0-held-out-mode-gate/v2",
     "selection": "complete-reset-groups-start-zero/v1",
 }
 _SELECTOR_DIAGNOSTIC_PROTOCOL = {
@@ -953,6 +953,18 @@ def _window_key(window: Any) -> tuple[str, int]:
     return (window.trajectory_id, window.start)
 
 
+def _policy_latent_key(
+    window: Any,
+    *,
+    use_episode_start_latent: bool,
+) -> tuple[str, int]:
+    if not isinstance(use_episode_start_latent, bool):
+        raise TypeError("use_episode_start_latent must be boolean")
+    return (
+        (window.trajectory_id, 0) if use_episode_start_latent else _window_key(window)
+    )
+
+
 def _precompute_window_latents(
     encoder: Any,
     windows: Sequence[Any],
@@ -990,6 +1002,7 @@ def _cached_window_batch(
     *,
     device: Any,
     normalization: Any,
+    use_episode_start_latent: bool = False,
 ) -> tuple[Any, Any]:
     import torch
 
@@ -998,7 +1011,15 @@ def _cached_window_batch(
     batch = _normalize_batch(collate_success_windows(windows), normalization).to(device)
     try:
         latents = torch.stack(
-            tuple(latent_cache[_window_key(window)] for window in windows)
+            tuple(
+                latent_cache[
+                    _policy_latent_key(
+                        window,
+                        use_episode_start_latent=use_episode_start_latent,
+                    )
+                ]
+                for window in windows
+            )
         ).to(device=device, dtype=batch.current_states.dtype)
     except KeyError as error:
         raise RuntimeError("training latent cache is incomplete") from error
@@ -1308,7 +1329,6 @@ def _evaluate_offline(
         ).to_record()
         mode_geometry = mode_record["geometry"]
         mode_centroid = mode_record["nearest_centroid"]
-        reset_probe = mode_record["reset_xy_linear_probe"]
         mode_gate = bool(
             mode_centroid["macro_f1"] >= _MODE_DIAGNOSTIC_PROTOCOL["macro_f1_minimum"]
             and mode_centroid["normalized_mutual_information"]
@@ -1317,9 +1337,6 @@ def _evaluate_offline(
             >= _MODE_DIAGNOSTIC_PROTOCOL["euclidean_silhouette_minimum"]
             and mode_geometry["mode_to_reset_distance_ratio"]
             >= _MODE_DIAGNOSTIC_PROTOCOL["mode_to_reset_distance_ratio_minimum"]
-            and reset_probe is not None
-            and reset_probe["r2"]
-            <= _MODE_DIAGNOSTIC_PROTOCOL["reset_xy_linear_probe_r2_maximum"]
         )
         control_count = min(32, batch.batch_size)
         state = batch.current_states[:control_count]
@@ -1816,6 +1833,7 @@ def _checkpoint_hashes(
             "no_z_control": "zero_latent_same_two_token_architecture/v1",
             "selector_diagnostic_protocol": _SELECTOR_DIAGNOSTIC_PROTOCOL,
             "selector_training_windows": "start-zero-only/v1",
+            "conditional_policy_latent": "fixed-trajectory-start-zero/v1",
             "rollout_protocol": _ROLLOUT_PROTOCOL,
             "path_adherence_protocol": _PATH_ADHERENCE_PROTOCOL,
             "window_policy_sha256": window_splits.window_policy_sha256,
@@ -1928,6 +1946,7 @@ def _train_one_step(
         latent_cache,
         device=device,
         normalization=normalization,
+        use_episode_start_latent=phase is LongRunPhase.CONDITIONAL_POLICY,
     )
     if phase is LongRunPhase.SELECTOR:
         return asdict(trainers[phase.value].step(batch.current_states, target_latents))
