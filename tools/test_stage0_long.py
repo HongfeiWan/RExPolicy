@@ -22,6 +22,7 @@ from rexpolicy.stage0.long_run import (
 )
 from tools.run_stage0_long import (
     _MANIFOLD_TRAINER_CONFIG,
+    _cached_window_batch,
     _phase_training_windows,
     _policy_latent_key,
     _sample_contrastive_windows,
@@ -279,6 +280,56 @@ class Stage0LongRunSamplingTest(unittest.TestCase):
             ),
             ("trajectory-7", 13),
         )
+
+    def test_cached_batch_loads_start_latent_for_later_window(self) -> None:
+        import torch
+
+        from rexpolicy.stage0.data import Stage0SuccessWindow
+        from rexpolicy.stage0.normalization import Stage0Normalization
+
+        state_dim = 79
+        action_dim = 19
+        future_horizon = 2
+        action_horizon = 1
+        future_actions = torch.zeros(future_horizon, action_dim)
+        future_states = torch.zeros(future_horizon, state_dim)
+        future_mask = torch.ones(future_horizon, dtype=torch.bool)
+        window = Stage0SuccessWindow(
+            trajectory_id="trajectory-7",
+            reset_group_id="reset-3",
+            start=13,
+            current_state=torch.zeros(state_dim),
+            action_chunk=future_actions[:action_horizon].clone(),
+            action_mask=future_mask[:action_horizon].clone(),
+            future_actions=future_actions,
+            future_states=future_states,
+            future_mask=future_mask,
+            trajectory_sha256="a" * 64,
+            corpus_sha256="b" * 64,
+            window_policy_sha256="c" * 64,
+        )
+        effective = torch.zeros(action_dim, dtype=torch.bool)
+        effective[:3] = True
+        normalization = Stage0Normalization(
+            state_mean=torch.zeros(state_dim),
+            state_std=torch.ones(state_dim),
+            action_mean=torch.zeros(action_dim),
+            action_std=torch.ones(action_dim),
+            effective_action_mask=effective,
+            state_sample_count=2,
+            action_sample_count=2,
+        )
+        _, latents = _cached_window_batch(
+            (window,),
+            {
+                ("trajectory-7", 0): torch.ones(4),
+                ("trajectory-7", 13): torch.zeros(4),
+            },
+            device=torch.device("cpu"),
+            normalization=normalization,
+            use_episode_start_latent=True,
+        )
+        self.assertTrue(torch.equal(latents, torch.ones(1, 4)))
 
     def test_sparse_mode_groups_only_use_compatible_reset_pairs(self) -> None:
         import torch
