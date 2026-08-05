@@ -141,6 +141,59 @@ class TestStage0Checkpoint(unittest.TestCase):
             ):
                 manager.verify(checkpoint)
 
+    def test_one_model_component_can_be_selected_without_restoring_rng(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            manager = Stage0CheckpointManager(temporary)
+            models, optimizers = self._components()
+            expected_encoder = {
+                key: value.detach().clone()
+                for key, value in models["future_encoder"].state_dict().items()
+            }
+            manager.save(
+                sequence=3,
+                phase="conditional_policy",
+                steps={"conditional_policy": 2, "global": 3},
+                hashes=self.hashes,
+                models=models,
+                optimizers=optimizers,
+            )
+            for parameter in models["future_encoder"].parameters():
+                parameter.data.add_(10.0)
+            for parameter in models["selector"].parameters():
+                parameter.data.add_(20.0)
+            changed_selector = {
+                key: value.detach().clone()
+                for key, value in models["selector"].state_dict().items()
+            }
+            models["future_encoder"].train()
+            torch.manual_seed(91)
+            expected_random = float(torch.rand(()))
+            torch.manual_seed(91)
+
+            manifest = manager.load_model_component(
+                hashes=self.hashes,
+                name="future_encoder",
+                model=models["future_encoder"],
+            )
+
+            self.assertEqual(manifest["steps"]["conditional_policy"], 2)
+            self.assertTrue(models["future_encoder"].training)
+            self.assertEqual(float(torch.rand(())), expected_random)
+            for key, value in models["future_encoder"].state_dict().items():
+                torch.testing.assert_close(value, expected_encoder[key])
+            for key, value in models["selector"].state_dict().items():
+                torch.testing.assert_close(value, changed_selector[key])
+
+            with self.assertRaisesRegex(
+                Stage0CheckpointMismatchError,
+                "absent",
+            ):
+                manager.load_model_component(
+                    hashes=self.hashes,
+                    name="no_z_policy",
+                    model=torch.nn.Linear(3, 4),
+                )
+
     def test_partial_directory_is_never_a_checkpoint(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             manager = Stage0CheckpointManager(temporary)

@@ -828,6 +828,75 @@ class Stage0CheckpointManager:
             extra=dict(manifest["extra"]),
         )
 
+    def load_model_component(
+        self,
+        *,
+        hashes: Stage0CheckpointHashes,
+        name: str,
+        model: Any,
+        checkpoint: str | Path | None = None,
+    ) -> dict[str, Any]:
+        """Load one verified model without touching optimizers or RNG state.
+
+        This narrow operation supports held-out model selection after the full
+        equal-budget training schedule.  Integrity, experiment hashes, and the
+        destination model schema are checked exactly as they are for a full
+        resume, but unrelated components remain unchanged.
+        """
+
+        import torch
+
+        selected = (
+            Path(checkpoint).expanduser().resolve()
+            if checkpoint is not None
+            else self.latest_checkpoint()
+        )
+        if selected is None:
+            raise FileNotFoundError("no completed Stage 0 checkpoint")
+        manifest = self.verify(selected)
+        saved_hashes = Stage0CheckpointHashes.from_record(manifest["hashes"])
+        if saved_hashes != hashes:
+            changed = [
+                field
+                for field in saved_hashes.to_record()
+                if saved_hashes.to_record()[field] != hashes.to_record()[field]
+            ]
+            raise Stage0CheckpointMismatchError(
+                "checkpoint hash mismatch: " + ", ".join(changed)
+            )
+        component_name = _safe_name(name, "model component name")
+        model_map = _named_components({component_name: model}, "models")
+        if component_name not in manifest["models"]:
+            raise Stage0CheckpointMismatchError(
+                f"model component is absent from checkpoint: {component_name}"
+            )
+        destination = model_map[component_name]
+        expected_schema = manifest["models"][component_name]["schema_sha256"]
+        if _model_schema_sha256(destination) != expected_schema:
+            raise Stage0CheckpointMismatchError(
+                f"model schema changed: {component_name}"
+            )
+        payload = torch.load(
+            selected / f"models/{component_name}.pt",
+            map_location="cpu",
+            weights_only=False,
+        )
+        payload = _exact_mapping(
+            payload,
+            {"schema_version", "name", "schema_sha256", "state_dict"},
+            f"model payload {component_name}",
+        )
+        if (
+            payload["schema_version"] != STAGE0_CHECKPOINT_SCHEMA_VERSION
+            or payload["name"] != component_name
+            or payload["schema_sha256"] != expected_schema
+        ):
+            raise Stage0CheckpointIntegrityError(
+                f"model payload identity changed: {component_name}"
+            )
+        _unwrap_module(destination).load_state_dict(payload["state_dict"], strict=True)
+        return manifest
+
 
 __all__ = [
     "STAGE0_CHECKPOINT_SCHEMA_ID",
