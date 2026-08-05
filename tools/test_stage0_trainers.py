@@ -72,8 +72,8 @@ def _batch():
             _window("trajectory-a", "reset-shared", 1, valid_steps=2),
             _window("trajectory-b", "reset-shared", 0),
             _window("trajectory-b", "reset-shared", 1),
-            _window("trajectory-c", "reset-other", 0),
-            _window("trajectory-c", "reset-other", 1),
+            _window("trajectory-c", "reset-shared", 0),
+            _window("trajectory-c", "reset-shared", 1),
         )
     )
 
@@ -128,7 +128,7 @@ class Stage0BatchAndLossTest(unittest.TestCase):
         loss = temporal_group_contrastive_loss(
             embeddings,
             ("a", "a", "b", "b", "c", "c"),
-            ("shared", "shared", "shared", "shared", "other", "other"),
+            ("shared", "shared", "shared", "shared", "shared", "shared"),
             (0, 1, 0, 1, 0, 1),
             temporal_radius=1,
             temperature=0.2,
@@ -142,6 +142,15 @@ class Stage0BatchAndLossTest(unittest.TestCase):
                 ("a", "b", "c"),
                 ("a", "b", "c"),
                 (0, 0, 0),
+                temporal_radius=1,
+                temperature=0.2,
+            )
+        with self.assertRaisesRegex(ValueError, "same-reset negative"):
+            temporal_group_contrastive_loss(
+                torch.randn(4, 4),
+                ("a", "a", "b", "b"),
+                ("reset-a", "reset-a", "reset-b", "reset-b"),
+                (0, 1, 0, 1),
                 temporal_radius=1,
                 temperature=0.2,
             )

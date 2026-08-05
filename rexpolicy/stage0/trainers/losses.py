@@ -90,12 +90,11 @@ def temporal_group_contrastive_loss(
 ) -> torch.Tensor:
     """Multi-positive InfoNCE with explicit temporal and group supervision.
 
-    A positive is a nearby window from the same trajectory. Windows from two
-    trajectories in the same reset-state group are excluded from the
-    denominator instead of being treated as automatic different-mode
-    negatives. Every anchor must have both a compatible positive and an
-    admissible negative, otherwise the batch fails rather than returning a
-    silently degenerate zero objective.
+    A positive is a nearby window from the same trajectory. A negative is a
+    different successful trajectory from the exact same reset-state group.
+    Cross-reset windows are excluded: treating them as negatives lets the
+    encoder satisfy InfoNCE by memorizing reset identity instead of future
+    geometry. Every anchor must have both a positive and a same-reset negative.
     """
     if (
         not isinstance(embeddings, torch.Tensor)
@@ -153,15 +152,17 @@ def temporal_group_contrastive_loss(
     offset_tensor = torch.tensor(offsets, device=embeddings.device)
     nearby = (offset_tensor[:, None] - offset_tensor[None, :]).abs() <= temporal_radius
     positive = same_trajectory & nearby & ~diagonal
-    ambiguous_cross_trajectory = same_reset_group & ~same_trajectory
-    candidates = ~diagonal & ~ambiguous_cross_trajectory
+    same_reset_cross_trajectory = same_reset_group & ~same_trajectory
+    candidates = positive | same_reset_cross_trajectory
     negative = candidates & ~positive
     if not bool(positive.any(dim=1).all()):
         raise ValueError(
             "every contrastive anchor needs a same-trajectory temporal positive"
         )
     if not bool(negative.any(dim=1).all()):
-        raise ValueError("every contrastive anchor needs an admissible negative")
+        raise ValueError(
+            "every contrastive anchor needs a different-trajectory same-reset negative"
+        )
 
     normalized = functional.normalize(embeddings, dim=-1)
     logits = normalized @ normalized.transpose(0, 1)
