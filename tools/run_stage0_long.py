@@ -73,6 +73,17 @@ _PATH_ADHERENCE_PROTOCOL = {
     "selector_average_sampled_mode_coverage_minimum": 2.5,
     "selector_z_macro_f1_minimum": 0.70,
 }
+_TEMPORAL_CONTROL_PROTOCOL = {
+    "episode_latent": "future-encoder-start-zero-fixed-by-trajectory/v1",
+    "gate": "conditional-nonzero-start-mse-strictly-less-than-no-z/v1",
+    "metric": "normalized-effective-first-action-mse/v1",
+    "noise_pairing": "identical-initial-noise-conditional-vs-no-z/v1",
+    "sample_batch_size": "training_batch_size/v1",
+    "schema_id": "rexpolicy/stage0-temporal-control-gate/v1",
+    "seed_namespace": "final_temporal_control/initial_noise/v1",
+    "split": "all-locked-test-windows/v1",
+    "start_bin_width": "action_horizon/v1",
+}
 _MANIFOLD_TRAINER_CONFIG = {
     "contrastive_temperature": 0.1,
     "contrastive_weight": 1.0,
@@ -1571,6 +1582,141 @@ def _evaluation_summary(record: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _temporal_control_comparison(
+    conditional_nonzero_mse: float,
+    no_z_nonzero_mse: float,
+) -> dict[str, Any]:
+    values = (conditional_nonzero_mse, no_z_nonzero_mse)
+    if any(
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+        or float(value) < 0.0
+        for value in values
+    ):
+        raise ValueError("temporal-control MSE values must be finite and non-negative")
+    conditional = float(conditional_nonzero_mse)
+    no_z = float(no_z_nonzero_mse)
+    return {
+        "absolute_mse_improvement": no_z - conditional,
+        "conditional_to_no_z_mse_ratio": conditional / no_z if no_z > 0.0 else None,
+        "gate_passed": conditional < no_z,
+        "gate_rule": _TEMPORAL_CONTROL_PROTOCOL["gate"],
+    }
+
+
+def _evaluate_temporal_control(
+    config: Stage0LongRunConfig,
+    models: Mapping[str, Any],
+    windows: Sequence[Any],
+    trajectory_modes: Mapping[str, Mapping[str, str]],
+    *,
+    device: Any,
+    global_step: int,
+    normalization: Any,
+) -> dict[str, Any]:
+    import torch
+
+    from rexpolicy.stage0.evaluation.temporal_control import (
+        evaluate_fixed_start_latent_first_action_mse,
+    )
+    from rexpolicy.stage0.trainers import collate_success_windows
+
+    ordered = tuple(
+        sorted(windows, key=lambda window: (window.trajectory_id, window.start))
+    )
+    if not ordered:
+        raise RuntimeError("locked test split has no temporal-control windows")
+    trajectory_ids = tuple(sorted({window.trajectory_id for window in ordered}))
+    start_windows = tuple(window for window in ordered if window.start == 0)
+    start_trajectory_ids = tuple(window.trajectory_id for window in start_windows)
+    if (
+        len(start_trajectory_ids) != len(set(start_trajectory_ids))
+        or tuple(sorted(start_trajectory_ids)) != trajectory_ids
+    ):
+        raise RuntimeError(
+            "temporal-control evaluation requires exactly one start-zero window "
+            "per test trajectory"
+        )
+    start_latent_cache = _precompute_window_latents(
+        models["future_encoder"],
+        start_windows,
+        batch_size=config.training.batch_size,
+        device=device,
+        normalization=normalization,
+    )
+    episode_start_latents = {
+        trajectory_id: start_latent_cache[(trajectory_id, 0)]
+        for trajectory_id in trajectory_ids
+    }
+    no_z_episode_latents = {
+        trajectory_id: torch.zeros_like(latent)
+        for trajectory_id, latent in episode_start_latents.items()
+    }
+    mode_ids = {
+        trajectory_id: trajectory_modes[trajectory_id]["mode_id"]
+        for trajectory_id in trajectory_ids
+    }
+    batch = _normalize_batch(collate_success_windows(ordered), normalization)
+    noise_seed = _step_seed(
+        config.runtime.seed,
+        "final_temporal_control",
+        "initial_noise",
+        global_step,
+    )
+    initial_noise = torch.randn(
+        batch.action_chunks.shape,
+        dtype=batch.action_chunks.dtype,
+        generator=_generator(torch, seed=noise_seed),
+    )
+    common = {
+        "batch": batch,
+        "trajectory_mode_ids": mode_ids,
+        "initial_noise": initial_noise,
+        "effective_action_mask": normalization.effective_action_mask,
+        "flow_sample_steps": config.runtime.flow_sample_steps,
+        "start_bin_width": config.stage0.action_horizon,
+        "sample_batch_size": config.training.batch_size,
+    }
+    conditional = evaluate_fixed_start_latent_first_action_mse(
+        models["conditional_policy"],
+        episode_start_latents=episode_start_latents,
+        **common,
+    )
+    no_z = evaluate_fixed_start_latent_first_action_mse(
+        models["no_z_policy"],
+        episode_start_latents=no_z_episode_latents,
+        **common,
+    )
+    comparison = _temporal_control_comparison(
+        conditional.nonzero_start.first_action_mse,
+        no_z.nonzero_start.first_action_mse,
+    )
+    contract = {
+        "corpus_sha256": batch.corpus_sha256,
+        "global_step": global_step,
+        "noise_seed": noise_seed,
+        "protocol": _TEMPORAL_CONTROL_PROTOCOL,
+        "window_keys": [[window.trajectory_id, window.start] for window in ordered],
+        "window_policy_sha256": batch.window_policy_sha256,
+    }
+    return {
+        "comparison": comparison,
+        "conditional_policy": conditional.to_record(),
+        "evaluation_contract_sha256": canonical_fingerprint(contract),
+        "gate_passed": comparison["gate_passed"],
+        "mode_count": len(set(mode_ids.values())),
+        "no_z_policy": no_z.to_record(),
+        "noise_seed": noise_seed,
+        "protocol": dict(_TEMPORAL_CONTROL_PROTOCOL),
+        "schema_id": "rexpolicy/stage0-final-temporal-control/v1",
+        "shared_initial_noise": True,
+        "split": "test",
+        "trajectory_count": len(trajectory_ids),
+        "window_count": len(ordered),
+    }
+
+
 def _evaluate_newton_rollouts(
     config: Stage0LongRunConfig,
     models: Mapping[str, Any],
@@ -1836,6 +1982,7 @@ def _checkpoint_hashes(
             "conditional_policy_latent": "fixed-trajectory-start-zero/v1",
             "rollout_protocol": _ROLLOUT_PROTOCOL,
             "path_adherence_protocol": _PATH_ADHERENCE_PROTOCOL,
+            "temporal_control_protocol": _TEMPORAL_CONTROL_PROTOCOL,
             "window_policy_sha256": window_splits.window_policy_sha256,
         }
     )
@@ -2256,6 +2403,7 @@ def _run_training(
         status = "complete"
 
     final_test_eval: dict[str, Any] | None = None
+    final_temporal_eval: dict[str, Any] | None = None
     final_rollout_eval: dict[str, Any] | None = None
     if status == "complete":
         final_test_eval = _evaluate_offline(
@@ -2275,6 +2423,34 @@ def _run_training(
         emit(
             "final_test_evaluation",
             detail=_evaluation_summary(final_test_eval),
+        )
+        final_temporal_eval = _evaluate_temporal_control(
+            config,
+            models,
+            window_splits.test,
+            trajectory_modes,
+            device=device,
+            global_step=cursor.global_step,
+            normalization=normalization,
+        )
+        atomic_write_json(
+            output_dir
+            / "evaluations"
+            / f"test-temporal-control-final-{cursor.global_step:012d}.json",
+            final_temporal_eval,
+        )
+        emit(
+            "final_test_temporal_control",
+            detail={
+                "conditional_nonzero_start_mse": final_temporal_eval[
+                    "conditional_policy"
+                ]["nonzero_start"]["first_action_mse"],
+                "gate_passed": final_temporal_eval["gate_passed"],
+                "no_z_nonzero_start_mse": final_temporal_eval["no_z_policy"][
+                    "nonzero_start"
+                ]["first_action_mse"],
+                "window_count": final_temporal_eval["window_count"],
+            },
         )
         final_rollout_eval = _evaluate_newton_rollouts(
             config,
@@ -2303,22 +2479,32 @@ def _run_training(
     gate_evaluation = final_test_eval or {}
     controls = gate_evaluation.get("policy_controls", {})
     latent = gate_evaluation.get("latent", {})
-    offline_gate = bool(
+    representation_gate = bool(
         status == "complete"
         and latent.get("collapse_gate_passed", False)
         and gate_evaluation.get("latent_mode_gate_passed", False)
         and gate_evaluation.get("selector", {}).get("gate_passed", False)
         and controls.get("oracle_z_improves_over_no_z", False)
     )
+    temporal_gate = bool(
+        status == "complete"
+        and final_temporal_eval is not None
+        and final_temporal_eval["gate_passed"]
+    )
+    offline_gate = representation_gate and temporal_gate
     report = {
+        "schema_id": "rexpolicy/stage0-long-run-report/v2",
         "checkpoint": str(checkpoint),
         "config_sha256": config.fingerprint,
         "cursor": cursor.to_steps(),
         "elapsed_seconds": budget.elapsed_seconds,
         "latest_evaluation": latest_eval,
         "final_test_evaluation": final_test_eval,
+        "final_test_temporal_control": final_temporal_eval,
         "final_newton_rollouts": final_rollout_eval,
-        "offline_representation_gate_passed": offline_gate,
+        "offline_representation_gate_passed": representation_gate,
+        "offline_temporal_control_gate_passed": temporal_gate,
+        "offline_scientific_gate_passed": offline_gate,
         "normalization_sha256": normalization.sha256,
         "resumed_from": resumed_from,
         "rollout_feasibility_gate": (
@@ -2328,6 +2514,7 @@ def _run_training(
         ),
         "scientific_limitations": [
             "offline action error is not rollout success",
+            "temporal control measures first actions under one fixed episode latent",
             "selector samples may represent a different valid mode than a paired demo",
             "Newton learned-policy rollouts are the authoritative feasibility gate",
         ],

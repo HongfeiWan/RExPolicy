@@ -26,6 +26,7 @@ from tools.run_stage0_long import (
     _phase_training_windows,
     _policy_latent_key,
     _sample_contrastive_windows,
+    _temporal_control_comparison,
 )
 
 
@@ -216,6 +217,20 @@ class Stage0LongRunSamplingTest(unittest.TestCase):
 
         runtime_config = Stage0ManifoldTrainerConfig(**_MANIFOLD_TRAINER_CONFIG)
         self.assertEqual(asdict(runtime_config), _MANIFOLD_TRAINER_CONFIG)
+
+    def test_temporal_control_comparison_is_strict_and_json_safe(self) -> None:
+        improved = _temporal_control_comparison(0.25, 1.0)
+        self.assertTrue(improved["gate_passed"])
+        self.assertEqual(improved["absolute_mse_improvement"], 0.75)
+        self.assertEqual(improved["conditional_to_no_z_mse_ratio"], 0.25)
+
+        tied_at_zero = _temporal_control_comparison(0.0, 0.0)
+        self.assertFalse(tied_at_zero["gate_passed"])
+        self.assertIsNone(tied_at_zero["conditional_to_no_z_mse_ratio"])
+        json.dumps(tied_at_zero, allow_nan=False, sort_keys=True)
+
+        with self.assertRaisesRegex(ValueError, "finite"):
+            _temporal_control_comparison(float("nan"), 1.0)
 
     def test_manifold_octet_pairs_modes_across_resets(self) -> None:
         import torch
