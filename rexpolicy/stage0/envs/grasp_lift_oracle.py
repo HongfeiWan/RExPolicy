@@ -188,6 +188,7 @@ class GraspLiftSuccessOracle:
         self.schema = schema
         self._initial_object_position: torch.Tensor | None = None
         self._initial_object_z_axis: torch.Tensor | None = None
+        self._lift_axis: torch.Tensor | None = None
         self._success_hold: torch.Tensor | None = None
         self._drop_gap: torch.Tensor | None = None
         self._grasp_confirmed: torch.Tensor | None = None
@@ -208,11 +209,19 @@ class GraspLiftSuccessOracle:
             state[:, self.schema.slice("object_rotation_6d")]
         )
         object_z_axis = rotation[:, :, 2]
+        object_to_goal = state[:, self.schema.slice("object_to_goal")]
+        lift_axis_norm = torch.linalg.vector_norm(
+            object_to_goal, dim=-1, keepdim=True
+        )
+        if torch.any(lift_axis_norm <= torch.finfo(state.dtype).eps):
+            raise ValueError("object_to_goal must define a non-zero lift axis")
+        lift_axis = object_to_goal / lift_axis_norm
         if self._initial_object_position is None:
             if world_mask is not None:
                 raise RuntimeError("the first oracle reset must initialize every world")
             self._initial_object_position = object_position.clone()
             self._initial_object_z_axis = object_z_axis.clone()
+            self._lift_axis = lift_axis.clone()
             self._success_hold = torch.zeros(
                 self.num_envs, dtype=torch.int64, device=state.device
             )
@@ -243,6 +252,7 @@ class GraspLiftSuccessOracle:
             )
         self._initial_object_position[world_mask] = object_position[world_mask]
         self._initial_object_z_axis[world_mask] = object_z_axis[world_mask]
+        self._lift_axis[world_mask] = lift_axis[world_mask]
         self._success_hold[world_mask] = 0
         self._drop_gap[world_mask] = 0
         self._grasp_confirmed[world_mask] = False
@@ -272,11 +282,11 @@ class GraspLiftSuccessOracle:
 
         displacement = object_position - self._initial_object_position
         signed_lift = torch.sum(
-            displacement * self._initial_object_z_axis, dim=-1
+            displacement * self._lift_axis, dim=-1
         )
         lift = torch.clamp_min(signed_lift, 0.0)
         lateral = torch.linalg.vector_norm(
-            displacement - signed_lift[:, None] * self._initial_object_z_axis,
+            displacement - signed_lift[:, None] * self._lift_axis,
             dim=-1,
         )
         tilt_cosine = torch.sum(
@@ -374,6 +384,7 @@ class GraspLiftSuccessOracle:
         values = (
             self._initial_object_position,
             self._initial_object_z_axis,
+            self._lift_axis,
             self._success_hold,
             self._drop_gap,
             self._grasp_confirmed,
