@@ -79,6 +79,29 @@ class DexHandModelSpec:
         )
 
 
+def ordered_joint_positions(
+    joint_values: NamedJointValues,
+    joint_names: tuple[str, ...],
+) -> tuple[float, ...]:
+    """Return named values in an explicit consumer-defined joint order."""
+
+    if len(set(joint_values.joint_names)) != len(joint_values.joint_names):
+        raise ValueError("joint_values contains duplicate joint names")
+    if len(set(joint_names)) != len(joint_names):
+        raise ValueError("joint_names contains duplicates")
+    values_by_name = dict(
+        zip(
+            joint_values.joint_names,
+            joint_values.joint_positions,
+            strict=True,
+        )
+    )
+    missing = tuple(name for name in joint_names if name not in values_by_name)
+    if missing:
+        raise KeyError(f"joint_values is missing requested joints: {missing}")
+    return tuple(float(values_by_name[name]) for name in joint_names)
+
+
 def _default_open_ratio(joint_name: str) -> float:
     # The URDF lower limits correspond to mechanical zero, not a visually natural "open hand" pose.
     # Bias the default pose slightly toward finger spread and light flexion so the hand looks relaxed.
