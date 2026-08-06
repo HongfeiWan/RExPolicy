@@ -21,6 +21,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Protocol
 
+from rexpolicy.scene_asset import validate_scene_glb
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 _GENERATION_DIRECTORY = re.compile(r"^generation-(\d{6,})$")
@@ -184,6 +186,12 @@ def create_parser() -> argparse.ArgumentParser:
         default=False,
     )
     parser.add_argument(
+        "--scene-glb",
+        type=Path,
+        default=REPO_ROOT / "scene" / "scene.glb",
+        help="Binary glTF room asset used when --scene-visuals is enabled.",
+    )
+    parser.add_argument(
         "--capture-graph",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -216,6 +224,8 @@ def validate_args(args: argparse.Namespace) -> None:
             "reach_green_cap/v1 requires --substeps-per-frame 16 and "
             "--bottle-settle-frames 60"
         )
+    if args.scene_visuals:
+        args.scene_glb = validate_scene_glb(args.scene_glb)
     output_dir = args.output_dir.expanduser().resolve()
     if output_dir.exists():
         raise FileExistsError(
@@ -796,6 +806,15 @@ def _summary_payload(
         "archive_writes": 0,
         "policy_checkpoint": str(args.policy_checkpoint.resolve()),
         "vlm_model": str(args.vlm_model.resolve()),
+        "scene_glb": (
+            {
+                "path": str(args.scene_glb),
+                "size": args.scene_glb.stat().st_size,
+                "sha256": _file_sha256(args.scene_glb),
+            }
+            if args.scene_visuals
+            else None
+        ),
         "dit_overlay": None if overlay is None else asdict(overlay),
         "task_id": args.task_id,
         "device": args.device,
@@ -822,6 +841,7 @@ def main(argv: list[str] | None = None) -> None:
     args.isaac_groot_root = args.isaac_groot_root.expanduser().resolve()
     args.policy_checkpoint = args.policy_checkpoint.expanduser().resolve()
     args.vlm_model = args.vlm_model.expanduser().resolve()
+    args.scene_glb = args.scene_glb.expanduser().resolve()
     args.output_dir = args.output_dir.expanduser().resolve()
     if args.dit_overlay is not None:
         args.dit_overlay = args.dit_overlay.expanduser().resolve()

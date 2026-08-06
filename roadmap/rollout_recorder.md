@@ -38,7 +38,8 @@ python -m tools.run_rollout_recorder \
   --episode-control-steps 8 \
   --execution-horizon 2 \
   --camera-textures \
-  --no-scene-visuals \
+  --scene-visuals \
+  --scene-glb /home/user/project/RExPolicy/scene/scene.glb \
   --no-capture-graph \
   --no-hydroelastic
 ```
@@ -66,7 +67,8 @@ python -m tools.run_rollout_recorder \
   --episode-control-steps 8 \
   --execution-horizon 2 \
   --camera-textures \
-  --no-scene-visuals \
+  --scene-visuals \
+  --scene-glb /home/user/project/RExPolicy/scene/scene.glb \
   --no-capture-graph \
   --no-hydroelastic
 ```
@@ -113,6 +115,12 @@ termination, and truncation. `summary.json` additionally declares
 `training_updates: 0` and `archive_writes: 0`.
 
 OpenCV with an MP4 encoder is required in the Isaac-GR00T/Newton environment.
+When `--scene-visuals` is enabled, the recorder validates the GLB header and
+declared byte length before constructing Newton, then records the asset path,
+size, and SHA-256 in `summary.json`. Missing or placeholder assets fail closed
+instead of silently producing a gray background. Use `--no-scene-visuals`
+only for an intentionally geometry-only comparison.
+
 The CPU-only orchestration and side-effect boundary are covered by:
 
 ```bash

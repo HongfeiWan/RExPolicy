@@ -102,6 +102,7 @@ from rexpolicy.replay.success_graph import (
     SuccessExperienceGraph,
     compile_success_experience_graph,
 )
+from rexpolicy.scene_asset import validate_scene_glb
 from rexpolicy.tasking.capabilities import EventSchema
 from rexpolicy.tasking.canonical import canonical_fingerprint
 from rexpolicy.tasking.event_ledger import (
@@ -288,6 +289,12 @@ def create_parser() -> argparse.ArgumentParser:
         "--scene-visuals", action=argparse.BooleanOptionalAction, default=False
     )
     parser.add_argument(
+        "--scene-glb",
+        type=Path,
+        default=REPO_ROOT / "scene" / "scene.glb",
+        help="Binary glTF room asset used when --scene-visuals is enabled.",
+    )
+    parser.add_argument(
         "--capture-graph", action=argparse.BooleanOptionalAction, default=False
     )
     parser.add_argument(
@@ -416,6 +423,8 @@ def _validate_args(
             "configuration: --substeps-per-frame 16 and "
             "--bottle-settle-frames 60"
         )
+    if args.scene_visuals:
+        args.scene_glb = validate_scene_glb(args.scene_glb)
     if args.instruction is not None and args.instruction != task.instruction:
         raise ValueError(
             "The canonical Reach soak does not permit an instruction override; "
@@ -508,6 +517,7 @@ def _create_environment(
             render_images=True,
             camera_textures=args.camera_textures,
             load_scene_visuals=args.scene_visuals,
+            scene_glb_path=str(args.scene_glb) if args.scene_visuals else None,
             hydroelastic_contacts=args.hydroelastic,
         )
     )
@@ -1905,7 +1915,7 @@ def _asset_descriptors(args: argparse.Namespace) -> list[dict[str, Any]]:
         REPO_ROOT / "debug" / "dynamic_bottle_body.json",
     ]
     if args.scene_visuals:
-        paths.append(REPO_ROOT / "scene" / "scene.glb")
+        paths.append(args.scene_glb)
     descriptors = []
     seen = set()
     for path in paths:
@@ -1916,9 +1926,10 @@ def _asset_descriptors(args: argparse.Namespace) -> list[dict[str, Any]]:
             continue
         seen.add(resolved)
         descriptor = _file_descriptor(resolved)
-        descriptor["repository_relative_path"] = str(
-            path.relative_to(REPO_ROOT)
-        )
+        try:
+            descriptor["repository_relative_path"] = str(path.relative_to(REPO_ROOT))
+        except ValueError:
+            descriptor["repository_relative_path"] = None
         descriptors.append(descriptor)
     return descriptors
 
@@ -2065,6 +2076,7 @@ def _build_run_manifest(
             "offload_vlm_during_update": args.offload_vlm_during_update,
             "camera_textures": args.camera_textures,
             "scene_visuals": args.scene_visuals,
+            "scene_glb_path": str(args.scene_glb) if args.scene_visuals else None,
             "capture_graph": args.capture_graph,
             "hydroelastic": args.hydroelastic,
             "bottle_settle_frames": args.bottle_settle_frames,

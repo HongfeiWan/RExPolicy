@@ -142,6 +142,23 @@ class TestRolloutExecution(unittest.TestCase):
         }
         self.assertFalse(option_strings & forbidden)
 
+    def test_enabled_scene_requires_a_valid_glb(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            args = create_parser().parse_args(
+                [
+                    "--output-dir",
+                    str(root / "rollout"),
+                    "--scene-visuals",
+                    "--scene-glb",
+                    str(root / "missing.glb"),
+                ]
+            )
+            from tools.run_rollout_recorder import validate_args
+
+            with self.assertRaisesRegex(FileNotFoundError, "does not exist"):
+                validate_args(args)
+
     def test_horizon_two_stops_when_all_worlds_are_done(self) -> None:
         runtime = _FakeRuntime()
         sink = _FakeSink()
