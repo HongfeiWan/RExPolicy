@@ -278,6 +278,34 @@ class TestGrootNewtonReach(unittest.TestCase):
             ),
         )
 
+    def test_forbidden_hand_contact_is_latched_within_control_step(self):
+        counts = self._array((0, 2, 0), wp.int32)
+        current = self._array((True, False, True), wp.bool)
+        any_frame = self._array((False, False, True), wp.bool)
+
+        wp.launch(
+            env_module._update_forbidden_hand_contact,
+            dim=3,
+            inputs=[counts, current, any_frame],
+            device=self.device,
+        )
+
+        np.testing.assert_array_equal(current.numpy(), (False, True, False))
+        np.testing.assert_array_equal(any_frame.numpy(), (False, True, True))
+
+        mask = self._array((False, True, False), wp.bool)
+        any_hand_count = self._array((4, 5, 6), wp.int32)
+        wp.launch(
+            env_module._clear_hand_contact_safety_rows,
+            dim=3,
+            inputs=[mask, any_hand_count, counts, current, any_frame],
+            device=self.device,
+        )
+        np.testing.assert_array_equal(any_hand_count.numpy(), (4, 0, 6))
+        np.testing.assert_array_equal(counts.numpy(), (0, 0, 0))
+        np.testing.assert_array_equal(current.numpy(), (False, False, False))
+        np.testing.assert_array_equal(any_frame.numpy(), (False, False, True))
+
     def test_effective_action_projection_retains_only_xyz(self):
         import torch
 

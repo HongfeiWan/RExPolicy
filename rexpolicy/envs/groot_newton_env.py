@@ -777,9 +777,11 @@ def _accumulate_any_hand_bottle_contact(
     shape_body: wp.array[wp.int32],
     shape_world: wp.array[wp.int32],
     shape_is_hand: wp.array[wp.int32],
+    shape_finger: wp.array[wp.int32],
     shape_is_bottle: wp.array[wp.int32],
     max_separation: wp.float32,
     hand_contact_count: wp.array[wp.int32],
+    forbidden_contact_count: wp.array[wp.int32],
 ):
     contact = wp.tid()
     if contact >= contact_count[0]:
@@ -811,6 +813,37 @@ def _accumulate_any_hand_bottle_contact(
     separation = wp.dot(contact_normal[contact], point1 - point0) - contact_margin0[contact] - contact_margin1[contact]
     if separation <= max_separation:
         wp.atomic_add(hand_contact_count, world, 1)
+        if shape_finger[hand_shape] < 0:
+            wp.atomic_add(forbidden_contact_count, world, 1)
+
+
+@wp.kernel(enable_backward=False)
+def _update_forbidden_hand_contact(
+    forbidden_contact_count: wp.array[wp.int32],
+    forbidden_contact: wp.array[wp.bool],
+    forbidden_contact_any_frame: wp.array[wp.bool],
+):
+    world = wp.tid()
+    current = forbidden_contact_count[world] > 0
+    forbidden_contact[world] = current
+    if current:
+        forbidden_contact_any_frame[world] = True
+
+
+@wp.kernel(enable_backward=False)
+def _clear_hand_contact_safety_rows(
+    world_mask: wp.array[wp.bool],
+    any_hand_contact_count: wp.array[wp.int32],
+    forbidden_contact_count: wp.array[wp.int32],
+    forbidden_contact: wp.array[wp.bool],
+    forbidden_contact_any_frame: wp.array[wp.bool],
+):
+    world = wp.tid()
+    if not world_mask or world_mask[world]:
+        any_hand_contact_count[world] = 0
+        forbidden_contact_count[world] = 0
+        forbidden_contact[world] = False
+        forbidden_contact_any_frame[world] = False
 
 
 @wp.kernel(enable_backward=False)
@@ -2542,6 +2575,15 @@ class GrootNewtonEnv:
         self._reach_max_bottle_displacement = wp.zeros(self.num_envs, dtype=wp.float32, device=self.device)
         self._reach_success_hold_count = wp.zeros(self.num_envs, dtype=wp.int32, device=self.device)
         self._reach_hand_contact_count = wp.zeros(self.num_envs, dtype=wp.int32, device=self.device)
+        self._forbidden_hand_contact_count = wp.zeros(
+            self.num_envs, dtype=wp.int32, device=self.device
+        )
+        self._forbidden_hand_contact = wp.zeros(
+            self.num_envs, dtype=wp.bool, device=self.device
+        )
+        self._forbidden_hand_contact_any_frame_this_control_step = wp.zeros(
+            self.num_envs, dtype=wp.bool, device=self.device
+        )
         self._reach_has_hand_contact = wp.zeros(self.num_envs, dtype=wp.bool, device=self.device)
         self._reach_contact_violation = wp.zeros(self.num_envs, dtype=wp.bool, device=self.device)
         self._reach_displacement_violation = wp.zeros(self.num_envs, dtype=wp.bool, device=self.device)
@@ -3097,12 +3139,33 @@ class GrootNewtonEnv:
             inputs=[world_mask, self._finger_contacts],
             device=self.device,
         )
+        wp.launch(
+            _clear_hand_contact_safety_rows,
+            dim=self.num_envs,
+            inputs=[
+                world_mask,
+                self._reach_hand_contact_count,
+                self._forbidden_hand_contact_count,
+                self._forbidden_hand_contact,
+                self._forbidden_hand_contact_any_frame_this_control_step,
+            ],
+            device=self.device,
+        )
 
     def _clear_control_step_diagnostics(self, world_mask: wp.array | None) -> None:
         wp.launch(
             _clear_control_step_contact,
             dim=self.num_envs,
             inputs=[world_mask, self._had_hand_contact_this_control_step],
+            device=self.device,
+        )
+        wp.launch(
+            _clear_control_step_contact,
+            dim=self.num_envs,
+            inputs=[
+                world_mask,
+                self._forbidden_hand_contact_any_frame_this_control_step,
+            ],
             device=self.device,
         )
         wp.launch(
@@ -3215,9 +3278,8 @@ class GrootNewtonEnv:
             ],
             device=self.device,
         )
-        if self.task_mode != _TASK_MODE_REACH_GREEN_CAP:
-            return
         self._reach_hand_contact_count.zero_()
+        self._forbidden_hand_contact_count.zero_()
         wp.launch(
             _accumulate_any_hand_bottle_contact,
             dim=self.contacts.rigid_contact_max,
@@ -3234,9 +3296,21 @@ class GrootNewtonEnv:
                 self.model.shape_body,
                 self._shape_world,
                 self._shape_is_hand,
+                self._shape_finger,
                 self._shape_is_bottle,
                 self.config.contact_max_separation,
                 self._reach_hand_contact_count,
+                self._forbidden_hand_contact_count,
+            ],
+            device=self.device,
+        )
+        wp.launch(
+            _update_forbidden_hand_contact,
+            dim=self.num_envs,
+            inputs=[
+                self._forbidden_hand_contact_count,
+                self._forbidden_hand_contact,
+                self._forbidden_hand_contact_any_frame_this_control_step,
             ],
             device=self.device,
         )
@@ -3617,6 +3691,11 @@ class GrootNewtonEnv:
             "opposed_grasp_max_consecutive_physics_frames_this_control_step": (
                 self._opposed_grasp_max_consecutive_frames_this_control_step
             ),
+            "forbidden_hand_contact": self._forbidden_hand_contact,
+            "forbidden_hand_contact_count": self._forbidden_hand_contact_count,
+            "forbidden_hand_contact_any_frame_this_control_step": (
+                self._forbidden_hand_contact_any_frame_this_control_step
+            ),
             "finger_surface_gap": self._finger_surface_gap,
             "thumb_partner_opposition": self._thumb_partner_opposition,
             "thumb_partner_z_score": self._thumb_partner_z_score,
@@ -3844,6 +3923,16 @@ class GrootNewtonEnv:
                 "reach_displacement_violation": self._reach_displacement_violation,
             },
         }
+        if self.task_mode == _TASK_MODE_GRASP_LIFT_GREEN_BOTTLE:
+            fingerprint["contacts"].update(
+                {
+                    "forbidden_hand_contact_count": self._forbidden_hand_contact_count,
+                    "forbidden_hand_contact": self._forbidden_hand_contact,
+                    "forbidden_hand_contact_any_frame_this_control_step": (
+                        self._forbidden_hand_contact_any_frame_this_control_step
+                    ),
+                }
+            )
         if include_images:
             images = {}
             if self._ego_rgb is not None:
