@@ -2,6 +2,58 @@
 
 Status: **engineering loop implemented; scientific manifold gate not yet passed**.
 
+## Node1 Grasp-Lift authoring snapshot — 2026-08-06
+
+The reward-free Grasp-Lift authoring gate passed on node1 CUDA0 at Git commit
+`50496ad8caff07cdb91d888199f53c60679daaec`. This is a verified data-authoring
+result, not a learned-policy convergence claim:
+
+- the only intervention selected from train evidence was
+  `minimum_tentative_close_step: 4 -> 7`; every other authoring-mode field
+  remained fixed;
+- the committed corpus contains 32/32 oracle successes, zero failures, zero
+  timeouts, zero safety violations, and zero collision-buffer overflows;
+- the formal denominator is 30 trajectories: train is 24/24, and the six
+  previously unseen validation seeds are 6/6; all 15 baseline train successes
+  were retained, all nine baseline train timeouts converted, all four eligible
+  baseline validation successes were retained, and both eligible validation
+  timeouts converted;
+- validation seeds 7001 and 7005 were exposed by two engineering smokes before
+  the formal claim existed. They remain in their original validation split but
+  are permanently `formal_gate_eligible=false`, are recorded in the hash-bound
+  exposure ledger, and contribute only diagnostics;
+- an exclusive validation claim was consumed before Newton startup within the
+  node1 Git common-dir scope. Locked test data remains uncreated and
+  unconsumed;
+- all trajectories formed a tentative and frozen grasp at close step 7, kept
+  opposed contact through termination, and stored actions exactly matched the
+  projected/executed 19D actions;
+- final lift was 0.0348--0.0408 m, maximum final lateral displacement was
+  0.0124 m, and maximum final bottle tilt was 0.1105 rad, all inside the fixed
+  independent oracle limits;
+- 192 focused Stage 0 tests passed from the clean node1 worktree before the
+  formal run, and an independent post-publication strict reload passed.
+
+The committed artifact is retained at
+`/home/user/project/RExPolicy-grasp-lift-close7/outputs/stage0/grasp-lift-pilot-close7-20260806-b`.
+Its manifest SHA-256 is
+`7afd7bc74dc223b6101d3add4b4aac1b47959b547b6a983c906cebe09b136cf3`,
+and its composite corpus SHA-256 is
+`16d438d79e2fb37505e2f2b070842095d025b4ce338c1f472765d10872701620`.
+
+The next gate is learning from this corpus: fit normalization and construct
+windows from the 24 train trajectories only, train checkpoints without any
+validation feedback, select once on the six eligible validation trajectories,
+and keep the two engineering-smoke exclusions out of both training and model
+selection. No locked test may be created until that protocol and a genuinely
+new held-out cohort are pre-registered.
+
+The pilot intentionally ran state-only with scene visuals and camera textures
+disabled. The missing full `scene.glb` therefore does not weaken its mechanics
+or oracle evidence, but a real scene asset is still required before any visual
+rollout can be presented as camera-valid evidence; a synthetic background must
+not be substituted.
+
 ## Node1 validation snapshot — 2026-08-05
 
 The first independent Reach loop is now implemented under `rexpolicy/stage0/`
