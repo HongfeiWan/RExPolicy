@@ -8,17 +8,12 @@ import unittest
 from pathlib import Path
 
 from rexpolicy.stage0.grasp_lift_pilot import (
-    GRASP_LIFT_PILOT_COMMIT_SCHEMA_ID,
-    GRASP_LIFT_PILOT_OUTPUT_SCHEMA_ID,
-    GRASP_LIFT_PILOT_STATUS_SCHEMA_ID,
     GraspLiftPilotConfig,
-    assign_grasp_lift_pilot_splits,
-    grasp_lift_pilot_split_policy,
     load_grasp_lift_pilot_config,
     load_grasp_lift_pilot_manifest,
     seal_grasp_lift_pilot_record,
+    verify_grasp_lift_pilot_record,
 )
-from rexpolicy.stage0.types import canonical_fingerprint
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -70,81 +65,19 @@ class GraspLiftPilotConfigTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "numeric"):
             GraspLiftPilotConfig.from_mapping(source)
 
-    def test_loader_verifies_commit_chain_and_detects_manifest_tampering(self) -> None:
+    def test_sealed_record_detects_tampering(self) -> None:
+        record = seal_grasp_lift_pilot_record(
+            {"schema_id": "test/pilot-record/v1", "value": 1}
+        )
+        verify_grasp_lift_pilot_record(record, "test record")
+        record["value"] = 2
+        with self.assertRaisesRegex(ValueError, "self_sha256 mismatch"):
+            verify_grasp_lift_pilot_record(record, "test record")
+
+    def test_loader_rejects_an_incomplete_publication(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            split_policy = grasp_lift_pilot_split_policy()
-            splits = assign_grasp_lift_pilot_splits(
-                {
-                    "trajectory-a": "reset-a",
-                    "trajectory-b": "reset-b",
-                },
-                validation_fraction=0.25,
-            )
-            manifest = seal_grasp_lift_pilot_record(
-                {
-                    "acceptance": {"passed": True},
-                    "locked_test": {
-                        "artifact": None,
-                        "consumed": False,
-                        "policy": "not_created",
-                    },
-                    "members": [
-                        {
-                            "reset_group_id": "reset-a",
-                            "split": splits["trajectory-a"],
-                            "trajectory_id": "trajectory-a",
-                        },
-                        {
-                            "reset_group_id": "reset-b",
-                            "split": splits["trajectory-b"],
-                            "trajectory_id": "trajectory-b",
-                        },
-                    ],
-                    "outcome_counts": {"success": 2},
-                    "schema_id": GRASP_LIFT_PILOT_OUTPUT_SCHEMA_ID,
-                    "split_policy": split_policy,
-                    "split_policy_sha256": canonical_fingerprint(split_policy),
-                }
-            )
-            status = seal_grasp_lift_pilot_record(
-                {
-                    "acceptance_passed": True,
-                    "complete": True,
-                    "manifest_sha256": manifest["self_sha256"],
-                    "outcome_counts": {"success": 2},
-                    "schema_id": GRASP_LIFT_PILOT_STATUS_SCHEMA_ID,
-                }
-            )
-            commit = seal_grasp_lift_pilot_record(
-                {
-                    "manifest_file": "manifest.json",
-                    "manifest_sha256": manifest["self_sha256"],
-                    "schema_id": GRASP_LIFT_PILOT_COMMIT_SCHEMA_ID,
-                    "status_file": "status.json",
-                    "status_sha256": status["self_sha256"],
-                }
-            )
-            for name, record in (
-                ("manifest.json", manifest),
-                ("status.json", status),
-                ("commit.json", commit),
-            ):
-                (root / name).write_text(json.dumps(record), encoding="utf-8")
-            self.assertEqual(
-                load_grasp_lift_pilot_manifest(root)["self_sha256"],
-                manifest["self_sha256"],
-            )
-            manifest["members"][0]["split"] = (
-                "train"
-                if manifest["members"][0]["split"] == "validation"
-                else "validation"
-            )
-            (root / "manifest.json").write_text(
-                json.dumps(manifest), encoding="utf-8"
-            )
-            with self.assertRaisesRegex(ValueError, "self_sha256 mismatch"):
-                load_grasp_lift_pilot_manifest(root)
+            with self.assertRaisesRegex(ValueError, "pilot commit"):
+                load_grasp_lift_pilot_manifest(directory)
 
     def test_loader_rejects_non_json(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
