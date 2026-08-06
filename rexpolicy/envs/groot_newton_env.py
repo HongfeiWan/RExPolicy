@@ -29,6 +29,7 @@ from rexpolicy.retargeting.hand_config import (
     LINKER_L10_FINGERTIP_LOCAL_OFFSETS_M,
     load_linker_l10_right_hand_spec,
 )
+from rexpolicy.scene_asset import validate_scene_glb
 
 ARM_JOINT_NAMES = tuple(f"right_joint{index}" for index in range(1, 8))
 HAND_JOINT_NAMES = (
@@ -259,6 +260,7 @@ class GrootNewtonEnvConfig:
     render_images: bool = True
     camera_textures: bool = True
     load_scene_visuals: bool = True
+    scene_glb_path: str | None = None
     hydroelastic_contacts: bool = True
     request_finger_root_load: bool = False
     finger_root_load_bias: tuple[float, ...] = (0.0, 0.0, 0.0, 0.0, 0.0)
@@ -365,6 +367,10 @@ class GrootNewtonEnvConfig:
             raise ValueError("capture_graph requires an even substeps_per_frame so state buffers do not alias")
         if min(self.ego_width, self.ego_height, self.wrist_width, self.wrist_height) < 1:
             raise ValueError("camera dimensions must be positive")
+        if self.scene_glb_path is not None and (
+            not isinstance(self.scene_glb_path, str) or not self.scene_glb_path.strip()
+        ):
+            raise ValueError("scene_glb_path must be a non-empty string when provided")
         if self.render_images and self.obs_mode in _IMAGE_OBS_MODES:
             for camera_name, width, height in (
                 ("ego_view", self.ego_width, self.ego_height),
@@ -1860,7 +1866,14 @@ class GrootNewtonEnv:
         args.quest_teleop = False
         args.d455_preview = False
         args.d405_preview = False
-        if not self._render_images or not self.config.load_scene_visuals:
+        self._scene_glb_path = None
+        if self._render_images and self.config.load_scene_visuals:
+            requested_scene = (
+                self.config.scene_glb_path or scene_runtime.DEFAULT_SCENE_GLB
+            )
+            self._scene_glb_path = validate_scene_glb(requested_scene)
+            args.scene_glb = self._scene_glb_path
+        else:
             args.scene_glb = scene_runtime.REPO_ROOT / "__headless_visuals_disabled__.glb"
         if not self._render_images:
             args.d405_body_visual = False
@@ -3789,6 +3802,9 @@ class GrootNewtonEnv:
             "render_images_enabled": bool(self._render_images),
             "camera_textures_enabled": bool(self.config.camera_textures),
             "scene_visuals_enabled": bool(self.config.load_scene_visuals),
+            "scene_glb_path": (
+                str(self._scene_glb_path) if self._scene_glb_path is not None else None
+            ),
             "camera_dimensions": {
                 "ego_view": {
                     "width": self.config.ego_width,
