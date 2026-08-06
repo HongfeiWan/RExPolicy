@@ -1,0 +1,48 @@
+{
+  "data": {
+    "expected_train_trajectories": 24,
+    "expected_train_windows": 1030,
+    "sampler_id": "rexpolicy/global-no-replacement-cross-epoch-step-indexed/v1"
+  },
+  "model": {
+    "action_dim": 19,
+    "action_horizon": 8,
+    "attention_heads": 4,
+    "dropout": 0.0,
+    "feedforward_dim": 256,
+    "latent_dim": 32,
+    "model_dim": 128,
+    "state_dim": 79,
+    "transformer_layers": 3
+  },
+  "optimization": {
+    "checkpoint_every_steps": 500,
+    "cuda_fused_adamw": true,
+    "global_batch_size": 2048,
+    "gradient_clip_norm": 1.0,
+    "learning_rate": 0.0003,
+    "log_every_steps": 50,
+    "total_steps": 10000,
+    "weight_decay": 0.0001
+  },
+  "runtime": {
+    "allow_tf32": false,
+    "cpu_threads": 16,
+    "cublas_workspace_config": ":4096:8",
+    "cudnn_benchmark": false,
+    "deterministic_algorithms": true,
+    "dtype": "float32",
+    "interop_threads": 4,
+    "nvidia_tf32_override": "0",
+    "require_cuda": true,
+    "torch_compile": false,
+    "torch_allow_tf32_cublas_override": "0"
+  },
+  "schema_id": "rexpolicy/stage0-grasp-lift-no-z-config/v1",
+  "schema_version": 1,
+  "training_seeds": [
+    31001,
+    31002,
+    31003
+  ]
+}
