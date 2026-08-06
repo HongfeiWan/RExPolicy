@@ -39,8 +39,8 @@ from rexpolicy.stage0.envs.grasp_lift_state_view import (
 from rexpolicy.stage0.envs.state_schema import DEFAULT_STAGE0_STATE_SCHEMA
 
 
-GRASP_LIFT_EVIDENCE_SCHEMA_VERSION = 1
-GRASP_LIFT_EVIDENCE_SCHEMA_ID = "rexpolicy/stage0-grasp-lift-evidence/v1"
+GRASP_LIFT_EVIDENCE_SCHEMA_VERSION = 2
+GRASP_LIFT_EVIDENCE_SCHEMA_ID = "rexpolicy/stage0-grasp-lift-evidence/v2"
 GRASP_LIFT_EVIDENCE_DESCRIPTOR_SCHEMA_VERSION = 1
 GRASP_LIFT_EVIDENCE_DESCRIPTOR_SCHEMA_ID = (
     "rexpolicy/stage0-grasp-lift-evidence-shard/v1"
@@ -105,7 +105,7 @@ GRASP_LIFT_EVIDENCE_TENSOR_SPECS: Mapping[str, _TensorSpec] = MappingProxyType(
         "authoring_success_hold_control_steps": _TensorSpec("int64"),
         "opposed_grasp_max_consecutive_physics_frames": _TensorSpec("int64"),
         "finger_contact_counts": _TensorSpec("int64", 5),
-        "hand_contact_count": _TensorSpec("int64"),
+        "touching_finger_count": _TensorSpec("int64"),
         "forbidden_hand_contact_count": _TensorSpec("int64"),
         "oracle_success_hold_steps": _TensorSpec("int64"),
         "oracle_drop_gap_steps": _TensorSpec("int64"),

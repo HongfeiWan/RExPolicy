@@ -111,6 +111,10 @@ def _evidence(trajectory: Stage0Trajectory) -> GraspLiftEvidence:
 
 
 class GraspLiftEvidenceTests(unittest.TestCase):
+    def test_contact_count_names_match_their_physical_meaning(self) -> None:
+        self.assertIn("touching_finger_count", GRASP_LIFT_EVIDENCE_TENSOR_SPECS)
+        self.assertNotIn("hand_contact_count", GRASP_LIFT_EVIDENCE_TENSOR_SPECS)
+
     def test_round_trip_is_semantic_and_immutable(self) -> None:
         trajectory = _trajectory()
         source = _evidence(trajectory)
