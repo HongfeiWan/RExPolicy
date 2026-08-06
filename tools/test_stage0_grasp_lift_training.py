@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import unittest
 from dataclasses import fields
+from pathlib import Path
 from unittest.mock import patch
 
 import torch
@@ -30,8 +31,10 @@ from rexpolicy.stage0.data.grasp_lift_training import (
     GraspLiftTrainingCorpus,
     GraspLiftTrainingData,
     GraspLiftTrainingMember,
+    build_grasp_lift_training_data,
     fit_grasp_lift_train_normalization,
     grasp_lift_training_role,
+    load_grasp_lift_training_corpus,
     materialize_grasp_lift_model_trajectory,
 )
 from rexpolicy.stage0.data.trajectory import (
@@ -436,6 +439,112 @@ class GraspLiftTrainingTests(unittest.TestCase):
         self.assertFalse(bool(windows[0].future_actions[42:].count_nonzero()))
         self.assertEqual(int(windows[-1].future_mask.sum()), 1)
         self.assertEqual(int(windows[-1].action_mask.sum()), 1)
+
+    def test_train_hashes_bind_exact_window_content(self) -> None:
+        data = build_grasp_lift_training_data(_consistent_synthetic_corpus())
+        self.assertEqual(len(data.window_splits.train), 72)
+        self.assertFalse(data.window_splits.validation)
+        self.assertFalse(data.window_splits.test)
+        window_sha256 = data.train_window_content_sha256
+        train_sha256 = data.train_content_sha256
+        dataset_sha256 = data.dataset_sha256
+
+        padded_value = data.window_splits.train[0].future_actions[-1, 0]
+        self.assertEqual(float(padded_value), 0.0)
+        padded_value.add_(1.0)
+
+        self.assertNotEqual(data.train_window_content_sha256, window_sha256)
+        self.assertNotEqual(data.train_content_sha256, train_sha256)
+        self.assertNotEqual(data.dataset_sha256, dataset_sha256)
+
+    def test_training_loader_never_opens_held_out_shards(self) -> None:
+        source = _consistent_synthetic_corpus()
+
+        def record(commitment: GraspLiftRoleCommitment) -> dict[str, object]:
+            if commitment.role == GRASP_LIFT_TRAINING_ROLE:
+                split = "train"
+                eligible = True
+            elif commitment.role == GRASP_LIFT_VALIDATION_ROLE:
+                split = "validation"
+                eligible = True
+            else:
+                split = "validation"
+                eligible = False
+            return {
+                "evidence_descriptor": (
+                    f"shards/{commitment.trajectory_id}.grasp-lift-evidence.json"
+                ),
+                "evidence_sha256": commitment.evidence_sha256,
+                "formal_gate_eligible": eligible,
+                "reset_seed": commitment.reset_seed,
+                "split": split,
+                "trajectory_descriptor": (
+                    f"shards/{commitment.trajectory_id}.stage0.json"
+                ),
+                "trajectory_id": commitment.trajectory_id,
+                "trajectory_sha256": commitment.raw_trajectory_sha256,
+            }
+
+        commitments = (
+            tuple(member.commitment for member in source.train)
+            + source.validation_commitments
+            + source.excluded_commitments
+        )
+        manifest = {
+            "acceptance": {"passed": True},
+            "composite_corpus_sha256": source.source_composite_corpus_sha256,
+            "locked_test": {
+                "artifact": None,
+                "consumed": False,
+                "policy": "not_created",
+            },
+            "members": [record(item) for item in commitments],
+            "self_sha256": GRASP_LIFT_ACCEPTED_PILOT_MANIFEST_SHA256,
+        }
+        module = "rexpolicy.stage0.data.grasp_lift_training"
+        train_trajectories = [item.trajectory for item in source.train]
+        train_evidence = [item.evidence for item in source.train]
+        with (
+            patch(
+                f"{module}.GRASP_LIFT_ACCEPTED_PILOT_CORPUS_SHA256",
+                source.source_composite_corpus_sha256,
+            ),
+            patch(
+                f"{module}._load_accepted_pilot_registry",
+                return_value=(Path("/unread-synthetic-pilot"), manifest),
+            ),
+            patch(
+                f"{module}._strict_train_shard_path",
+                side_effect=lambda _root, relative, **_kwargs: Path(relative),
+            ) as strict_path,
+            patch(
+                f"{module}.load_trajectory_shard",
+                side_effect=train_trajectories,
+            ) as load_trajectory,
+            patch(
+                f"{module}.load_grasp_lift_evidence_sidecar",
+                side_effect=train_evidence,
+            ) as load_evidence,
+        ):
+            loaded = load_grasp_lift_training_corpus("unused")
+
+        self.assertEqual(len(loaded.train), 24)
+        self.assertEqual(load_trajectory.call_count, 24)
+        self.assertEqual(load_evidence.call_count, 24)
+        self.assertEqual(strict_path.call_count, 48)
+        opened_ids = {
+            call.kwargs["trajectory_id"] for call in strict_path.call_args_list
+        }
+        self.assertEqual(opened_ids, {item.trajectory_id for item in source.train})
+        self.assertTrue(
+            opened_ids.isdisjoint(
+                {
+                    item.trajectory_id
+                    for item in source.validation_commitments
+                    + source.excluded_commitments
+                }
+            )
+        )
 
 
 if __name__ == "__main__":
