@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Sequence
 
@@ -9,6 +10,17 @@ import torch
 from torch import nn
 
 from .config import SuccessManifoldConfig
+
+
+def _temperature(value: float) -> float:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+        or float(value) <= 0.0
+    ):
+        raise ValueError("temperature must be finite and positive")
+    return float(value)
 
 
 @dataclass(frozen=True)
@@ -24,11 +36,13 @@ class DiagonalGaussian:
         self,
         sample_shape: Sequence[int] = (),
         *,
+        temperature: float = 1.0,
         generator: torch.Generator | None = None,
     ) -> torch.Tensor:
         shape = tuple(sample_shape)
         if any(type(item) is not int or item < 0 for item in shape):
             raise ValueError("sample_shape must contain non-negative integers")
+        temperature = _temperature(temperature)
         noise = torch.randn(
             (*shape, *self.mean.shape),
             generator=generator,
@@ -37,15 +51,23 @@ class DiagonalGaussian:
         )
         mean = self.mean.reshape((1,) * len(shape) + tuple(self.mean.shape))
         std = self.std.reshape((1,) * len(shape) + tuple(self.std.shape))
+        # Preserve the exact v2 arithmetic path at T=1, including RNG use.
+        if temperature != 1.0:
+            std = std * math.sqrt(temperature)
         return mean + noise * std
 
     def sample(
         self,
         sample_shape: Sequence[int] = (),
         *,
+        temperature: float = 1.0,
         generator: torch.Generator | None = None,
     ) -> torch.Tensor:
-        return self.rsample(sample_shape, generator=generator).detach()
+        return self.rsample(
+            sample_shape,
+            temperature=temperature,
+            generator=generator,
+        ).detach()
 
     @property
     def mode(self) -> torch.Tensor:
@@ -111,9 +133,11 @@ class SuccessModeSelector(nn.Module):
         *,
         sample_shape: Sequence[int] = (),
         deterministic: bool = False,
+        temperature: float = 1.0,
         generator: torch.Generator | None = None,
     ) -> torch.Tensor:
         distribution = self.distribution(current_state)
+        temperature = _temperature(temperature)
         if deterministic:
             if sample_shape:
                 shape = tuple(sample_shape)
@@ -123,4 +147,8 @@ class SuccessModeSelector(nn.Module):
                     )
                 return distribution.mean.expand(*shape, *distribution.mean.shape)
             return distribution.mean
-        return distribution.sample(sample_shape, generator=generator)
+        return distribution.sample(
+            sample_shape,
+            temperature=temperature,
+            generator=generator,
+        )

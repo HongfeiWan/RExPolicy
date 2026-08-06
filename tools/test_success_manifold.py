@@ -296,13 +296,33 @@ class SuccessModeSelectorTest(unittest.TestCase):
         generator_a = torch.Generator().manual_seed(17)
         generator_b = torch.Generator().manual_seed(17)
         first = selector.sample(states, generator=generator_a)
-        second = selector.sample(states, generator=generator_b)
+        second = selector.sample(
+            states,
+            temperature=1.0,
+            generator=generator_b,
+        )
         torch.testing.assert_close(first, second)
         self.assertFalse(first.requires_grad)
         self.assertEqual(
             tuple(selector.sample(states, sample_shape=(2,)).shape),
             (2, 3, config.latent_dim),
         )
+        hot = selector.sample(
+            states,
+            temperature=4.0,
+            generator=torch.Generator().manual_seed(17),
+        )
+        torch.testing.assert_close(
+            hot - distribution.mean,
+            2.0 * (first - distribution.mean),
+        )
+        torch.testing.assert_close(
+            selector.sample(states, deterministic=True, temperature=4.0),
+            distribution.mean,
+        )
+        for temperature in (0.0, float("nan"), True):
+            with self.assertRaisesRegex(ValueError, "temperature"):
+                selector.sample(states, temperature=temperature)
 
         restored = SuccessModeSelector(config)
         restored.load_state_dict(selector.state_dict())

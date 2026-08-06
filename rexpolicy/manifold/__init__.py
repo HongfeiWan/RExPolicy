@@ -13,12 +13,30 @@ from .config import (
     SUCCESS_MANIFOLD_CONFIG_SCHEMA_VERSION,
     SuccessManifoldConfig,
 )
+from .exploration import (
+    EXPLORATION_POLICY_SCHEMA_VERSION,
+    ExplorationPolicy,
+    ExplorationSchedulePoint,
+    ExplorationScore,
+    normalize_occupancy_novelty,
+    score_shadow_exploration,
+)
 from .memory import (
     LATENT_MEMORY_SCHEMA_VERSION,
     LatentAdmission,
     LatentMemory,
     LatentMemoryEntry,
     LatentNeighbor,
+)
+from .occupancy import (
+    SUCCESS_OCCUPANCY_CONFIG_SCHEMA_VERSION,
+    SUCCESS_OCCUPANCY_STATE_SCHEMA_VERSION,
+    OccupancyMetrics,
+    OccupancyQuery,
+    OccupancySuccessRecord,
+    OccupancyUpdate,
+    SuccessOccupancyConfig,
+    SuccessOccupancyIndex,
 )
 
 
@@ -34,6 +52,14 @@ _NEURAL_EXPORTS = {
     ),
     "SelfSupervisedLosses": ("losses", "SelfSupervisedLosses"),
     "SelectorLosses": ("losses", "SelectorLosses"),
+    "SuccessorLosses": ("successor", "SuccessorLosses"),
+    "SuccessorModel": ("successor", "SuccessorModel"),
+    "SuccessorTrainingConfig": ("successor", "SuccessorTrainingConfig"),
+    "SuccessorDdpTrainer": ("successor_trainer", "SuccessorDdpTrainer"),
+    "SuccessorUpdateMetrics": (
+        "successor_trainer",
+        "SuccessorUpdateMetrics",
+    ),
     "ManifoldUpdateMetrics": ("trainer", "ManifoldUpdateMetrics"),
     "SuccessManifoldDdpTrainer": (
         "trainer",
@@ -48,6 +74,7 @@ _NEURAL_EXPORTS = {
     ),
     "success_manifold_losses": ("losses", "success_manifold_losses"),
     "success_selector_losses": ("losses", "success_selector_losses"),
+    "successor_losses": ("successor", "successor_losses"),
     "variance_covariance_diversity_loss": (
         "losses",
         "variance_covariance_diversity_loss",
@@ -70,8 +97,14 @@ def __getattr__(name: str) -> Any:
 __all__ = [
     "LATENT_MEMORY_SCHEMA_VERSION",
     "SUCCESS_MANIFOLD_CONFIG_SCHEMA_VERSION",
+    "SUCCESS_OCCUPANCY_CONFIG_SCHEMA_VERSION",
+    "SUCCESS_OCCUPANCY_STATE_SCHEMA_VERSION",
     "DiagonalGaussian",
     "DiversityLosses",
+    "EXPLORATION_POLICY_SCHEMA_VERSION",
+    "ExplorationPolicy",
+    "ExplorationSchedulePoint",
+    "ExplorationScore",
     "FutureTrajectoryDecoder",
     "FutureTrajectoryEncoder",
     "FutureTrajectoryOutput",
@@ -81,15 +114,29 @@ __all__ = [
     "LatentMemoryEntry",
     "LatentNeighbor",
     "ManifoldUpdateMetrics",
+    "OccupancyMetrics",
+    "OccupancyQuery",
+    "OccupancySuccessRecord",
+    "OccupancyUpdate",
     "SelfSupervisedLosses",
     "SelectorLosses",
     "SuccessManifoldConfig",
     "SuccessManifoldDdpTrainer",
     "SuccessModeSelector",
+    "SuccessOccupancyConfig",
+    "SuccessOccupancyIndex",
+    "SuccessorLosses",
+    "SuccessorModel",
+    "SuccessorTrainingConfig",
+    "SuccessorDdpTrainer",
+    "SuccessorUpdateMetrics",
     "all_gather_tensor",
     "masked_reconstruction_loss",
     "multi_positive_info_nce_loss",
+    "normalize_occupancy_novelty",
     "success_manifold_losses",
     "success_selector_losses",
+    "score_shadow_exploration",
+    "successor_losses",
     "variance_covariance_diversity_loss",
 ]
