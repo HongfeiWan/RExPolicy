@@ -8,6 +8,7 @@ import torch
 
 from rexpolicy.stage0.envs.grasp_lift_modes import (
     DEFAULT_GRASP_LIFT_AUTHORING_MODE,
+    GRASP_LIFT_AUTHORING_MODE_CLOSE4,
     GraspLiftAuthoringController,
     GraspLiftAuthoringModeSpec,
     GraspLiftAuthoringPhase,
@@ -153,6 +154,16 @@ class GraspLiftAuthoringModesTest(unittest.TestCase):
         mode = DEFAULT_GRASP_LIFT_AUTHORING_MODE
         self.assertEqual(mode.pregrasp_offset_base_m, (-0.03, 0.19, 0.07))
         self.assertEqual(mode.close_fraction, 0.65)
+        self.assertEqual(mode.minimum_tentative_close_step, 7)
+        self.assertEqual(
+            mode.mode_id,
+            "stage0/grasp_lift/thumb_index_side_close7/v1",
+        )
+        self.assertEqual(
+            GRASP_LIFT_AUTHORING_MODE_CLOSE4.minimum_tentative_close_step,
+            4,
+        )
+        self.assertNotEqual(mode.sha256, GRASP_LIFT_AUTHORING_MODE_CLOSE4.sha256)
         self.assertEqual(len(mode.sha256), 64)
         self.assertEqual(mode.sha256, GraspLiftAuthoringModeSpec().sha256)
         self.assertEqual(len(mode.to_record()["action_schema_sha256"]), 64)
@@ -170,6 +181,32 @@ class GraspLiftAuthoringModesTest(unittest.TestCase):
 
         expected = torch.tensor((0.37, 0.19, 0.17))
         self.assertTrue(torch.allclose(proposal[0, :3], expected))
+
+    def test_close7_cannot_capture_a_step6_grasp(self) -> None:
+        state = _states()
+        controller = GraspLiftAuthoringController(
+            _fast_spec(
+                close_schedule_control_steps=8,
+                minimum_tentative_close_step=7,
+                maximum_close_control_steps=10,
+            )
+        )
+        controller.reset(state, _reference(state))
+        approach = controller.propose(state)
+        _observe(controller, state, approach)
+
+        for _ in range(6):
+            close = controller.propose(state)
+            _observe(controller, state, close, opposed=True, streak=6)
+            self.assertFalse(
+                controller.snapshot().has_tentative_target.item()
+            )
+
+        close7 = controller.propose(state)
+        _observe(controller, state, close7, opposed=True, streak=6)
+        snapshot = controller.snapshot()
+        self.assertTrue(snapshot.has_tentative_target.item())
+        self.assertEqual(snapshot.close_control_steps.item(), 7)
 
     def test_freezes_executed_target_only_after_same_target_verification(self) -> None:
         state = _states()

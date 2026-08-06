@@ -99,12 +99,12 @@ def _check_batched_tensor(
 class GraspLiftAuthoringModeSpec:
     """One immutable, calibrated scripted Grasp-Lift mode."""
 
-    mode_id: str = "stage0/grasp_lift/thumb_index_side/v1"
+    mode_id: str = "stage0/grasp_lift/thumb_index_side_close7/v1"
     pregrasp_offset_base_m: tuple[float, float, float] = (-0.03, 0.19, 0.07)
     close_fraction: float = 0.65
     approach_control_steps: int = 20
     close_schedule_control_steps: int = 16
-    minimum_tentative_close_step: int = 4
+    minimum_tentative_close_step: int = 7
     maximum_close_control_steps: int = 24
     thumb_lead_gain: float = 1.7
     non_thumb_delay_fraction: float = 0.20
@@ -206,6 +206,10 @@ class GraspLiftAuthoringModeSpec:
         return canonical_fingerprint(self.to_record())
 
 
+GRASP_LIFT_AUTHORING_MODE_CLOSE4 = GraspLiftAuthoringModeSpec(
+    mode_id="stage0/grasp_lift/thumb_index_side/v1",
+    minimum_tentative_close_step=4,
+)
 DEFAULT_GRASP_LIFT_AUTHORING_MODE = GraspLiftAuthoringModeSpec()
 
 
@@ -725,6 +729,7 @@ class GraspLiftAuthoringController:
 
 __all__ = [
     "DEFAULT_GRASP_LIFT_AUTHORING_MODE",
+    "GRASP_LIFT_AUTHORING_MODE_CLOSE4",
     "GRASP_LIFT_ACTION_CONTRACT_ID",
     "GRASP_LIFT_AUTHORING_CONTROLLER_ID",
     "GraspLiftAuthoringController",
