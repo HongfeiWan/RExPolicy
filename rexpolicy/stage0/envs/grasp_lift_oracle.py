@@ -14,6 +14,9 @@ from rexpolicy.stage0.envs.state_schema import (
 )
 
 
+GRASP_LIFT_ORACLE_ID = "rexpolicy/stage0-grasp-lift-oracle/v1"
+
+
 def _rotation_6d_rows(value: torch.Tensor) -> torch.Tensor:
     """Reconstruct orthonormal row-major rotation matrices from 6D rows."""
 
@@ -403,6 +406,7 @@ class GraspLiftSuccessOracle:
 
 
 __all__ = [
+    "GRASP_LIFT_ORACLE_ID",
     "GraspLiftOracleResult",
     "GraspLiftSuccessOracle",
     "GraspLiftTransientEvents",

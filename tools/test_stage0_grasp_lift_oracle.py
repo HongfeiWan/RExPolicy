@@ -8,6 +8,7 @@ import unittest
 import torch
 
 from rexpolicy.stage0.envs.grasp_lift_oracle import (
+    GRASP_LIFT_ORACLE_ID,
     GraspLiftSuccessOracle,
     GraspLiftTransientEvents,
     grasp_lift_transient_events_from_info,
@@ -47,6 +48,12 @@ def _events(
 
 
 class GraspLiftOracleTest(unittest.TestCase):
+    def test_oracle_has_a_versioned_identity(self) -> None:
+        self.assertEqual(
+            GRASP_LIFT_ORACLE_ID,
+            "rexpolicy/stage0-grasp-lift-oracle/v1",
+        )
+
     def test_requires_confirmed_opposition_lift_and_two_step_hold(self) -> None:
         state = _states(1)
         oracle = GraspLiftSuccessOracle(1)
