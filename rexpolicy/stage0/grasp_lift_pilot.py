@@ -15,9 +15,15 @@ from rexpolicy.stage0.types import canonical_fingerprint
 
 GRASP_LIFT_PILOT_CONFIG_SCHEMA_VERSION = 1
 GRASP_LIFT_PILOT_CONFIG_SCHEMA_ID = "rexpolicy/stage0-grasp-lift-pilot/v1"
-GRASP_LIFT_PILOT_OUTPUT_SCHEMA_ID = "rexpolicy/stage0-grasp-lift-pilot-output/v2"
+GRASP_LIFT_PILOT_OUTPUT_SCHEMA_ID = "rexpolicy/stage0-grasp-lift-pilot-output/v5"
 GRASP_LIFT_PILOT_STATUS_SCHEMA_ID = "rexpolicy/stage0-grasp-lift-pilot-status/v1"
-GRASP_LIFT_PILOT_COMMIT_SCHEMA_ID = "rexpolicy/stage0-grasp-lift-pilot-commit/v2"
+GRASP_LIFT_PILOT_COMMIT_SCHEMA_ID = "rexpolicy/stage0-grasp-lift-pilot-commit/v5"
+GRASP_LIFT_PILOT_VALIDATION_CLAIM_SCHEMA_ID = (
+    "rexpolicy/stage0-grasp-lift-validation-claim/v1"
+)
+GRASP_LIFT_PILOT_FORMAL_CONFIG_SHA256 = (
+    "cdf0ca2c3b11325c804852f464930df1d31a115c6fae8136d4314d4295e6cc8f"
+)
 GRASP_LIFT_PILOT_SPLIT_NAMESPACE = "rexpolicy/grasp-lift-split/20260806-v1"
 GRASP_LIFT_PILOT_VALIDATION_FRACTION = 0.25
 GRASP_LIFT_PILOT_SPLIT_POLICY_ID = (
@@ -40,6 +46,8 @@ _PILOT_MANIFEST_KEYS = {
     "implementation",
     "implementation_sha256",
     "locked_test",
+    "authoring_lineage",
+    "authoring_lineage_sha256",
     "members",
     "outcome_counts",
     "schema_id",
@@ -51,6 +59,8 @@ _PILOT_MANIFEST_KEYS = {
     "split_policy_sha256",
     "state_view",
     "state_view_sha256",
+    "validation_claim",
+    "validation_claim_sha256",
     "visuals",
     "world_steps",
 }
@@ -58,14 +68,49 @@ _PILOT_MEMBER_KEYS = {
     "evidence_descriptor",
     "evidence_sha256",
     "final_authoring_phase",
+    "formal_gate_eligible",
     "outcome",
     "reset_group_id",
     "reset_seed",
+    "safety_violation",
     "split",
     "trajectory_descriptor",
     "trajectory_id",
     "trajectory_sha256",
+    "terminal_transition_from_phase",
 }
+
+_BASELINE_TRAIN_SUCCESS_SEEDS = (
+    7003,
+    7004,
+    7007,
+    7008,
+    7010,
+    7015,
+    7016,
+    7017,
+    7018,
+    7022,
+    7023,
+    7024,
+    7027,
+    7029,
+    7030,
+)
+_BASELINE_TRAIN_TIMEOUT_SEEDS = (
+    7000,
+    7002,
+    7006,
+    7011,
+    7012,
+    7013,
+    7020,
+    7021,
+    7028,
+)
+_ENGINEERING_SMOKE_EXCLUDED_VALIDATION_SEEDS = (7001, 7005)
+_BASELINE_VALIDATION_SUCCESS_SEEDS = (7009, 7019, 7025, 7026)
+_BASELINE_VALIDATION_TIMEOUT_SEEDS = (7014, 7031)
 
 
 def _exact_mapping(value: Any, keys: set[str], context: str) -> dict[str, Any]:
@@ -440,6 +485,286 @@ def grasp_lift_pilot_oracle_record() -> dict[str, Any]:
     }
 
 
+def grasp_lift_pilot_authoring_lineage_record() -> dict[str, Any]:
+    """Bind the close7 candidate to train-only evidence from the failed pilot."""
+    from rexpolicy.stage0.envs.grasp_lift_modes import (
+        DEFAULT_GRASP_LIFT_AUTHORING_MODE,
+        GRASP_LIFT_AUTHORING_MODE_CLOSE4,
+    )
+
+    return {
+        "candidate": {
+            "mode_id": DEFAULT_GRASP_LIFT_AUTHORING_MODE.mode_id,
+            "mode_sha256": DEFAULT_GRASP_LIFT_AUTHORING_MODE.sha256,
+        },
+        "decision_id": "stage0/grasp_lift/close7_from_train_pilot/v2",
+        "intervention": {
+            "baseline_value": 4,
+            "candidate_value": 7,
+            "field": "minimum_tentative_close_step",
+            "scope": "single_authoring_mode_field",
+        },
+        "locked_test": {
+            "artifact": None,
+            "consumed": False,
+            "policy": "not_created",
+        },
+        "parent": {
+            "authoring_mode_id": GRASP_LIFT_AUTHORING_MODE_CLOSE4.mode_id,
+            "authoring_mode_sha256": GRASP_LIFT_AUTHORING_MODE_CLOSE4.sha256,
+            "composite_corpus_sha256": (
+                "527ba0299c0b1d4eac5a397663a15406e344b8d536163f61d1d84aa6d311881c"
+            ),
+            "implementation_sha256": (
+                "aa9d72d26b92088cb7412a3e718268c5fae3ac9388d5d5b0f9ff7b94e6aba636"
+            ),
+            "manifest_sha256": (
+                "f1acd4f35915613ddbe8e041de1c16e7cafaa3e33a97e81b94e5d81ddcbd9187"
+            ),
+        },
+        "schema_id": "rexpolicy/stage0-grasp-lift-authoring-lineage/v2",
+        "selection_evidence": {
+            "mechanism": (
+                "all train successes froze at close step 7; all train timeouts "
+                "froze at close step 6 and lost opposed grasp during lift"
+            ),
+            "minimum_former_timeout_conversions": 6,
+            "require_all_baseline_successes_retained": True,
+            "split": "train",
+            "success_seeds": list(_BASELINE_TRAIN_SUCCESS_SEEDS),
+            "timeout_seeds": list(_BASELINE_TRAIN_TIMEOUT_SEEDS),
+        },
+        "validation_protocol": {
+            "candidate_evaluation_budget": 1,
+            "engineering_smoke_exclusions": {
+                "exposure_ledger": [
+                    {
+                        "controller_mode_sha256": (
+                            "c09b682944d2ea03c91ba12ba97e0a9c5b45ea985da6a5543e05604a053f1c18"
+                        ),
+                        "date": "2026-08-06",
+                        "evidence_artifact": None,
+                        "git_head": (
+                            "c2407c634766804e6eb6cc8bee0af893e0aa60a3"
+                        ),
+                        "mode_patch_sha256": (
+                            "ea9e7f3d054ec6afce6c2b48bf28f70331b367dd42369930aae1dfe378c6c806"
+                        ),
+                        "observed_outcomes": {
+                            "7001": "success",
+                            "7005": "success",
+                        },
+                        "run_id": "close7-precommit-newton-smoke-1",
+                        "seeds": [7001, 7005],
+                    },
+                    {
+                        "controller_mode_sha256": (
+                            "c09b682944d2ea03c91ba12ba97e0a9c5b45ea985da6a5543e05604a053f1c18"
+                        ),
+                        "date": "2026-08-06",
+                        "evidence_artifact": None,
+                        "git_head": (
+                            "c2407c634766804e6eb6cc8bee0af893e0aa60a3"
+                        ),
+                        "mode_patch_sha256": (
+                            "ea9e7f3d054ec6afce6c2b48bf28f70331b367dd42369930aae1dfe378c6c806"
+                        ),
+                        "observed_outcomes": {
+                            "7001": "success",
+                            "7005": "success",
+                        },
+                        "run_id": "close7-precommit-newton-smoke-2",
+                        "seeds": [7001, 7005],
+                    },
+                ],
+                "reason": (
+                    "close7 engineering smoke ran seeds 7000 through 7007 "
+                    "before the formal claim was introduced"
+                ),
+                "seeds": list(_ENGINEERING_SMOKE_EXCLUDED_VALIDATION_SEEDS),
+            },
+            "minimum_former_timeout_conversions": 2,
+            "formal_experiment_sha256": (
+                GRASP_LIFT_PILOT_FORMAL_CONFIG_SHA256
+            ),
+            "require_all_baseline_successes_retained": True,
+            "require_zero_lift_to_rejected": True,
+            "split": "validation",
+            "success_seeds": list(_BASELINE_VALIDATION_SUCCESS_SEEDS),
+            "timeout_seeds": list(_BASELINE_VALIDATION_TIMEOUT_SEEDS),
+        },
+    }
+
+
+def grasp_lift_pilot_formal_gate_eligible(reset_seed: int) -> bool:
+    """Exclude validation seeds already exposed to the close7 candidate."""
+    if isinstance(reset_seed, bool) or not isinstance(reset_seed, int):
+        raise TypeError("reset_seed must be an integer")
+    return reset_seed not in _ENGINEERING_SMOKE_EXCLUDED_VALIDATION_SEEDS
+
+
+def evaluate_grasp_lift_close7_authoring_gate(
+    members: list[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Evaluate the precommitted paired train and one-shot validation gates."""
+    if not isinstance(members, list):
+        raise TypeError("members must be a list")
+    by_seed: dict[int, Mapping[str, Any]] = {}
+    for member in members:
+        if not isinstance(member, Mapping):
+            raise ValueError("authoring gate member must be an object")
+        seed = member.get("reset_seed")
+        if isinstance(seed, bool) or not isinstance(seed, int) or seed in by_seed:
+            raise ValueError("authoring gate member seed is invalid or duplicated")
+        if member.get("outcome") not in _PILOT_OUTCOMES:
+            raise ValueError("authoring gate member outcome changed")
+        if member.get("split") not in {"train", "validation"}:
+            raise ValueError("authoring gate member split changed")
+        eligibility = member.get("formal_gate_eligible")
+        if not isinstance(eligibility, bool):
+            raise ValueError("authoring gate member eligibility changed")
+        phase = member.get("final_authoring_phase")
+        terminal_from_phase = member.get("terminal_transition_from_phase")
+        if (
+            isinstance(phase, bool)
+            or not isinstance(phase, int)
+            or isinstance(terminal_from_phase, bool)
+            or not isinstance(terminal_from_phase, int)
+        ):
+            raise ValueError("authoring gate member phase changed")
+        by_seed[seed] = member
+    expected_seeds = set(
+        _BASELINE_TRAIN_SUCCESS_SEEDS
+        + _BASELINE_TRAIN_TIMEOUT_SEEDS
+        + _ENGINEERING_SMOKE_EXCLUDED_VALIDATION_SEEDS
+        + _BASELINE_VALIDATION_SUCCESS_SEEDS
+        + _BASELINE_VALIDATION_TIMEOUT_SEEDS
+    )
+    if set(by_seed) != expected_seeds:
+        raise ValueError("authoring gate seed coverage changed")
+
+    groups = (
+        (_BASELINE_TRAIN_SUCCESS_SEEDS, "train"),
+        (_BASELINE_TRAIN_TIMEOUT_SEEDS, "train"),
+        (_ENGINEERING_SMOKE_EXCLUDED_VALIDATION_SEEDS, "validation"),
+        (_BASELINE_VALIDATION_SUCCESS_SEEDS, "validation"),
+        (_BASELINE_VALIDATION_TIMEOUT_SEEDS, "validation"),
+    )
+    for seeds, expected_split in groups:
+        if any(by_seed[seed]["split"] != expected_split for seed in seeds):
+            raise ValueError("authoring gate split assignment changed")
+    for seed, member in by_seed.items():
+        expected_eligibility = grasp_lift_pilot_formal_gate_eligible(seed)
+        if member["formal_gate_eligible"] is not expected_eligibility:
+            raise ValueError("authoring gate eligibility changed")
+    def is_success(seed: int) -> bool:
+        return by_seed[seed]["outcome"] == "success"
+
+    train_retained = sum(is_success(seed) for seed in _BASELINE_TRAIN_SUCCESS_SEEDS)
+    train_converted = sum(is_success(seed) for seed in _BASELINE_TRAIN_TIMEOUT_SEEDS)
+    validation_retained = sum(
+        is_success(seed) for seed in _BASELINE_VALIDATION_SUCCESS_SEEDS
+    )
+    validation_converted = sum(
+        is_success(seed) for seed in _BASELINE_VALIDATION_TIMEOUT_SEEDS
+    )
+    validation_lift_to_rejected = sum(
+        member["split"] == "validation"
+        and member["formal_gate_eligible"]
+        and member["final_authoring_phase"] == 7
+        and member["terminal_transition_from_phase"] in {3, 4}
+        for member in members
+    )
+    passed = bool(
+        train_retained == len(_BASELINE_TRAIN_SUCCESS_SEEDS)
+        and train_converted >= 6
+        and validation_retained == len(_BASELINE_VALIDATION_SUCCESS_SEEDS)
+        and validation_converted == len(_BASELINE_VALIDATION_TIMEOUT_SEEDS)
+        and validation_lift_to_rejected == 0
+    )
+    return {
+        "passed": passed,
+        "schema_id": "rexpolicy/stage0-grasp-lift-close7-paired-gate/v2",
+        "train": {
+            "baseline_success_regressions": (
+                len(_BASELINE_TRAIN_SUCCESS_SEEDS) - train_retained
+            ),
+            "baseline_success_retained": train_retained,
+            "baseline_success_required": len(_BASELINE_TRAIN_SUCCESS_SEEDS),
+            "former_timeout_converted": train_converted,
+            "former_timeout_conversion_required": 6,
+            "former_timeout_total": len(_BASELINE_TRAIN_TIMEOUT_SEEDS),
+        },
+        "validation": {
+            "baseline_success_regressions": (
+                len(_BASELINE_VALIDATION_SUCCESS_SEEDS) - validation_retained
+            ),
+            "baseline_success_retained": validation_retained,
+            "baseline_success_required": len(
+                _BASELINE_VALIDATION_SUCCESS_SEEDS
+            ),
+            "former_timeout_converted": validation_converted,
+            "former_timeout_conversion_required": 2,
+            "former_timeout_total": len(_BASELINE_VALIDATION_TIMEOUT_SEEDS),
+            "engineering_smoke_excluded_seeds": list(
+                _ENGINEERING_SMOKE_EXCLUDED_VALIDATION_SEEDS
+            ),
+            "engineering_smoke_excluded_total": len(
+                _ENGINEERING_SMOKE_EXCLUDED_VALIDATION_SEEDS
+            ),
+            "lift_to_rejected": validation_lift_to_rejected,
+            "lift_to_rejected_required": 0,
+        },
+    }
+
+
+def grasp_lift_pilot_validation_claim_identity() -> dict[str, Any]:
+    """Return the stable identity consumed by one formal validation attempt."""
+    lineage = grasp_lift_pilot_authoring_lineage_record()
+    protocol = lineage["validation_protocol"]
+    return {
+        "candidate_mode_sha256": lineage["candidate"]["mode_sha256"],
+        "coordination_scope": "single_git_common_dir",
+        "evaluation_budget": protocol["candidate_evaluation_budget"],
+        "formal_experiment_sha256": protocol["formal_experiment_sha256"],
+        "parent_manifest_sha256": lineage["parent"]["manifest_sha256"],
+        "schema_id": "rexpolicy/stage0-grasp-lift-validation-claim-identity/v1",
+        "validation_seeds": sorted(
+            protocol["success_seeds"] + protocol["timeout_seeds"]
+        ),
+    }
+
+
+def grasp_lift_pilot_validation_claim_record(
+    *,
+    experiment_sha256: str,
+    implementation_sha256: str,
+) -> dict[str, Any]:
+    """Build the deterministic record written with exclusive-create semantics."""
+    _require_sha256(experiment_sha256, "validation claim experiment hash")
+    _require_sha256(implementation_sha256, "validation claim implementation hash")
+    if experiment_sha256 != GRASP_LIFT_PILOT_FORMAL_CONFIG_SHA256:
+        raise ValueError("validation claim requires the formal pilot config")
+    identity = grasp_lift_pilot_validation_claim_identity()
+    return {
+        "experiment_sha256": experiment_sha256,
+        "identity": identity,
+        "identity_sha256": canonical_fingerprint(identity),
+        "implementation_sha256": implementation_sha256,
+        "schema_id": GRASP_LIFT_PILOT_VALIDATION_CLAIM_SCHEMA_ID,
+    }
+
+
+def verify_grasp_lift_pilot_formal_config(
+    config: GraspLiftPilotConfig,
+) -> None:
+    """Fail before claim creation unless every scientific/runtime field is fixed."""
+    if not isinstance(config, GraspLiftPilotConfig):
+        raise TypeError("config must be GraspLiftPilotConfig")
+    if config.sha256 != GRASP_LIFT_PILOT_FORMAL_CONFIG_SHA256:
+        raise ValueError("pilot config differs from the pre-registered formal config")
+
+
 def assign_grasp_lift_pilot_splits(
     trajectory_groups: Mapping[str, str],
     *,
@@ -739,6 +1064,7 @@ def load_grasp_lift_pilot_manifest(directory: str | Path) -> dict[str, Any]:
         _require_sha256(commit[name], f"pilot commit {name}")
 
     config = load_grasp_lift_pilot_config(root / "config.json")
+    verify_grasp_lift_pilot_formal_config(config)
     if config.sha256 != commit["config_sha256"]:
         raise ValueError("pilot commit does not bind config")
     manifest = _read_pilot_json(root / "manifest.json", "pilot manifest")
@@ -779,12 +1105,47 @@ def load_grasp_lift_pilot_manifest(directory: str | Path) -> dict[str, Any]:
         "composite_corpus_sha256",
         "experiment_sha256",
         "implementation_sha256",
+        "authoring_lineage_sha256",
         "simulator_sha256",
         "split_policy_sha256",
         "state_view_sha256",
+        "validation_claim_sha256",
     ):
         _require_sha256(manifest[name], f"pilot manifest {name}")
     _verify_pilot_runtime_record(manifest, config)
+
+    expected_lineage = grasp_lift_pilot_authoring_lineage_record()
+    if manifest["authoring_lineage"] != expected_lineage:
+        raise ValueError("pilot authoring lineage changed")
+    if manifest["authoring_lineage_sha256"] != canonical_fingerprint(
+        expected_lineage
+    ):
+        raise ValueError("pilot authoring lineage hash changed")
+
+    validation_claim = manifest["validation_claim"]
+    verify_grasp_lift_pilot_record(validation_claim, "pilot validation claim")
+    _exact_mapping(
+        validation_claim,
+        {
+            "experiment_sha256",
+            "identity",
+            "identity_sha256",
+            "implementation_sha256",
+            "schema_id",
+            "self_sha256",
+        },
+        "pilot validation claim",
+    )
+    expected_validation_claim = seal_grasp_lift_pilot_record(
+        grasp_lift_pilot_validation_claim_record(
+            experiment_sha256=config.sha256,
+            implementation_sha256=manifest["implementation_sha256"],
+        )
+    )
+    if validation_claim != expected_validation_claim:
+        raise ValueError("pilot validation claim changed")
+    if manifest["validation_claim_sha256"] != validation_claim["self_sha256"]:
+        raise ValueError("pilot validation claim hash changed")
 
     expected_split_policy = grasp_lift_pilot_split_policy()
     if manifest["split_policy"] != expected_split_policy:
@@ -890,12 +1251,18 @@ def load_grasp_lift_pilot_manifest(directory: str | Path) -> dict[str, Any]:
             raise ValueError("pilot member split or outcome changed")
         reset_seed = member["reset_seed"]
         final_phase = member["final_authoring_phase"]
+        terminal_from_phase = member["terminal_transition_from_phase"]
+        formal_gate_eligible = member["formal_gate_eligible"]
+        recorded_safety_violation = member["safety_violation"]
         if (
             isinstance(reset_seed, bool)
             or not isinstance(reset_seed, int)
             or isinstance(final_phase, bool)
             or not isinstance(final_phase, int)
-            or final_phase < 0
+            or isinstance(terminal_from_phase, bool)
+            or not isinstance(terminal_from_phase, int)
+            or not isinstance(formal_gate_eligible, bool)
+            or not isinstance(recorded_safety_violation, bool)
         ):
             raise ValueError("pilot member seed or phase changed")
         for name in ("trajectory_sha256", "evidence_sha256"):
@@ -903,9 +1270,12 @@ def load_grasp_lift_pilot_manifest(directory: str | Path) -> dict[str, Any]:
         group_index = reset_seed - config.runtime.seed
         if group_index < 0 or group_index >= config.runtime.reset_groups:
             raise ValueError("pilot member reset seed is outside the fixed range")
+        expected_eligibility = grasp_lift_pilot_formal_gate_eligible(reset_seed)
+        if formal_gate_eligible is not expected_eligibility:
+            raise ValueError("pilot member formal gate eligibility changed")
         expected_group = f"grasp-reset-g{group_index:06d}-s{reset_seed:010d}"
         expected_trajectory = (
-            f"grasp-g{group_index:06d}-thumb-index-side-"
+            f"grasp-g{group_index:06d}-thumb-index-side-close7-"
             f"h{DEFAULT_GRASP_LIFT_AUTHORING_MODE.sha256[:12]}-"
             f"s{reset_seed:010d}"
         )
@@ -988,8 +1358,13 @@ def load_grasp_lift_pilot_manifest(directory: str | Path) -> dict[str, Any]:
         ):
             raise ValueError("pilot evidence provenance changed")
         recorded_phase = int(evidence.tensors["authoring_phase_after"][-1])
+        recorded_terminal_from_phase = int(
+            evidence.tensors["authoring_phase_before"][-1]
+        )
         if final_phase != recorded_phase:
             raise ValueError("pilot member final authoring phase changed")
+        if terminal_from_phase != recorded_terminal_from_phase:
+            raise ValueError("pilot member terminal transition changed")
         allowed_phases = {int(phase) for phase in GraspLiftAuthoringPhase}
         for name in ("authoring_phase_before", "authoring_phase_after"):
             if not set(evidence.tensors[name].tolist()).issubset(allowed_phases):
@@ -1036,9 +1411,12 @@ def load_grasp_lift_pilot_manifest(directory: str | Path) -> dict[str, Any]:
         elif trajectory.failure_reason is not None:
             raise ValueError("pilot non-failure trajectory has a failure reason")
 
-        safety_violation_count += int(
-            any(bool(evidence.tensors[name][-1]) for name in violation_keys)
+        member_safety_violation = any(
+            bool(evidence.tensors[name][-1]) for name in violation_keys
         )
+        if recorded_safety_violation is not member_safety_violation:
+            raise ValueError("pilot member safety violation changed")
+        safety_violation_count += int(member_safety_violation)
         world_steps += trajectory.transition_count
         outcomes[outcome] += 1
         split_counts[split][outcome] += 1
@@ -1098,31 +1476,78 @@ def load_grasp_lift_pilot_manifest(directory: str | Path) -> dict[str, Any]:
     ):
         raise ValueError("pilot world_steps changed")
 
-    success_rate = outcomes[Stage0Outcome.SUCCESS.value] / float(
-        config.runtime.reset_groups
+    eligible_member_count = sum(
+        member["formal_gate_eligible"] for member in members
     )
+    eligible_success_count = sum(
+        member["formal_gate_eligible"]
+        and member["outcome"] == Stage0Outcome.SUCCESS.value
+        for member in members
+    )
+    eligible_failure_count = sum(
+        member["formal_gate_eligible"]
+        and member["outcome"] == Stage0Outcome.FAILURE.value
+        for member in members
+    )
+    eligible_safety_violation_count = sum(
+        member["formal_gate_eligible"] and member["safety_violation"]
+        for member in members
+    )
+    excluded_member_count = len(members) - eligible_member_count
+    success_rate = eligible_success_count / float(eligible_member_count)
     acceptance = _exact_mapping(
         manifest["acceptance"],
-        {"passed", "policy", "safety_violation_count", "success_rate"},
+        {
+            "authoring_gate",
+            "eligible_member_count",
+            "eligible_failure_count",
+            "eligible_safety_violation_count",
+            "eligible_success_count",
+            "engineering_smoke_excluded_member_count",
+            "passed",
+            "policy",
+            "safety_violation_count",
+            "success_rate",
+        },
         "pilot acceptance",
     )
-    expected_passed = bool(
+    base_acceptance_passed = bool(
         success_rate >= config.acceptance.minimum_success_rate
         and (
             not config.acceptance.require_zero_oracle_failures
-            or outcomes[Stage0Outcome.FAILURE.value] == 0
+            or eligible_failure_count == 0
         )
         and (
             not config.acceptance.require_zero_safety_violations
-            or safety_violation_count == 0
+            or eligible_safety_violation_count == 0
         )
     )
+    authoring_gate = evaluate_grasp_lift_close7_authoring_gate(members)
+    expected_passed = bool(base_acceptance_passed and authoring_gate["passed"])
+    for name in (
+        "eligible_member_count",
+        "eligible_failure_count",
+        "eligible_safety_violation_count",
+        "eligible_success_count",
+        "engineering_smoke_excluded_member_count",
+    ):
+        value = acceptance[name]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"pilot acceptance {name} changed")
     if (
         not isinstance(acceptance["passed"], bool)
         or isinstance(acceptance["safety_violation_count"], bool)
         or not isinstance(acceptance["safety_violation_count"], int)
         or isinstance(acceptance["success_rate"], bool)
         or not isinstance(acceptance["success_rate"], (int, float))
+        or acceptance["eligible_member_count"] != eligible_member_count
+        or acceptance["eligible_failure_count"] != eligible_failure_count
+        or acceptance["eligible_safety_violation_count"]
+        != eligible_safety_violation_count
+        or acceptance["eligible_success_count"] != eligible_success_count
+        or acceptance["engineering_smoke_excluded_member_count"]
+        != excluded_member_count
+        or acceptance["authoring_gate"] != authoring_gate
         or acceptance["policy"] != config.acceptance.to_record()
         or acceptance["safety_violation_count"] != safety_violation_count
         or acceptance["success_rate"] != success_rate
@@ -1142,22 +1567,30 @@ def load_grasp_lift_pilot_manifest(directory: str | Path) -> dict[str, Any]:
 __all__ = [
     "GRASP_LIFT_PILOT_CONFIG_SCHEMA_ID",
     "GRASP_LIFT_PILOT_CONFIG_SCHEMA_VERSION",
+    "GRASP_LIFT_PILOT_FORMAL_CONFIG_SHA256",
     "GRASP_LIFT_PILOT_COMMIT_SCHEMA_ID",
     "GRASP_LIFT_PILOT_OUTPUT_SCHEMA_ID",
     "GRASP_LIFT_PILOT_SPLIT_NAMESPACE",
     "GRASP_LIFT_PILOT_SPLIT_POLICY_ID",
     "GRASP_LIFT_PILOT_STATUS_SCHEMA_ID",
     "GRASP_LIFT_PILOT_VALIDATION_FRACTION",
+    "GRASP_LIFT_PILOT_VALIDATION_CLAIM_SCHEMA_ID",
     "GraspLiftPilotAcceptanceConfig",
     "GraspLiftPilotConfig",
     "GraspLiftPilotRuntimeConfig",
     "assign_grasp_lift_pilot_splits",
+    "evaluate_grasp_lift_close7_authoring_gate",
+    "grasp_lift_pilot_authoring_lineage_record",
     "grasp_lift_pilot_environment_config_record",
+    "grasp_lift_pilot_formal_gate_eligible",
     "grasp_lift_pilot_oracle_record",
     "grasp_lift_pilot_split_policy",
     "grasp_lift_pilot_task_metadata_record",
+    "grasp_lift_pilot_validation_claim_identity",
+    "grasp_lift_pilot_validation_claim_record",
     "load_grasp_lift_pilot_config",
     "load_grasp_lift_pilot_manifest",
     "seal_grasp_lift_pilot_record",
     "verify_grasp_lift_pilot_record",
+    "verify_grasp_lift_pilot_formal_config",
 ]

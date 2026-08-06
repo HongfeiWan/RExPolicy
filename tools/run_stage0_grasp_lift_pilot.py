@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import time
 import uuid
 from dataclasses import asdict
@@ -17,13 +18,18 @@ from rexpolicy.stage0.grasp_lift_pilot import (
     GRASP_LIFT_PILOT_OUTPUT_SCHEMA_ID,
     GRASP_LIFT_PILOT_STATUS_SCHEMA_ID,
     assign_grasp_lift_pilot_splits,
+    evaluate_grasp_lift_close7_authoring_gate,
+    grasp_lift_pilot_authoring_lineage_record,
     grasp_lift_pilot_environment_config_record,
+    grasp_lift_pilot_formal_gate_eligible,
     grasp_lift_pilot_oracle_record,
     grasp_lift_pilot_split_policy,
     grasp_lift_pilot_task_metadata_record,
+    grasp_lift_pilot_validation_claim_record,
     load_grasp_lift_pilot_config,
     load_grasp_lift_pilot_manifest,
     seal_grasp_lift_pilot_record,
+    verify_grasp_lift_pilot_formal_config,
 )
 from rexpolicy.stage0.implementation_fingerprint import (
     capture_stage0_implementation_fingerprint,
@@ -56,6 +62,51 @@ def _fsync_directory(path: Path) -> None:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+
+
+def _claim_validation_once(
+    *,
+    repository_root: Path,
+    experiment_sha256: str,
+    implementation_sha256: str,
+) -> dict[str, Any]:
+    """Consume this candidate's validation budget before simulator startup."""
+    completed = subprocess.run(
+        ["git", "rev-parse", "--git-common-dir"],
+        cwd=repository_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    raw_common_dir = Path(completed.stdout.strip())
+    common_dir = (
+        raw_common_dir
+        if raw_common_dir.is_absolute()
+        else (repository_root / raw_common_dir).resolve()
+    )
+    claim = seal_grasp_lift_pilot_record(
+        grasp_lift_pilot_validation_claim_record(
+            experiment_sha256=experiment_sha256,
+            implementation_sha256=implementation_sha256,
+        )
+    )
+    identity_sha256 = claim["identity_sha256"]
+    registry = common_dir / "rexpolicy-validation-claims"
+    registry_existed = registry.exists()
+    registry.mkdir(parents=True, exist_ok=True)
+    if registry.is_symlink() or not registry.is_dir():
+        raise RuntimeError("validation claim registry is not a real directory")
+    if not registry_existed:
+        _fsync_directory(common_dir)
+    claim_path = registry / f"{identity_sha256}.json"
+    try:
+        _write_json(claim_path, claim)
+    except FileExistsError as error:
+        raise RuntimeError(
+            "formal validation is already claimed for this parent and candidate"
+        ) from error
+    _fsync_directory(registry)
+    return claim
 
 
 def _restrict_cpu_threads(cpu_threads: int) -> tuple[int, ...]:
@@ -278,14 +329,16 @@ def _split_assignments(
 
 def main() -> None:
     args = _parse_args()
+    repository_root = Path(__file__).resolve().parents[1]
     config_path = Path(args.config).expanduser().resolve()
     config = load_grasp_lift_pilot_config(config_path)
+    verify_grasp_lift_pilot_formal_config(config)
     target = Path(args.output).expanduser().resolve()
     if target.exists():
         raise FileExistsError(f"pilot output already exists: {target}")
 
     implementation = capture_stage0_implementation_fingerprint(
-        Path(__file__).resolve().parents[1]
+        repository_root
     )
     affinity = _restrict_cpu_threads(config.runtime.cpu_threads)
 
@@ -335,6 +388,12 @@ def main() -> None:
     from rexpolicy.stage0.envs.state_only import Stage0StateOnlyEnv
     from rexpolicy.stage0.envs.state_schema import DEFAULT_STAGE0_STATE_SCHEMA
     from rexpolicy.stage0.types import Stage0Outcome
+
+    validation_claim = _claim_validation_once(
+        repository_root=repository_root,
+        experiment_sha256=config.sha256,
+        implementation_sha256=implementation.sha256,
+    )
 
     target.parent.mkdir(parents=True, exist_ok=True)
     partial = target.with_name(f".{target.name}.partial-{uuid.uuid4().hex}")
@@ -523,13 +582,14 @@ def main() -> None:
                     "dropped_grasp_violation",
                     "collision_buffer_overflow_violation",
                 )
-                safety_violation_count += int(
-                    any(bool(tensors[key][-1]) for key in final_violation_keys)
+                member_safety_violation = any(
+                    bool(tensors[key][-1]) for key in final_violation_keys
                 )
+                safety_violation_count += int(member_safety_violation)
                 group_index = first_group + world
                 reset_group_id = f"grasp-reset-g{group_index:06d}-s{seeds[world]:010d}"
                 trajectory_id = (
-                    f"grasp-g{group_index:06d}-thumb-index-side-"
+                    f"grasp-g{group_index:06d}-thumb-index-side-close7-"
                     f"h{DEFAULT_GRASP_LIFT_AUTHORING_MODE.sha256[:12]}-"
                     f"s{seeds[world]:010d}"
                 )
@@ -594,11 +654,15 @@ def main() -> None:
                         "outcome": outcome.value,
                         "reset_group_id": reset_group_id,
                         "reset_seed": seeds[world],
+                        "safety_violation": member_safety_violation,
                         "trajectory_descriptor": str(
                             trajectory_descriptor.relative_to(partial)
                         ),
                         "trajectory_id": trajectory_id,
                         "trajectory_sha256": trajectory_sha256(trajectory),
+                        "terminal_transition_from_phase": int(
+                            tensors["authoring_phase_before"][-1]
+                        ),
                     }
                 )
 
@@ -611,6 +675,9 @@ def main() -> None:
         )
         for record in member_records:
             record["split"] = split_by_id[record["trajectory_id"]]
+            record["formal_gate_eligible"] = (
+                grasp_lift_pilot_formal_gate_eligible(record["reset_seed"])
+            )
         split_counts = {
             split: {
                 outcome: sum(
@@ -622,25 +689,60 @@ def main() -> None:
             }
             for split in ("train", "validation")
         }
-        success_rate = outcome_counts[Stage0Outcome.SUCCESS.value] / float(
-            config.runtime.reset_groups
+        eligible_member_count = sum(
+            record["formal_gate_eligible"] for record in member_records
         )
-        acceptance_passed = bool(
+        eligible_success_count = sum(
+            record["formal_gate_eligible"]
+            and record["outcome"] == Stage0Outcome.SUCCESS.value
+            for record in member_records
+        )
+        eligible_failure_count = sum(
+            record["formal_gate_eligible"]
+            and record["outcome"] == Stage0Outcome.FAILURE.value
+            for record in member_records
+        )
+        eligible_safety_violation_count = sum(
+            record["formal_gate_eligible"] and record["safety_violation"]
+            for record in member_records
+        )
+        excluded_member_count = len(member_records) - eligible_member_count
+        success_rate = eligible_success_count / float(
+            eligible_member_count
+        )
+        base_acceptance_passed = bool(
             success_rate >= config.acceptance.minimum_success_rate
             and (
                 not config.acceptance.require_zero_oracle_failures
-                or outcome_counts[Stage0Outcome.FAILURE.value] == 0
+                or eligible_failure_count == 0
             )
             and (
                 not config.acceptance.require_zero_safety_violations
-                or safety_violation_count == 0
+                or eligible_safety_violation_count == 0
             )
+        )
+        authoring_gate = evaluate_grasp_lift_close7_authoring_gate(
+            member_records
+        )
+        acceptance_passed = bool(
+            base_acceptance_passed and authoring_gate["passed"]
         )
         elapsed = time.perf_counter() - started
         split_policy = grasp_lift_pilot_split_policy()
+        authoring_lineage = grasp_lift_pilot_authoring_lineage_record()
         manifest = seal_grasp_lift_pilot_record(
             {
                 "acceptance": {
+                    "authoring_gate": authoring_gate,
+                    "eligible_member_count": eligible_member_count,
+                    "eligible_failure_count": eligible_failure_count,
+                    "eligible_safety_violation_count": (
+                        eligible_safety_violation_count
+                    ),
+                    "eligible_success_count": eligible_success_count,
+                    "engineering_smoke_excluded_member_count": (
+                        excluded_member_count
+                    ),
                     "passed": acceptance_passed,
                     "policy": config.acceptance.to_record(),
                     "safety_violation_count": safety_violation_count,
@@ -651,6 +753,10 @@ def main() -> None:
                 "authoring_mode": DEFAULT_GRASP_LIFT_AUTHORING_MODE.to_record(),
                 "authoring_mode_sha256": (
                     DEFAULT_GRASP_LIFT_AUTHORING_MODE.sha256
+                ),
+                "authoring_lineage": authoring_lineage,
+                "authoring_lineage_sha256": canonical_fingerprint(
+                    authoring_lineage
                 ),
                 "composite_corpus_sha256": (
                     grasp_lift_composite_corpus_sha256(corpus)
@@ -677,6 +783,8 @@ def main() -> None:
                 "split_policy_sha256": canonical_fingerprint(split_policy),
                 "state_view": DEFAULT_GRASP_LIFT_STATE_VIEW.to_record(),
                 "state_view_sha256": DEFAULT_GRASP_LIFT_STATE_VIEW.sha256,
+                "validation_claim": validation_claim,
+                "validation_claim_sha256": validation_claim["self_sha256"],
                 "visuals": {
                     "camera_textures": False,
                     "scene_asset": None,
