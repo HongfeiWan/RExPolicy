@@ -270,11 +270,14 @@ class GraspLiftSuccessOracle:
             state[:, self.schema.slice("is_grasped")].squeeze(-1) > 0.5
         )
 
-        lift = torch.clamp_min(
-            object_position[:, 2] - self._initial_object_position[:, 2], 0.0
+        displacement = object_position - self._initial_object_position
+        signed_lift = torch.sum(
+            displacement * self._initial_object_z_axis, dim=-1
         )
+        lift = torch.clamp_min(signed_lift, 0.0)
         lateral = torch.linalg.vector_norm(
-            object_position[:, :2] - self._initial_object_position[:, :2], dim=-1
+            displacement - signed_lift[:, None] * self._initial_object_z_axis,
+            dim=-1,
         )
         tilt_cosine = torch.sum(
             current_z_axis * self._initial_object_z_axis, dim=-1

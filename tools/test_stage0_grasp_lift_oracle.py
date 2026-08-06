@@ -119,6 +119,24 @@ class GraspLiftOracleTest(unittest.TestCase):
         self.assertAlmostEqual(result.bottle_tilt.item(), 0.0, places=6)
         self.assertFalse(result.failure.item())
 
+    def test_lift_projects_onto_initial_bottle_axis_in_base_frame(self) -> None:
+        state = _states(2)
+        state[:, SCHEMA.slice("object_rotation_6d")] = torch.tensor(
+            (0.0, 0.0, 1.0, 0.0, 1.0, 0.0)
+        )
+        oracle = GraspLiftSuccessOracle(2)
+        oracle.reset(state)
+        position_slice = SCHEMA.slice("object_position")
+        state[0, position_slice.start] += 0.031
+        state[1, position_slice.start + 2] += 0.031
+
+        result = oracle.evaluate(state, _events(2))
+
+        self.assertAlmostEqual(result.lift_height[0].item(), 0.031, places=6)
+        self.assertAlmostEqual(result.lateral_displacement[0].item(), 0.0, places=6)
+        self.assertAlmostEqual(result.lift_height[1].item(), 0.0, places=6)
+        self.assertTrue(result.lateral_displacement_violation[1].item())
+
     def test_confirmed_grasp_drop_uses_control_step_debounce(self) -> None:
         state = _states(1)
         state[:, SCHEMA.slice("is_grasped")] = 1.0
