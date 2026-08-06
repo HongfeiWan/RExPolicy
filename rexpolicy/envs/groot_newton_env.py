@@ -71,11 +71,21 @@ _REWARD_MODE_IDS = {
 
 _TASK_MODE_BOTTLE_TRANSFER = "bottle_transfer"
 _TASK_MODE_REACH_GREEN_CAP = "reach_green_cap"
-_TASK_MODES = {_TASK_MODE_BOTTLE_TRANSFER, _TASK_MODE_REACH_GREEN_CAP}
+_TASK_MODE_GRASP_LIFT_GREEN_BOTTLE = "grasp_lift_green_bottle"
+_TASK_MODES = {
+    _TASK_MODE_BOTTLE_TRANSFER,
+    _TASK_MODE_GRASP_LIFT_GREEN_BOTTLE,
+    _TASK_MODE_REACH_GREEN_CAP,
+}
 REACH_GREEN_CAP_TASK_ID = "reach_green_cap/v1"
 REACH_GREEN_CAP_INSTRUCTION = (
     "move the open right hand to the safe pre-grasp position beside the green bottle cap "
     "without moving the bottle"
+)
+GRASP_LIFT_GREEN_BOTTLE_TASK_ID = "grasp_lift_green_bottle/v1"
+GRASP_LIFT_GREEN_BOTTLE_INSTRUCTION = (
+    "grasp the green bottle with opposed finger contact and lift it while "
+    "keeping the grasp stable"
 )
 _UINT64_MASK = (1 << 64) - 1
 
@@ -240,6 +250,10 @@ class GrootNewtonEnvConfig:
     reach_bottle_displacement_limit: float = 0.010
     reach_reward_distance_scale: float = 0.030
     reach_reset_xy_jitter_m: float = 0.010
+    grasp_lift_height: float = 0.030
+    grasp_lift_hold_control_steps: int = 2
+    grasp_lateral_displacement_limit: float = 0.030
+    grasp_bottle_tilt_limit_rad: float = math.radians(30.0)
     bottle_lift_height: float = 0.1
     bottle_min_xy_displacement: float = 0.1
     transport_start_distance: float = 0.01
@@ -298,8 +312,11 @@ class GrootNewtonEnvConfig:
             )
         if self.task_mode not in _TASK_MODES:
             raise ValueError(f"Unsupported task_mode {self.task_mode!r}; expected one of {sorted(_TASK_MODES)}")
-        if self.task_mode == _TASK_MODE_REACH_GREEN_CAP and self.control_mode != "pd_eef_pose_abs":
-            raise ValueError("reach_green_cap requires control_mode='pd_eef_pose_abs'")
+        if self.task_mode in {
+            _TASK_MODE_GRASP_LIFT_GREEN_BOTTLE,
+            _TASK_MODE_REACH_GREEN_CAP,
+        } and self.control_mode != "pd_eef_pose_abs":
+            raise ValueError(f"{self.task_mode} requires control_mode='pd_eef_pose_abs'")
         if self.arm_action_delta <= 0.0 or self.hand_action_delta <= 0.0:
             raise ValueError("action deltas must be positive")
         if self.ik_iterations < 1:
@@ -334,6 +351,14 @@ class GrootNewtonEnvConfig:
             raise ValueError("reach thresholds and reward scale must be positive")
         if self.reach_success_hold_steps < 1:
             raise ValueError("reach_success_hold_steps must be positive")
+        if min(
+            self.grasp_lift_height,
+            self.grasp_lateral_displacement_limit,
+            self.grasp_bottle_tilt_limit_rad,
+        ) <= 0.0:
+            raise ValueError("grasp-lift thresholds must be positive")
+        if self.grasp_lift_hold_control_steps < 1:
+            raise ValueError("grasp_lift_hold_control_steps must be positive")
         if (
             min(
                 self.bottle_lift_height,
@@ -1929,7 +1954,7 @@ class GrootNewtonEnv:
         self._setup_cameras(args)
         self._initialize_task_goal(None)
         self._refresh_observation()
-        self._initialize_reach_runtime(None)
+        self._initialize_task_action_runtime(None)
         self._setup_spaces()
 
     @property
@@ -1953,6 +1978,30 @@ class GrootNewtonEnv:
                 "reset_xy_jitter_m": float(self.config.reach_reset_xy_jitter_m),
                 "effective_action": "absolute_eef_xyz_only; reset_rotation_and_hand_held",
                 "effective_action_mask": (True, True, True) + (False,) * (ACTION_SIZE - 3),
+            }
+        if self.task_mode == _TASK_MODE_GRASP_LIFT_GREEN_BOTTLE:
+            return {
+                "task_id": GRASP_LIFT_GREEN_BOTTLE_TASK_ID,
+                "instruction": GRASP_LIFT_GREEN_BOTTLE_INSTRUCTION,
+                "success_authority": "independent_state_and_transient_event_oracle",
+                "lift_height_m": float(self.config.grasp_lift_height),
+                "success_hold_control_steps": int(
+                    self.config.grasp_lift_hold_control_steps
+                ),
+                "lateral_displacement_limit_m": float(
+                    self.config.grasp_lateral_displacement_limit
+                ),
+                "bottle_tilt_limit_rad": float(
+                    self.config.grasp_bottle_tilt_limit_rad
+                ),
+                "reset_xy_jitter_m": float(self.config.reach_reset_xy_jitter_m),
+                "effective_action": (
+                    "absolute_eef_xyz_and_absolute_hand_targets; "
+                    "reset_rotation_held"
+                ),
+                "effective_action_mask": (
+                    (True, True, True) + (False,) * 6 + (True,) * len(HAND_JOINT_NAMES)
+                ),
             }
         return {"task_id": _TASK_MODE_BOTTLE_TRANSFER}
 
@@ -2446,6 +2495,8 @@ class GrootNewtonEnv:
         action_mask = np.ones(self.action_size, dtype=np.bool_)
         if self.task_mode == _TASK_MODE_REACH_GREEN_CAP:
             action_mask[3:] = False
+        elif self.task_mode == _TASK_MODE_GRASP_LIFT_GREEN_BOTTLE:
+            action_mask[3:9] = False
         self._effective_action_mask = wp.array(action_mask, dtype=wp.bool, device=self.device)
         self._eef_9d = wp.zeros((self.num_envs, 9), dtype=wp.float32, device=self.device)
         self._arm_joint_pos = wp.zeros((self.num_envs, 7), dtype=wp.float32, device=self.device)
@@ -2791,8 +2842,11 @@ class GrootNewtonEnv:
         action[:, 9:19].copy_(wp.to_torch(self._hand_joint_pos))
         return action
 
-    def _capture_reach_hold_action(self, world_mask: wp.array | None) -> None:
-        if self.task_mode != _TASK_MODE_REACH_GREEN_CAP:
+    def _capture_task_hold_action(self, world_mask: wp.array | None) -> None:
+        if self.task_mode not in {
+            _TASK_MODE_GRASP_LIFT_GREEN_BOTTLE,
+            _TASK_MODE_REACH_GREEN_CAP,
+        }:
             return
         hold = self._build_hold_action_torch()
         destination = wp.to_torch(self._reach_hold_action)
@@ -2808,8 +2862,9 @@ class GrootNewtonEnv:
     def effective_action_mask_torch(self, *, batched: bool = False) -> Any:
         """Return the trainable action mask for the selected task.
 
-        Reach retains only absolute EEF XYZ. Rotation-6D and all hand targets
-        are reset-state holds and therefore must not contribute to training.
+        Reach retains only absolute EEF XYZ. Grasp-lift additionally retains
+        all ten absolute hand targets. Rotation-6D stays at the reset hold in
+        both contracts.
         """
         mask = wp.to_torch(self._effective_action_mask)
         return mask[None, :].expand(self.num_envs, -1) if batched else mask
@@ -2831,6 +2886,27 @@ class GrootNewtonEnv:
             hold = wp.to_torch(self._reach_hold_action)
             projected[:, :3] = torch.where(torch.isfinite(projected[:, :3]), projected[:, :3], hold[:, :3])
             projected[:, 3:].copy_(hold[:, 3:])
+        elif self.task_mode == _TASK_MODE_GRASP_LIFT_GREEN_BOTTLE:
+            hold = wp.to_torch(self._reach_hold_action)
+            projected[:, :3] = torch.where(
+                torch.isfinite(projected[:, :3]), projected[:, :3], hold[:, :3]
+            )
+            projected[:, 3:9].copy_(hold[:, 3:9])
+            joint_q = wp.to_torch(self.state_0.joint_q)
+            hand_current = joint_q[self._hand_q_indices_torch]
+            hand_target = torch.where(
+                torch.isfinite(projected[:, 9:19]),
+                projected[:, 9:19],
+                hand_current,
+            )
+            hand_target = torch.clamp(
+                hand_target,
+                hand_current - self.config.hand_max_joint_step_rad,
+                hand_current + self.config.hand_max_joint_step_rad,
+            )
+            projected[:, 9:19] = torch.clamp(
+                hand_target, self._hand_lower_torch, self._hand_upper_torch
+            )
         return projected
 
     def project_effective_action(self, action: Any) -> Any:
@@ -2853,6 +2929,18 @@ class GrootNewtonEnv:
                 hold = self._reach_hold_action.numpy()
                 projected[:, :3] = np.where(np.isfinite(projected[:, :3]), projected[:, :3], hold[:, :3])
                 projected[:, 3:] = hold[:, 3:]
+            elif self.task_mode == _TASK_MODE_GRASP_LIFT_GREEN_BOTTLE:
+                import torch
+
+                projected_torch = torch.as_tensor(
+                    projected, dtype=torch.float32, device=str(self.device)
+                )
+                return (
+                    self.project_effective_action_torch(projected_torch)
+                    .detach()
+                    .cpu()
+                    .numpy()
+                )
             return projected
         return self.project_effective_action_torch(action)
 
@@ -2981,6 +3069,11 @@ class GrootNewtonEnv:
                 device=self.device,
             )
             return
+        lift_height = (
+            self.config.grasp_lift_height
+            if self.task_mode == _TASK_MODE_GRASP_LIFT_GREEN_BOTTLE
+            else self.config.bottle_lift_height
+        )
         wp.launch(
             _initialize_task_goal,
             dim=self.num_envs,
@@ -2988,7 +3081,7 @@ class GrootNewtonEnv:
                 self.state_0.body_q,
                 self.model.body_world_start,
                 self._bottle_body_local,
-                self.config.bottle_lift_height,
+                lift_height,
                 world_mask,
                 self._goal_pos,
                 self._initial_obj_pose,
@@ -3149,6 +3242,11 @@ class GrootNewtonEnv:
         )
 
     def _evaluate_task_state(self) -> None:
+        lift_height = (
+            self.config.grasp_lift_height
+            if self.task_mode == _TASK_MODE_GRASP_LIFT_GREEN_BOTTLE
+            else self.config.bottle_lift_height
+        )
         wp.launch(
             _evaluate_opposed_pregrasp_geometry,
             dim=self.num_envs,
@@ -3188,7 +3286,7 @@ class GrootNewtonEnv:
                 self.state_0.joint_qd,
                 self.model.joint_dof_world_start,
                 self._action_local_qd,
-                self.config.bottle_lift_height,
+                lift_height,
                 self.config.bottle_min_xy_displacement,
                 self.config.final_z_threshold,
                 self.config.final_orientation_threshold_rad,
@@ -3266,6 +3364,11 @@ class GrootNewtonEnv:
                 device=self.device,
             )
             return
+        lift_height = (
+            self.config.grasp_lift_height
+            if self.task_mode == _TASK_MODE_GRASP_LIFT_GREEN_BOTTLE
+            else self.config.bottle_lift_height
+        )
         wp.launch(
             _advance_transfer_phase,
             dim=self.num_envs,
@@ -3277,7 +3380,7 @@ class GrootNewtonEnv:
                 self._placement_pose_valid,
                 self._is_obj_static,
                 self._current_lift_height,
-                self.config.bottle_lift_height,
+                lift_height,
                 self.config.goal_threshold,
                 self.config.transport_start_distance,
                 self.config.grasp_confirm_frames,
@@ -3309,16 +3412,20 @@ class GrootNewtonEnv:
             self._clear_finger_contacts(reset_mask)
         self._evaluate_task_state()
 
-    def _initialize_reach_runtime(self, world_mask: wp.array | None) -> None:
-        if self.task_mode != _TASK_MODE_REACH_GREEN_CAP:
+    def _initialize_task_action_runtime(self, world_mask: wp.array | None) -> None:
+        if self.task_mode not in {
+            _TASK_MODE_GRASP_LIFT_GREEN_BOTTLE,
+            _TASK_MODE_REACH_GREEN_CAP,
+        }:
             return
-        wp.launch(
-            _initialize_reach_distance,
-            dim=self.num_envs,
-            inputs=[world_mask, self._reach_distance, self._reach_previous_distance],
-            device=self.device,
-        )
-        self._capture_reach_hold_action(world_mask)
+        if self.task_mode == _TASK_MODE_REACH_GREEN_CAP:
+            wp.launch(
+                _initialize_reach_distance,
+                dim=self.num_envs,
+                inputs=[world_mask, self._reach_distance, self._reach_previous_distance],
+                device=self.device,
+            )
+        self._capture_task_hold_action(world_mask)
 
     def _refresh_finger_root_load(self) -> None:
         if not self.config.request_finger_root_load:
@@ -3951,7 +4058,10 @@ class GrootNewtonEnv:
         seed: int | list[int] | None,
     ) -> np.ndarray:
         offsets = np.zeros((self.num_envs, 2), dtype=np.float32)
-        if self.task_mode != _TASK_MODE_REACH_GREEN_CAP or seed is None:
+        if self.task_mode not in {
+            _TASK_MODE_GRASP_LIFT_GREEN_BOTTLE,
+            _TASK_MODE_REACH_GREEN_CAP,
+        } or seed is None:
             return offsets
         if isinstance(seed, (int, np.integer)) and not isinstance(seed, (bool, np.bool_)):
             x_offset, y_offset = _reach_reset_xy_offset(
@@ -4101,7 +4211,7 @@ class GrootNewtonEnv:
         self._clear_control_step_diagnostics(mask_wp)
         self.model.bvh_refit_shapes(self.state_0)
         self._refresh_observation()
-        self._initialize_reach_runtime(mask_wp)
+        self._initialize_task_action_runtime(mask_wp)
         self._clear_finger_root_load(mask_wp)
         return self.observation_warp(), self._info_warp()
 
@@ -4191,6 +4301,11 @@ class GrootNewtonEnv:
             self._accumulate_control_step_diagnostics()
             self._advance_task_phase()
         self._refresh_observation()
+        lift_height = (
+            self.config.grasp_lift_height
+            if self.task_mode == _TASK_MODE_GRASP_LIFT_GREEN_BOTTLE
+            else self.config.bottle_lift_height
+        )
         if self.task_mode == _TASK_MODE_REACH_GREEN_CAP:
             wp.launch(
                 _advance_reach_episode,
@@ -4231,7 +4346,7 @@ class GrootNewtonEnv:
                     self._reaching_reward,
                     self._opposed_pregrasp_score,
                     self._max_lift_height,
-                    self.config.bottle_lift_height,
+                    lift_height,
                     self._place_reward,
                     self._static_reward,
                     self._finger_contacts,

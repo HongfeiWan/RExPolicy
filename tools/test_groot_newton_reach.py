@@ -8,6 +8,7 @@ from __future__ import annotations
 import math
 import os
 import unittest
+from types import SimpleNamespace
 
 import numpy as np
 import warp as wp
@@ -56,10 +57,27 @@ class TestGrootNewtonReach(unittest.TestCase):
             "without moving the bottle",
         )
 
+        grasp = env_module.GrootNewtonEnvConfig(
+            task_mode="grasp_lift_green_bottle"
+        )
+        self.assertAlmostEqual(grasp.grasp_lift_height, 0.030)
+        self.assertEqual(grasp.grasp_lift_hold_control_steps, 2)
+        self.assertAlmostEqual(grasp.grasp_lateral_displacement_limit, 0.030)
+        self.assertAlmostEqual(grasp.grasp_bottle_tilt_limit_rad, math.radians(30.0))
+        self.assertEqual(
+            env_module.GRASP_LIFT_GREEN_BOTTLE_TASK_ID,
+            "grasp_lift_green_bottle/v1",
+        )
+
         with self.assertRaisesRegex(ValueError, "Unsupported task_mode"):
             env_module.GrootNewtonEnvConfig(task_mode="unknown")
         with self.assertRaisesRegex(ValueError, "pd_eef_pose_abs"):
             env_module.GrootNewtonEnvConfig(task_mode="reach_green_cap", control_mode="pd_joint_pos")
+        with self.assertRaisesRegex(ValueError, "pd_eef_pose_abs"):
+            env_module.GrootNewtonEnvConfig(
+                task_mode="grasp_lift_green_bottle",
+                control_mode="pd_joint_pos",
+            )
         with self.assertRaisesRegex(ValueError, "reach_success_hold_steps"):
             env_module.GrootNewtonEnvConfig(reach_success_hold_steps=0)
         with self.assertRaisesRegex(ValueError, "reach_reset_xy_jitter_m"):
@@ -285,6 +303,47 @@ class TestGrootNewtonReach(unittest.TestCase):
         np.testing.assert_allclose(projected[1, :3].numpy(), (4.0, 5.0, 6.0), atol=0.0)
         np.testing.assert_array_equal(env.effective_action_mask_torch().numpy(), mask)
         self.assertTrue(torch.equal(raw[:, 3:], torch.full_like(raw[:, 3:], -7.0)))
+
+    def test_grasp_projection_opens_hand_dofs_and_holds_rotation(self):
+        import torch
+
+        env = object.__new__(env_module.GrootNewtonEnv)
+        env.task_mode = "grasp_lift_green_bottle"
+        env.num_envs = 2
+        env.action_size = env_module.ACTION_SIZE
+        env.device = wp.get_device(self.device)
+        env.config = SimpleNamespace(hand_max_joint_step_rad=0.08)
+        env._action = wp.zeros(
+            (2, env_module.ACTION_SIZE), dtype=wp.float32, device=self.device
+        )
+        hold = np.arange(2 * env_module.ACTION_SIZE, dtype=np.float32).reshape(2, -1)
+        env._reach_hold_action = wp.array(
+            hold, dtype=wp.float32, device=self.device
+        )
+        current = np.full((2, 10), 0.4, dtype=np.float32)
+        env.state_0 = SimpleNamespace(
+            joint_q=wp.array(current.reshape(-1), dtype=wp.float32, device=self.device)
+        )
+        env._hand_q_indices_torch = torch.arange(20).reshape(2, 10)
+        env._hand_lower_torch = torch.zeros((2, 10), dtype=torch.float32)
+        env._hand_upper_torch = torch.ones((2, 10), dtype=torch.float32)
+        mask = np.ones(env_module.ACTION_SIZE, dtype=np.bool_)
+        mask[3:9] = False
+        env._effective_action_mask = wp.array(
+            mask, dtype=wp.bool, device=self.device
+        )
+
+        raw = torch.full((2, env_module.ACTION_SIZE), 2.0, dtype=torch.float32)
+        raw[0, 1] = float("nan")
+        raw[0, 9] = float("nan")
+        projected = env.project_effective_action_torch(raw)
+
+        self.assertEqual(projected[0, 1], hold[0, 1])
+        np.testing.assert_allclose(projected[:, 3:9].numpy(), hold[:, 3:9])
+        np.testing.assert_allclose(projected[0, 9].numpy(), current[0, 0])
+        np.testing.assert_allclose(projected[:, 10:19].numpy(), 0.48, atol=1.0e-7)
+        np.testing.assert_array_equal(env.effective_action_mask_torch().numpy(), mask)
+        self.assertTrue(torch.equal(raw[:, 3:9], torch.full_like(raw[:, 3:9], 2.0)))
 
     @unittest.skipUnless(
         wp.is_cuda_available() and os.environ.get("REXPOLICY_RUN_GPU_ORACLE") == "1",
