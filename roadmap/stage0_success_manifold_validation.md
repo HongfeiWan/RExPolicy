@@ -1,6 +1,6 @@
 # RExPolicy Stage 0 — State-only Success Manifold Validation
 
-Status: **engineering loop implemented; scientific manifold gate not yet passed**.
+Status: **train-only CUDA runs complete; scientific manifold gate not yet passed**.
 
 Document authority: this is supporting Phase 2 research evidence and a node1
 execution protocol. The canonical phase order, active learner, and release
@@ -59,15 +59,50 @@ or oracle evidence, but a real scene asset is still required before any visual
 rollout can be presented as camera-valid evidence; a synthetic background must
 not be substituted.
 
+## Node1 no-z training and burned selection — 2026-08-07
+
+The fixed train-only cohort completed successfully on node1 at Git commit
+`e238a77a24feb3fcd6b9dfeb73070def0939b8ed`. Seeds 31001, 31002, and 31003
+each reached step 10,000 and retained exactly 21 complete checkpoints from step
+0 through step 10,000. Their final train losses were respectively 0.01110,
+0.01221, and 0.01076. These are optimization diagnostics, not held-out
+success evidence.
+
+The tensor-free preflight verified all 63 checkpoints and produced commitment
+`60be577bd257601afcbe72fa78021c9c5dd7bcad63c1fa26a31e9a14a04763f6`.
+The first formal selection then durably claimed validation cohort
+`0e6d5a3203b9f3ba535b5c99f22a5303add4958484b927a730d8ff7b89d67f7f`
+and opened all six validation members. It failed while constructing the Newton
+evaluator because a read-only `MappingProxyType` simulator record was passed
+directly to canonical JSON serialization.
+
+The failure happened before Newton environment construction, validation tensors
+were copied to CUDA, any checkpoint was loaded, or any candidate metric or
+rollout was produced. The immutable output is therefore correctly marked
+`burned`; it contains no `selection.json` or `audit.json`. This is an
+infrastructure failure, not evidence that the learned policy passed or failed.
+The consumed six-member cohort must never be retried or used for tuning, and
+the locked test remains uncreated and unconsumed.
+
+Commit `bce6f10e32e555546493e114df913887dce78527` fixes the serialization
+boundary by materializing one canonical dictionary snapshot while retaining
+the original hash and semantic checks. On node1, 151 focused Grasp-Lift tests
+passed, followed by a direct CUDA/Newton construction and one-step execution on
+24 worlds: state `[24, 79]`, action `[24, 19]`, finite next state, and exactly
+zero nonzero rewards. That direct test opened no validation data. Formal model
+selection now requires an independently authored and pre-registered validation
+cohort with a new global claim identity; the burned cohort cannot be replaced
+by changing only an output path.
+
 ## Frozen node1 no-z direct-training protocol — 2026-08-07
 
-The learning and selection software is implemented, but this section records a
-runtime protocol, not a completed learning result. The final checkout must be
-clean and remain on one Git HEAD from the first direct training launch through
-all three training runs and one-time selection. The implementation fingerprint
-contains that HEAD plus the Python, Torch, Warp, Newton, and MuJoCo-Warp
-versions. A pull, commit, runtime change, different world size, or untracked
-file during the cohort invalidates comparability and must fail closed.
+This section preserves the protocol used by the completed train-only runs and
+the burned first selection attempt; it is not a completed learning result. The
+checkout was clean and remained on one Git HEAD from the first direct training
+launch through that attempt. The implementation fingerprint contains that HEAD
+plus the Python, Torch, Warp, Newton, and MuJoCo-Warp versions. A pull, commit,
+runtime change, different world size, or untracked file during any cohort
+invalidates comparability and must fail closed.
 
 Node1 has one visible NVIDIA RTX PRO 5000 72GB GPU. "Use all GPUs" therefore
 means CUDA0 with `world_size=1`; it does not mean launching a fictitious

@@ -27,10 +27,13 @@ validation harness. It is not the canonical active learner or a substitute for
 the ordered release gates above. Its reward-free Grasp-Lift close-at-step-7
 corpus and train-only artifact are accepted, and its fixed no-z learner,
 checkpoint/resume path, tensor-free three-run preflight, one-time validation
-claim, exact Newton evaluator, and checkpoint selector are implemented. The
-three 10,000-step training seeds and one-time validation selection remain
-runtime work; no locked test exists and no convergence or generalization claim
-has been established.
+claim, exact Newton evaluator, and checkpoint selector are implemented. All
+three 10,000-step train-only seeds completed on node1. The first one-time
+validation attempt was burned by an evaluator serialization defect after its
+six shards were opened but before any checkpoint, metric, or rollout was
+evaluated. That cohort cannot be reused; a newly pre-registered validation
+cohort is required. No locked test exists, and no convergence or generalization
+claim has been established.
 
 The repository also contains later-phase infrastructure developed ahead of
 activation: reward-free Event Ledgers, rebuildable quality-diversity views, a
