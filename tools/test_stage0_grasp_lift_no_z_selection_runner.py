@@ -75,6 +75,7 @@ def _arguments(temporary: Path) -> SelectionArguments:
         repository_root=root,
         config=root / "config.json",
         pilot_directory=root / "pilot",
+        validation_cohort_directory=root / "validation-cohort",
         training_artifact=root / "artifact",
         output_directory=root / "selection",
         device="cuda:0",
@@ -143,6 +144,8 @@ class _Backend:
         self._call("prepare")
         return PreparedSelection(
             artifact=object(),
+            validation_metadata=object(),
+            authoring_claim_file_sha256=None,
             config=object(),
             normalization=object(),
             implementation_record={"schema_id": "test/implementation/v1"},

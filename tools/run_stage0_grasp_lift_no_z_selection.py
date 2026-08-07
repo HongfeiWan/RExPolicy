@@ -35,9 +35,9 @@ _MAX_EPISODE_STEPS = 72
 _LOCKED_TEST_ABSENT = MappingProxyType(
     {"artifact": None, "consumed": False, "policy": "not_created"}
 )
-_STATUS_SCHEMA_ID = "rexpolicy/stage0-grasp-lift-no-z-selection-status/v1"
-_AUDIT_SCHEMA_ID = "rexpolicy/stage0-grasp-lift-no-z-selection-audit/v1"
-_EVALUATOR_SCHEMA_ID = "rexpolicy/stage0-grasp-lift-no-z-selection-evaluator/v1"
+_STATUS_SCHEMA_ID = "rexpolicy/stage0-grasp-lift-no-z-selection-status/v2"
+_AUDIT_SCHEMA_ID = "rexpolicy/stage0-grasp-lift-no-z-selection-audit/v2"
+_EVALUATOR_SCHEMA_ID = "rexpolicy/stage0-grasp-lift-no-z-selection-evaluator/v2"
 _PILOT_SIMULATOR_SCHEMA_ID = "rexpolicy/stage0-grasp-lift-newton-runtime/v1"
 _ENVIRONMENT_RUNTIME_VARIANTS = frozenset({"device", "num_envs"})
 _PILOT_SIMULATOR_KEYS = {
@@ -314,6 +314,7 @@ class SelectionArguments:
     repository_root: Path
     config: Path
     pilot_directory: Path
+    validation_cohort_directory: Path
     training_artifact: Path
     output_directory: Path
     device: str
@@ -324,6 +325,7 @@ class SelectionArguments:
             "repository_root",
             "config",
             "pilot_directory",
+            "validation_cohort_directory",
             "training_artifact",
             "output_directory",
         ):
@@ -371,6 +373,8 @@ class CandidateCommitment:
 @dataclass(frozen=True)
 class PreparedSelection:
     artifact: Any
+    validation_metadata: Any
+    authoring_claim_file_sha256: str | None
     config: Any
     normalization: Any
     implementation_record: Mapping[str, Any]
@@ -592,9 +596,21 @@ class DefaultSelectionBackend:
         self.affinity = affinity
         self.cuda_runtime = dict(cuda_runtime)
 
-    def prepare(self, arguments: SelectionArguments) -> PreparedSelection:
+    def prepare(
+        self,
+        arguments: SelectionArguments,
+        *,
+        require_validation_cohort: bool = True,
+    ) -> PreparedSelection:
         from rexpolicy.stage0.data.grasp_lift_training_artifact import (
             load_grasp_lift_training_artifact,
+        )
+        from rexpolicy.stage0.data.grasp_lift_revalidation import (
+            GRASP_LIFT_REVALIDATION_RESET_SEEDS,
+            load_grasp_lift_revalidation_metadata,
+        )
+        from rexpolicy.stage0.data.grasp_lift_validation_cohort import (
+            verify_persisted_grasp_lift_validation_authoring_claim,
         )
         from rexpolicy.stage0.evaluation.grasp_lift_checkpoint_loader import (
             GRASP_LIFT_EVALUATION_CHECKPOINT_SCHEMA_ID,
@@ -650,6 +666,23 @@ class DefaultSelectionBackend:
             arguments.training_artifact,
             pilot_directory=arguments.pilot_directory,
         )
+        if not isinstance(require_validation_cohort, bool):
+            raise TypeError("require_validation_cohort must be boolean")
+        if tuple(GRASP_LIFT_REVALIDATION_RESET_SEEDS) != _VALIDATION_RESET_SEEDS:
+            raise RuntimeError("revalidation reset seeds differ from selection")
+        validation_metadata = (
+            load_grasp_lift_revalidation_metadata(arguments.validation_cohort_directory)
+            if require_validation_cohort
+            else None
+        )
+        authoring_claim_file_sha256 = (
+            verify_persisted_grasp_lift_validation_authoring_claim(
+                arguments.repository_root,
+                arguments.validation_cohort_directory,
+            )
+            if require_validation_cohort
+            else None
+        )
         newton_runtime = GraspLiftPilotRuntimeConfig(
             device=arguments.device,
             cpu_threads=_CPU_THREADS,
@@ -660,20 +693,14 @@ class DefaultSelectionBackend:
             rigid_contacts_per_env=2048,
             triangle_pairs_per_env=200_000,
         )
-        environment_config = grasp_lift_pilot_environment_config_record(
-            newton_runtime
-        )
+        environment_config = grasp_lift_pilot_environment_config_record(newton_runtime)
         task_metadata = grasp_lift_pilot_task_metadata_record()
         oracle_record = grasp_lift_pilot_oracle_record()
-        accepted_manifest = _strict_json(
-            arguments.pilot_directory / "manifest.json"
-        )
+        accepted_manifest = _strict_json(arguments.pilot_directory / "manifest.json")
         accepted_simulator, accepted_simulator_sha256 = (
             _accepted_pilot_simulator_contract(
                 accepted_manifest,
-                expected_manifest_sha256=(
-                    artifact.data.corpus.source_manifest_sha256
-                ),
+                expected_manifest_sha256=(artifact.data.corpus.source_manifest_sha256),
                 evaluation_environment=environment_config,
                 evaluation_task_metadata=task_metadata,
                 evaluation_oracle=oracle_record,
@@ -682,6 +709,23 @@ class DefaultSelectionBackend:
                 oracle_id=GRASP_LIFT_ORACLE_ID,
             )
         )
+        if validation_metadata is not None:
+            if (
+                validation_metadata.manifest["implementation_sha256"]
+                != implementation.sha256
+            ):
+                raise RuntimeError(
+                    "revalidation authoring and selection implementation differ"
+                )
+            _verify_simulator_semantics(
+                validation_metadata.manifest["simulator_record"],
+                evaluation_environment=environment_config,
+                evaluation_task_metadata=task_metadata,
+                evaluation_oracle=oracle_record,
+                action_schema_sha256=DEFAULT_GRASP_LIFT_ACTION_SCHEMA.sha256,
+                authoring_mode_sha256=DEFAULT_GRASP_LIFT_AUTHORING_MODE.sha256,
+                oracle_id=GRASP_LIFT_ORACLE_ID,
+            )
         selection_protocol = grasp_lift_no_z_selection_protocol_record()
         if _canonical_fingerprint(selection_protocol) != (
             GRASP_LIFT_NO_Z_SELECTION_PROTOCOL_SHA256
@@ -731,10 +775,20 @@ class DefaultSelectionBackend:
                 "selection_protocol_sha256": (
                     GRASP_LIFT_NO_Z_SELECTION_PROTOCOL_SHA256
                 ),
+                "validation_cohort": (
+                    None
+                    if validation_metadata is None
+                    else dict(validation_metadata.cohort_identity)
+                ),
+                "validation_cohort_authoring_claim_file_sha256": (
+                    authoring_claim_file_sha256
+                ),
             }
         )
         return PreparedSelection(
             artifact=artifact,
+            validation_metadata=validation_metadata,
+            authoring_claim_file_sha256=authoring_claim_file_sha256,
             config=config,
             normalization=artifact.normalization,
             implementation_record=implementation.to_record(),
@@ -747,7 +801,7 @@ class DefaultSelectionBackend:
                 "cpu_affinity": list(self.affinity),
                 "cpu_threads": _CPU_THREADS,
                 "interop_threads": _INTEROP_THREADS,
-                "schema_id": ("rexpolicy/stage0-grasp-lift-no-z-selection-runtime/v1"),
+                "schema_id": ("rexpolicy/stage0-grasp-lift-no-z-selection-runtime/v2"),
             },
             newton_runtime=newton_runtime,
             environment_config_record=MappingProxyType(dict(environment_config)),
@@ -769,6 +823,7 @@ class DefaultSelectionBackend:
         return preflight_grasp_lift_validation_selection(
             arguments.run_directories,
             training_artifact=prepared.artifact,
+            external_cohort_identity=(prepared.validation_metadata.cohort_identity),
         )
 
     def verify_preflight(
@@ -783,6 +838,7 @@ class DefaultSelectionBackend:
         verify_grasp_lift_validation_preflight_record(
             preflight,
             training_artifact=prepared.artifact,
+            external_cohort_identity=(prepared.validation_metadata.cohort_identity),
         )
 
     def build_claim(
@@ -790,13 +846,14 @@ class DefaultSelectionBackend:
         preflight: Mapping[str, Any],
         prepared: PreparedSelection,
     ) -> dict[str, Any]:
-        from rexpolicy.stage0.data.grasp_lift_validation import (
-            build_grasp_lift_validation_claim_record,
+        from rexpolicy.stage0.data.grasp_lift_revalidation import (
+            build_grasp_lift_revalidation_claim_record,
         )
 
-        return build_grasp_lift_validation_claim_record(
-            preflight,
-            training_artifact=prepared.artifact,
+        return build_grasp_lift_revalidation_claim_record(
+            prepared.validation_metadata,
+            candidate_inventory_sha256=preflight["candidate_inventory_sha256"],
+            preflight_sha256=preflight["self_sha256"],
             selection_protocol_sha256=prepared.selection_protocol_sha256,
             evaluator_implementation_sha256=prepared.evaluator_sha256,
         )
@@ -806,15 +863,18 @@ class DefaultSelectionBackend:
         preflight: Mapping[str, Any],
         prepared: PreparedSelection,
     ) -> Any:
-        from rexpolicy.stage0.data.grasp_lift_validation import (
-            verify_grasp_lift_validation_claim_record,
+        from rexpolicy.stage0.data.grasp_lift_revalidation import (
+            verify_grasp_lift_revalidation_claim_record,
         )
 
         def verify(claim: Mapping[str, Any]) -> None:
-            verify_grasp_lift_validation_claim_record(
+            verify_grasp_lift_revalidation_claim_record(
                 claim,
-                preflight=preflight,
-                training_artifact=prepared.artifact,
+                metadata=prepared.validation_metadata,
+                candidate_inventory_sha256=(preflight["candidate_inventory_sha256"]),
+                preflight_sha256=preflight["self_sha256"],
+                selection_protocol_sha256=prepared.selection_protocol_sha256,
+                evaluator_implementation_sha256=prepared.evaluator_sha256,
             )
 
         return verify
@@ -863,17 +923,20 @@ class DefaultSelectionBackend:
         claim: Mapping[str, Any],
         receipt: Any,
     ) -> Any:
-        from rexpolicy.stage0.data.grasp_lift_validation import (
-            load_claimed_grasp_lift_validation,
+        from rexpolicy.stage0.data.grasp_lift_revalidation import (
+            load_claimed_grasp_lift_revalidation,
         )
 
-        return load_claimed_grasp_lift_validation(
-            arguments.pilot_directory,
+        return load_claimed_grasp_lift_revalidation(
+            arguments.validation_cohort_directory,
             repository_root=arguments.repository_root,
             training_artifact=prepared.artifact,
-            preflight=preflight,
             claim=claim,
             claim_receipt=receipt,
+            candidate_inventory_sha256=preflight["candidate_inventory_sha256"],
+            preflight_sha256=preflight["self_sha256"],
+            selection_protocol_sha256=prepared.selection_protocol_sha256,
+            evaluator_implementation_sha256=prepared.evaluator_sha256,
         )
 
     def build_budget(self, validation: Any) -> Any:
@@ -990,9 +1053,7 @@ class DefaultSelectionBackend:
             record = _sealed(
                 {
                     "action_schema_sha256": DEFAULT_GRASP_LIFT_ACTION_SCHEMA.sha256,
-                    "accepted_simulator_sha256": (
-                        prepared.accepted_simulator_sha256
-                    ),
+                    "accepted_simulator_sha256": (prepared.accepted_simulator_sha256),
                     "environment_config": expected_environment,
                     "environment_config_sha256": _canonical_fingerprint(
                         expected_environment
@@ -1005,7 +1066,7 @@ class DefaultSelectionBackend:
                     "rollout_budget_sha256": budget.sha256,
                     "runtime": runtime.to_record(),
                     "schema_id": (
-                        "rexpolicy/stage0-grasp-lift-no-z-selection-newton/v1"
+                        "rexpolicy/stage0-grasp-lift-no-z-selection-newton/v2"
                     ),
                     "state_only": True,
                     "task_metadata": expected_task,
@@ -1087,7 +1148,7 @@ class DefaultSelectionBackend:
                 "rollout": rollout.to_record(),
                 "rollout_sha256": rollout.sha256,
                 "schema_id": (
-                    "rexpolicy/stage0-grasp-lift-no-z-candidate-evaluation/v1"
+                    "rexpolicy/stage0-grasp-lift-no-z-candidate-evaluation/v2"
                 ),
                 "training_seed": candidate.training_seed,
             }
@@ -1148,6 +1209,19 @@ class DefaultSelectionBackend:
                 "runtime": dict(prepared.runtime_record),
                 "schema_id": _AUDIT_SCHEMA_ID,
                 "selection_sha256": selection_record["self_sha256"],
+                "validation_cohort": {
+                    "cohort_identity": dict(
+                        prepared.validation_metadata.cohort_identity
+                    ),
+                    "commit_sha256": prepared.validation_metadata.commit["self_sha256"],
+                    "authoring_claim_file_sha256": (
+                        prepared.authoring_claim_file_sha256
+                    ),
+                    "manifest_sha256": prepared.validation_metadata.manifest[
+                        "self_sha256"
+                    ],
+                    "root": str(prepared.validation_metadata.root),
+                },
                 "validation_data": dict(validation.record),
                 "validation_read_scope": {
                     "engineering_excluded_opened": False,
@@ -1420,6 +1494,7 @@ def _parse_args() -> SelectionArguments:
         default="configs/stage0/grasp_lift_no_z_bc.json",
     )
     parser.add_argument("--pilot-directory", required=True)
+    parser.add_argument("--validation-cohort-directory", required=True)
     parser.add_argument("--training-artifact", required=True)
     parser.add_argument("--seed-31001-run", required=True)
     parser.add_argument("--seed-31002-run", required=True)
@@ -1432,6 +1507,7 @@ def _parse_args() -> SelectionArguments:
         repository_root=repository_root,
         config=_absolute(parsed.config),
         pilot_directory=_absolute(parsed.pilot_directory),
+        validation_cohort_directory=_absolute(parsed.validation_cohort_directory),
         training_artifact=_absolute(parsed.training_artifact),
         output_directory=_absolute(parsed.output_directory),
         device=parsed.device,

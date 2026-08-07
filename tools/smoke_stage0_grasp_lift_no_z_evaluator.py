@@ -76,6 +76,9 @@ def _selection_arguments(arguments: SmokeArguments) -> SelectionArguments:
         repository_root=arguments.repository_root,
         config=arguments.config,
         pilot_directory=arguments.pilot_directory,
+        validation_cohort_directory=(
+            arguments.repository_root / ".evaluator-smoke-unused-validation-cohort"
+        ),
         training_artifact=arguments.training_artifact,
         output_directory=arguments.output.parent / ".unused-selection-output",
         device=arguments.device,
@@ -271,7 +274,10 @@ class DefaultSmokeBackend:
 
         if tuple(GRASP_LIFT_FORMAL_TRAIN_SEEDS[:6]) != _TRAIN_SMOKE_SEEDS:
             raise RuntimeError("formal train smoke seed prefix changed")
-        return self.selection_backend.prepare(_selection_arguments(arguments))
+        return self.selection_backend.prepare(
+            _selection_arguments(arguments),
+            require_validation_cohort=False,
+        )
 
     def build_budget(self, prepared: Any) -> tuple[Any, tuple[tuple[str, int], ...]]:
         from rexpolicy.stage0.evaluation.grasp_lift_rollout import (
