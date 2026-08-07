@@ -495,6 +495,11 @@ class GraspLiftRevalidationTest(unittest.TestCase):
                 "GraspLiftClaimedRevalidationData",
                 return_value=fake_result,
             ),
+            mock.patch(
+                "rexpolicy.stage0.data.grasp_lift_revalidation."
+                "grasp_lift_composite_corpus_sha256",
+                return_value=metadata.manifest["composite_corpus_sha256"],
+            ),
         )
         with (
             patches[0],
@@ -512,6 +517,7 @@ class GraspLiftRevalidationTest(unittest.TestCase):
             patches[12],
             patches[13],
             patches[14],
+            patches[15],
         ):
             result = load_claimed_grasp_lift_revalidation(
                 self.root,

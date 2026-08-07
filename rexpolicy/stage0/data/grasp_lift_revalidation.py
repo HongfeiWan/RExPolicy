@@ -410,9 +410,10 @@ def load_claimed_grasp_lift_revalidation(
             )
         )
 
-    if grasp_lift_composite_corpus_sha256(authored_corpus) != metadata.manifest[
-        "composite_corpus_sha256"
-    ]:
+    if (
+        grasp_lift_composite_corpus_sha256(authored_corpus)
+        != metadata.manifest["composite_corpus_sha256"]
+    ):
         raise ValueError("revalidation composite corpus changed after claim")
 
     members = tuple(loaded)
