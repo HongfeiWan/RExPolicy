@@ -1,0 +1,32 @@
+{
+  "acceptance": {
+    "require_all_success": true,
+    "require_zero_collision_buffer_overflows": true,
+    "require_zero_nonzero_rewards": true,
+    "require_zero_oracle_failures": true,
+    "require_zero_safety_violations": true,
+    "require_zero_timeouts": true
+  },
+  "cohort": {
+    "purpose": "grasp_lift_no_z_model_selection/v1",
+    "seed_derivation": "int.from_bytes(sha256(f'{namespace}/{index}').digest()[:4], 'big') & 0x7fffffff; canonical_numeric_sort",
+    "seed_namespace": "rexpolicy/grasp-lift-formal-validation/20260807-v2",
+    "seeds": [
+      374383479,
+      630355668,
+      1195800966,
+      1354723473,
+      1579845348,
+      2014581365
+    ]
+  },
+  "runtime": {
+    "cpu_threads": 16,
+    "device": "cuda:0",
+    "max_episode_steps": 72,
+    "num_envs": 6,
+    "rigid_contacts_per_env": 2048,
+    "triangle_pairs_per_env": 200000
+  },
+  "schema_version": 1
+}
