@@ -46,12 +46,13 @@ Its manifest SHA-256 is
 and its composite corpus SHA-256 is
 `16d438d79e2fb37505e2f2b070842095d025b4ce338c1f472765d10872701620`.
 
-The next gate is learning from this corpus: fit normalization and construct
-windows from the 24 train trajectories only, train checkpoints without any
-validation feedback, select once on the six eligible validation trajectories,
-and keep the two engineering-smoke exclusions out of both training and model
-selection. No locked test may be created until that protocol and a genuinely
-new held-out cohort are pre-registered.
+The next gate at the time was learning from this corpus: fit normalization and
+construct windows from the 24 train trajectories only, then train checkpoints
+without validation feedback. That training completed, but the first selection
+attempt consumed the original six-member validation cohort in an infrastructure
+failure. Model selection must therefore use the independent v2 cohort described
+below. No locked test may be created until a separate locked-test protocol and
+genuinely new held-out cohort are pre-registered.
 
 The pilot intentionally ran state-only with scene visuals and camera textures
 disabled. The missing full `scene.glb` therefore does not weaken its mechanics
@@ -198,19 +199,74 @@ latest complete 500-step checkpoint (step zero is also complete). Changing
 HEAD, Python/runtime versions, CUDA visibility, world size, CPU affinity,
 config, pilot, or artifact makes resume illegal.
 
-Only after every run has exactly the 21 expected checkpoints and a complete
-status may the tensor-free preflight run. The selection runner then persists a
-global exclusive claim before opening the six validation shards and evaluates
-the fixed 60-model by 24-rollout grid once. That claim is irreversible:
+All three runs now have the 21 expected checkpoints and a complete status. The
+old validation cohort and selection output are historical burned evidence and
+must not be retried. The replacement uses the pre-registered namespace
+`rexpolicy/grasp-lift-formal-validation/20260807-v2` and reset seeds
+`374383479`, `630355668`, `1195800966`, `1354723473`, `1579845348`, and
+`2014581365`. Authoring admits the cohort only if all six are oracle successes
+with zero failures, timeouts, safety violations, nonzero rewards, and collision
+buffer overflows.
+
+Before direct CUDA authoring, every code and documentation change must be
+committed and pushed, and node1 must be a clean checkout of that exact final
+`github/main`. Authoring and selection must then stay on the same HEAD and the
+same Python, Torch, Warp, Newton, and MuJoCo-Warp runtime. Do not run an
+evaluator smoke, seed preview, checkpoint preview, or any other v2 cohort
+probe. Formal authoring is the first CUDA execution of these seeds:
 
 ```bash
 cd /home/user/project/RExPolicy-grasp-lift-training
-PYTHON="$(command -v python)"
+git fetch github main
+test -z "$(git status --porcelain --untracked-files=all)" || {
+  echo "refuse dirty scientific worktree" >&2
+  exit 1
+}
+test "$(git rev-parse HEAD)" = "$(git rev-parse github/main)" || {
+  echo "refuse checkout that is not final github/main" >&2
+  exit 1
+}
+
+PYTHON=/home/user/project/Isaac-GR00T/.venv/bin/python
+RUNROOT=/home/user/project/RExPolicy-grasp-lift-training/outputs/stage0
+COHORT="$RUNROOT/grasp-lift-validation-cohort-v2-20260807-a"
+LOGROOT="$RUNROOT/grasp-lift-validation-v2-launch-logs-20260807-a"
+mkdir -p "$LOGROOT"
+test ! -e "$COHORT" && test ! -L "$COHORT" || {
+  echo "refuse existing cohort output: $COHORT" >&2
+  exit 1
+}
+
+nohup env CUDA_VISIBLE_DEVICES=0 PYTHONUNBUFFERED=1 \
+  "$PYTHON" -u -m tools.run_stage0_grasp_lift_validation_authoring \
+  --config configs/stage0/grasp_lift_validation_cohort_v2.json \
+  --output "$COHORT" \
+  >"$LOGROOT/authoring.console.log" 2>&1 &
+printf '%s\n' "$!" >"$LOGROOT/authoring.pid"
+```
+
+The authoring runner writes its global Git-common claim before importing Torch
+or constructing Newton. Any failure after that boundary permanently burns the
+six-seed authoring slot; changing the output path, deleting partial output, or
+restarting cannot recover it. Only after `commit.json`, `manifest.json`, and
+`status.json` pass strict reload and report the fixed 6/6 acceptance may the
+direct CUDA selector run. It performs a tensor-free 63-checkpoint preflight,
+persists a different global selection claim, and only then opens the six v2
+tensor shards and evaluates the fixed 60-model by 24-rollout grid:
+
+```bash
+cd /home/user/project/RExPolicy-grasp-lift-training
+PYTHON=/home/user/project/Isaac-GR00T/.venv/bin/python
 RUNROOT=/home/user/project/RExPolicy-grasp-lift-training/outputs/stage0
 PILOT=/home/user/project/RExPolicy-grasp-lift-close7/outputs/stage0/grasp-lift-pilot-close7-20260806-b
 ARTIFACT="$RUNROOT/grasp-lift-training-close7-20260806-a"
-LOGROOT="$RUNROOT/grasp-lift-no-z-launch-logs-20260807-a"
-SELECTOUT="$RUNROOT/grasp-lift-no-z-selection-20260807-a"
+COHORT="$RUNROOT/grasp-lift-validation-cohort-v2-20260807-a"
+LOGROOT="$RUNROOT/grasp-lift-validation-v2-launch-logs-20260807-a"
+SELECTOUT="$RUNROOT/grasp-lift-no-z-selection-v2-20260807-a"
+test -z "$(git status --porcelain --untracked-files=all)" || {
+  echo "refuse dirty scientific worktree" >&2
+  exit 1
+}
 test ! -e "$SELECTOUT" && test ! -L "$SELECTOUT" || {
   echo "refuse existing selection output: $SELECTOUT" >&2
   exit 1
@@ -220,19 +276,22 @@ nohup env CUDA_VISIBLE_DEVICES=0 PYTHONUNBUFFERED=1 \
   "$PYTHON" -u -m tools.run_stage0_grasp_lift_no_z_selection \
   --config configs/stage0/grasp_lift_no_z_bc.json \
   --pilot-directory "$PILOT" \
+  --validation-cohort-directory "$COHORT" \
   --training-artifact "$ARTIFACT" \
   --seed-31001-run "$RUNROOT/grasp-lift-no-z-seed-31001-20260807-a" \
   --seed-31002-run "$RUNROOT/grasp-lift-no-z-seed-31002-20260807-a" \
   --seed-31003-run "$RUNROOT/grasp-lift-no-z-seed-31003-20260807-a" \
   --output-directory "$SELECTOUT" \
   --device cuda:0 \
-  >"$LOGROOT/selection.console.log" 2>&1 &
-printf '%s\n' "$!" >"$LOGROOT/selection.pid"
+  >"$LOGROOT/selection-v2.console.log" 2>&1 &
+printf '%s\n' "$!" >"$LOGROOT/selection-v2.pid"
 ```
 
-The selection output is intentionally non-resumable. After the claim receipt
-has been persisted, any interruption burns this model-selection attempt and
-must not be bypassed by deleting the output or claim registry.
+The selection output is intentionally non-resumable. A failure before the
+selection claim does not consume the cohort, although the created output path
+still cannot be reused. After the claim receipt is durable, any interruption
+permanently consumes this cohort's model-selection budget. Neither claim may
+be bypassed by changing or deleting its Git-common registry.
 
 - if selection passes, it is a development/model-selection result only. A new
   locked-test cohort and its own pre-registered one-time protocol are still
@@ -241,10 +300,9 @@ must not be bypassed by deleting the output or claim registry.
   may use train evidence and the now-consumed validation audit, but the locked
   test must remain absent and cannot be used for tuning.
 
-During the formal training and selection cohort the repository is
-fingerprint-bound and may not be edited. The remote main branch is eligible for
-a fast-forward only after the runtime gate and retained artifacts have been
-verified.
+During authoring and selection the repository is fingerprint-bound and may not
+be edited. Regardless of selection outcome, the locked test remains absent and
+must not be created or consumed by this protocol.
 
 ## Node1 validation snapshot — 2026-08-05
 

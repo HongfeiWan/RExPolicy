@@ -31,9 +31,12 @@ claim, exact Newton evaluator, and checkpoint selector are implemented. All
 three 10,000-step train-only seeds completed on node1. The first one-time
 validation attempt was burned by an evaluator serialization defect after its
 six shards were opened but before any checkpoint, metric, or rollout was
-evaluated. That cohort cannot be reused; a newly pre-registered validation
-cohort is required. No locked test exists, and no convergence or generalization
-claim has been established.
+evaluated. That cohort cannot be reused. An independent v2 six-member cohort
+authoring path and claim-bound revalidation selector are implemented, but they
+have not yet produced a scientific result. They must run exactly once on one
+final clean implementation fingerprint, with direct CUDA authoring followed by
+selection and no smoke or checkpoint preview. No locked test exists or has been
+consumed, and no convergence or generalization claim has been established.
 
 The repository also contains later-phase infrastructure developed ahead of
 activation: reward-free Event Ledgers, rebuildable quality-diversity views, a
