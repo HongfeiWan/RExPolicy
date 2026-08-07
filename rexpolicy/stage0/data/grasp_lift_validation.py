@@ -624,10 +624,76 @@ def grasp_lift_validation_claim_id(cohort_identity: Mapping[str, Any]) -> str:
     )
 
 
+def _selection_cohort_identity(
+    artifact: GraspLiftTrainingArtifact,
+    external_cohort_identity: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    if external_cohort_identity is None:
+        return grasp_lift_validation_cohort_identity(artifact)
+    record = _exact_mapping(
+        external_cohort_identity,
+        _COHORT_KEYS,
+        "external validation cohort",
+    )
+    # Computing the claim ID performs the complete schema, purpose, locked-test,
+    # and self-hash verification without opening any tensor shard.
+    grasp_lift_validation_claim_id(record)
+    if record["excluded_commitments"] != []:
+        raise ValueError("external validation cohort cannot contain exclusions")
+    raw_commitments = record["formal_validation_commitments"]
+    if not isinstance(raw_commitments, list) or len(raw_commitments) != 6:
+        raise ValueError("external validation cohort must commit exactly six members")
+    commitments: list[GraspLiftRoleCommitment] = []
+    for raw_commitment in raw_commitments:
+        commitment_record = _exact_mapping(
+            raw_commitment,
+            {
+                "evidence_sha256",
+                "raw_trajectory_sha256",
+                "reset_seed",
+                "role",
+                "trajectory_id",
+            },
+            "external validation commitment",
+        )
+        commitment = GraspLiftRoleCommitment(**commitment_record)
+        if commitment.role != GRASP_LIFT_VALIDATION_ROLE:
+            raise ValueError("external cohort member role changed")
+        commitments.append(commitment)
+    seeds = tuple(item.reset_seed for item in commitments)
+    trajectory_ids = tuple(item.trajectory_id for item in commitments)
+    if (
+        len(set(seeds)) != len(seeds)
+        or tuple(sorted(seeds)) != seeds
+        or set(seeds).intersection(GRASP_LIFT_FORMAL_VALIDATION_SEEDS)
+        or len(set(trajectory_ids)) != len(trajectory_ids)
+    ):
+        raise ValueError("external validation cohort identity or seed order changed")
+    expected_role_registry_sha256 = canonical_fingerprint(
+        {
+            "roles": [item.to_record() for item in commitments],
+            "schema_id": "rexpolicy/stage0-grasp-lift-frozen-roles/v1",
+        }
+    )
+    if record["role_registry_sha256"] != expected_role_registry_sha256:
+        raise ValueError("external validation role registry changed")
+    for name in ("source_composite_corpus_sha256", "source_manifest_sha256"):
+        _require_sha256(record[name], f"external validation {name}")
+    if (
+        record["source_manifest_sha256"]
+        == artifact.data.corpus.source_manifest_sha256
+        or record["source_composite_corpus_sha256"]
+        == artifact.data.corpus.source_composite_corpus_sha256
+    ):
+        raise ValueError("external validation cohort must be independently authored")
+    return record
+
+
 def preflight_grasp_lift_validation_selection(
     run_directories: Mapping[int, str | Path],
     *,
     training_artifact: GraspLiftTrainingArtifact,
+    external_cohort_identity: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Verify three complete runs without opening any held-out tensor shard."""
     artifact = _require_training_artifact(training_artifact)
@@ -740,7 +806,7 @@ def preflight_grasp_lift_validation_selection(
             }
         )
 
-    cohort = grasp_lift_validation_cohort_identity(artifact)
+    cohort = _selection_cohort_identity(artifact, external_cohort_identity)
     candidate_inventory = [
         {
             "checkpoint_sha256": checkpoint["checkpoint_sha256"],
@@ -762,10 +828,10 @@ def preflight_grasp_lift_validation_selection(
             "normalization_sha256": artifact.normalization.sha256,
             "runs": run_records,
             "schema_id": GRASP_LIFT_VALIDATION_PREFLIGHT_SCHEMA_ID,
-            "source_composite_corpus_sha256": (
-                artifact.data.corpus.source_composite_corpus_sha256
-            ),
-            "source_manifest_sha256": artifact.data.corpus.source_manifest_sha256,
+            "source_composite_corpus_sha256": cohort[
+                "source_composite_corpus_sha256"
+            ],
+            "source_manifest_sha256": cohort["source_manifest_sha256"],
             "train_content_sha256": artifact.train_content_sha256,
             "training_artifact_sha256": artifact.artifact_sha256,
         }
@@ -776,6 +842,7 @@ def verify_grasp_lift_validation_preflight_record(
     preflight: Mapping[str, Any],
     *,
     training_artifact: GraspLiftTrainingArtifact,
+    external_cohort_identity: Mapping[str, Any] | None = None,
 ) -> None:
     artifact = _require_training_artifact(training_artifact)
     record = _exact_mapping(preflight, _PREFLIGHT_KEYS, "validation preflight")
@@ -788,16 +855,19 @@ def verify_grasp_lift_validation_preflight_record(
         or record["training_artifact_sha256"] != artifact.artifact_sha256
         or record["train_content_sha256"] != artifact.train_content_sha256
         or record["normalization_sha256"] != artifact.normalization.sha256
-        or record["source_manifest_sha256"]
-        != artifact.data.corpus.source_manifest_sha256
-        or record["source_composite_corpus_sha256"]
-        != artifact.data.corpus.source_composite_corpus_sha256
     ):
         raise ValueError("validation preflight binding changed")
-    expected_cohort = grasp_lift_validation_cohort_identity(artifact)
+    expected_cohort = _selection_cohort_identity(
+        artifact,
+        external_cohort_identity,
+    )
     if (
         record["cohort_identity"] != expected_cohort
         or record["cohort_identity_sha256"] != expected_cohort["self_sha256"]
+        or record["source_manifest_sha256"]
+        != expected_cohort["source_manifest_sha256"]
+        or record["source_composite_corpus_sha256"]
+        != expected_cohort["source_composite_corpus_sha256"]
     ):
         raise ValueError("validation preflight cohort changed")
     runs = record["runs"]
@@ -893,11 +963,13 @@ def build_grasp_lift_validation_claim_record(
     training_artifact: GraspLiftTrainingArtifact,
     selection_protocol_sha256: str,
     evaluator_implementation_sha256: str,
+    external_cohort_identity: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build, but do not persist, the record used by an O_EXCL caller."""
     verify_grasp_lift_validation_preflight_record(
         preflight,
         training_artifact=training_artifact,
+        external_cohort_identity=external_cohort_identity,
     )
     _require_sha256(selection_protocol_sha256, "selection_protocol_sha256")
     _require_sha256(
@@ -925,10 +997,12 @@ def verify_grasp_lift_validation_claim_record(
     *,
     preflight: Mapping[str, Any],
     training_artifact: GraspLiftTrainingArtifact,
+    external_cohort_identity: Mapping[str, Any] | None = None,
 ) -> None:
     verify_grasp_lift_validation_preflight_record(
         preflight,
         training_artifact=training_artifact,
+        external_cohort_identity=external_cohort_identity,
     )
     record = _exact_mapping(claim, _CLAIM_KEYS, "validation claim")
     verify_grasp_lift_pilot_record(record, "validation claim")

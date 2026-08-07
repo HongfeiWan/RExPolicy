@@ -518,6 +518,63 @@ class GraspLiftValidationTests(unittest.TestCase):
             training_artifact=self.artifact,
         )
 
+    def test_preflight_can_bind_a_distinct_manifest_only_cohort(self) -> None:
+        original = self._preflight()["cohort_identity"]
+        external = dict(original)
+        external.pop("self_sha256")
+        external.update(
+            {
+                "excluded_commitments": [],
+                "formal_validation_commitments": [
+                    {
+                        "evidence_sha256": f"{index + 11:064x}",
+                        "raw_trajectory_sha256": f"{index + 21:064x}",
+                        "reset_seed": 100_000 + index,
+                        "role": GRASP_LIFT_VALIDATION_ROLE,
+                        "trajectory_id": f"external-{index}",
+                    }
+                    for index in range(6)
+                ],
+                "source_composite_corpus_sha256": "2" * 64,
+                "source_manifest_sha256": "3" * 64,
+            }
+        )
+        external["role_registry_sha256"] = canonical_fingerprint(
+            {
+                "roles": external["formal_validation_commitments"],
+                "schema_id": "rexpolicy/stage0-grasp-lift-frozen-roles/v1",
+            }
+        )
+        external = seal_grasp_lift_pilot_record(external)
+
+        preflight = preflight_grasp_lift_validation_selection(
+            self.runs,
+            training_artifact=self.artifact,
+            external_cohort_identity=external,
+        )
+        self.assertEqual(preflight["cohort_identity"], external)
+        self.assertEqual(preflight["source_manifest_sha256"], "3" * 64)
+        self.assertEqual(preflight["source_composite_corpus_sha256"], "2" * 64)
+        verify_grasp_lift_validation_preflight_record(
+            preflight,
+            training_artifact=self.artifact,
+            external_cohort_identity=external,
+        )
+        with self.assertRaisesRegex(ValueError, "cohort changed"):
+            verify_grasp_lift_validation_preflight_record(
+                preflight,
+                training_artifact=self.artifact,
+            )
+
+        claim = build_grasp_lift_validation_claim_record(
+            preflight,
+            training_artifact=self.artifact,
+            selection_protocol_sha256="6" * 64,
+            evaluator_implementation_sha256="7" * 64,
+            external_cohort_identity=external,
+        )
+        self.assertEqual(claim["claim_id"], grasp_lift_validation_claim_id(external))
+
     def test_preflight_rejects_extra_partial_and_symlink_checkpoints(self) -> None:
         checkpoints = self.runs[31001] / "checkpoints"
         extra = checkpoints / ".partial-checkpoint-000000000500-deadbeef"
