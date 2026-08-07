@@ -13,10 +13,13 @@ from pathlib import Path
 from typing import Any
 
 from rexpolicy.stage0.data.grasp_lift_validation_cohort import (
+    GRASP_LIFT_VALIDATION_AUTHORING_CLAIM_REGISTRY,
     GRASP_LIFT_VALIDATION_AUTHORING_COMMIT_SCHEMA_ID,
     GRASP_LIFT_VALIDATION_AUTHORING_MANIFEST_SCHEMA_ID,
     GRASP_LIFT_VALIDATION_AUTHORING_STATUS_SCHEMA_ID,
     GRASP_LIFT_VALIDATION_LOCKED_TEST,
+    GraspLiftValidationAuthoringConfig,
+    grasp_lift_validation_authoring_claim_record,
     grasp_lift_validation_cohort_slot_id,
     grasp_lift_validation_environment_config_record,
     grasp_lift_validation_preregistration_record,
@@ -55,9 +58,7 @@ def _parse_args() -> argparse.Namespace:
 def _persist_authoring_claim_once(
     *,
     repository_root: Path,
-    cohort_slot_id: str,
-    config_sha256: str,
-    preregistration_sha256: str,
+    config: GraspLiftValidationAuthoringConfig,
     implementation_sha256: str,
 ) -> dict[str, Any]:
     """Burn this exact seed slot before Torch or Newton can observe it."""
@@ -71,17 +72,12 @@ def _persist_authoring_claim_once(
     common_dir = Path(common)
     if not common_dir.is_absolute():
         common_dir = (repository_root / common_dir).resolve()
-    claim = seal_grasp_lift_pilot_record(
-        {
-            "cohort_slot_id": cohort_slot_id,
-            "config_sha256": config_sha256,
-            "implementation_sha256": implementation_sha256,
-            "locked_test": dict(GRASP_LIFT_VALIDATION_LOCKED_TEST),
-            "preregistration_sha256": preregistration_sha256,
-            "schema_id": ("rexpolicy/stage0-grasp-lift-validation-authoring-claim/v1"),
-        }
+    claim = grasp_lift_validation_authoring_claim_record(
+        config,
+        implementation_sha256=implementation_sha256,
     )
-    registry = common_dir / "rexpolicy-validation-authoring-claims"
+    cohort_slot_id = grasp_lift_validation_cohort_slot_id(config)
+    registry = common_dir / GRASP_LIFT_VALIDATION_AUTHORING_CLAIM_REGISTRY
     existed = registry.exists()
     registry.mkdir(parents=True, exist_ok=True)
     if registry.is_symlink() or not registry.is_dir():
@@ -113,9 +109,7 @@ def main() -> None:
     cohort_slot_id = grasp_lift_validation_cohort_slot_id(config)
     _persist_authoring_claim_once(
         repository_root=repository_root,
-        cohort_slot_id=cohort_slot_id,
-        config_sha256=config.sha256,
-        preregistration_sha256=preregistration_sha256,
+        config=config,
         implementation_sha256=implementation.sha256,
     )
 

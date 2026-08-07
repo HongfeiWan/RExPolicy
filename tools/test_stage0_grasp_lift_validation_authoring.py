@@ -4,17 +4,20 @@ from __future__ import annotations
 
 import ast
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 
 from rexpolicy.stage0.data.grasp_lift_validation_cohort import (
+    GRASP_LIFT_VALIDATION_AUTHORING_CLAIM_REGISTRY,
     GRASP_LIFT_VALIDATION_AUTHORING_COMMIT_SCHEMA_ID,
     GRASP_LIFT_VALIDATION_AUTHORING_MANIFEST_SCHEMA_ID,
     GRASP_LIFT_VALIDATION_AUTHORING_STATUS_SCHEMA_ID,
     GRASP_LIFT_VALIDATION_LOCKED_TEST,
     GRASP_LIFT_VALIDATION_RESET_SEEDS,
     derive_grasp_lift_validation_seeds,
+    grasp_lift_validation_authoring_claim_record,
     grasp_lift_validation_cohort_slot_id,
     grasp_lift_validation_environment_config_record,
     grasp_lift_validation_preregistration_record,
@@ -22,6 +25,7 @@ from rexpolicy.stage0.data.grasp_lift_validation_cohort import (
     load_grasp_lift_validation_authoring_manifest,
     load_grasp_lift_validation_authoring_metadata,
     validation_authoring_file_sha256,
+    verify_persisted_grasp_lift_validation_authoring_claim,
 )
 from rexpolicy.stage0.grasp_lift_pilot import (
     grasp_lift_pilot_oracle_record,
@@ -257,6 +261,51 @@ class GraspLiftValidationAuthoringMetadataTests(unittest.TestCase):
             self.assertFalse((root / "shards").exists())
             with self.assertRaisesRegex(ValueError, "file set changed"):
                 load_grasp_lift_validation_authoring_manifest(root)
+
+    def test_persisted_pre_cuda_claim_is_required_in_the_same_git_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = Path(temporary) / "repository"
+            repository.mkdir()
+            subprocess.run(
+                ["git", "init", "--quiet"],
+                cwd=repository,
+                check=True,
+            )
+            cohort = repository / "cohort"
+            cohort.mkdir()
+            manifest = self._write_metadata_only_artifact(cohort)
+            config = load_grasp_lift_validation_authoring_config(
+                cohort / "config.json"
+            )
+            claim = grasp_lift_validation_authoring_claim_record(
+                config,
+                implementation_sha256=manifest["implementation_sha256"],
+            )
+            registry = (
+                repository
+                / ".git"
+                / GRASP_LIFT_VALIDATION_AUTHORING_CLAIM_REGISTRY
+            )
+            registry.mkdir()
+            claim_path = registry / f"{grasp_lift_validation_cohort_slot_id(config)}.json"
+            _write_json(claim_path, claim)
+
+            observed_sha256 = verify_persisted_grasp_lift_validation_authoring_claim(
+                repository,
+                cohort,
+            )
+            self.assertEqual(
+                observed_sha256,
+                validation_authoring_file_sha256(claim_path),
+            )
+
+            claim["implementation_sha256"] = "0" * 64
+            _write_json(claim_path, claim)
+            with self.assertRaisesRegex(ValueError, "self_sha256"):
+                verify_persisted_grasp_lift_validation_authoring_claim(
+                    repository,
+                    cohort,
+                )
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -34,6 +35,12 @@ GRASP_LIFT_VALIDATION_AUTHORING_STATUS_SCHEMA_ID = (
 )
 GRASP_LIFT_VALIDATION_AUTHORING_COMMIT_SCHEMA_ID = (
     "rexpolicy/stage0-grasp-lift-validation-authoring-commit/v1"
+)
+GRASP_LIFT_VALIDATION_AUTHORING_CLAIM_SCHEMA_ID = (
+    "rexpolicy/stage0-grasp-lift-validation-authoring-claim/v1"
+)
+GRASP_LIFT_VALIDATION_AUTHORING_CLAIM_REGISTRY = (
+    "rexpolicy-validation-authoring-claims"
 )
 GRASP_LIFT_VALIDATION_AUTHORING_PREREGISTRATION_SCHEMA_ID = (
     "rexpolicy/stage0-grasp-lift-validation-authoring-preregistration/v1"
@@ -435,6 +442,75 @@ def grasp_lift_validation_preregistration_record(
         "state_view_sha256": DEFAULT_GRASP_LIFT_STATE_VIEW.sha256,
         "task_metadata_sha256": canonical_fingerprint(task),
     }
+
+
+def grasp_lift_validation_authoring_claim_record(
+    config: GraspLiftValidationAuthoringConfig,
+    *,
+    implementation_sha256: str,
+) -> dict[str, Any]:
+    """Build the record that must be durable before CUDA observes the seeds."""
+    if not isinstance(config, GraspLiftValidationAuthoringConfig):
+        raise TypeError("config has the wrong type")
+    _require_sha256(implementation_sha256, "authoring implementation hash")
+    preregistration = grasp_lift_validation_preregistration_record(config)
+    return seal_grasp_lift_pilot_record(
+        {
+            "cohort_slot_id": grasp_lift_validation_cohort_slot_id(config),
+            "config_sha256": config.sha256,
+            "implementation_sha256": implementation_sha256,
+            "locked_test": dict(GRASP_LIFT_VALIDATION_LOCKED_TEST),
+            "preregistration_sha256": canonical_fingerprint(preregistration),
+            "schema_id": GRASP_LIFT_VALIDATION_AUTHORING_CLAIM_SCHEMA_ID,
+        }
+    )
+
+
+def verify_persisted_grasp_lift_validation_authoring_claim(
+    repository_root: str | Path,
+    cohort_directory: str | Path,
+) -> str:
+    """Verify the pre-CUDA claim in this repository's Git common directory."""
+    requested = Path(repository_root).expanduser()
+    if requested.is_symlink() or not requested.is_dir():
+        raise ValueError("repository_root must be a real directory")
+    root = requested.resolve()
+    completed = subprocess.run(
+        [
+            "git",
+            "rev-parse",
+            "--path-format=absolute",
+            "--show-toplevel",
+            "--git-common-dir",
+        ],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    lines = completed.stdout.splitlines()
+    if len(lines) != 2 or Path(lines[0]).resolve() != root:
+        raise RuntimeError("cannot resolve the validation authoring Git scope")
+    common = Path(lines[1])
+    if not common.is_absolute() or common.is_symlink() or not common.is_dir():
+        raise RuntimeError("validation authoring Git common directory changed")
+
+    metadata = load_grasp_lift_validation_authoring_metadata(cohort_directory)
+    config = GraspLiftValidationAuthoringConfig.from_mapping(metadata["config"])
+    expected = grasp_lift_validation_authoring_claim_record(
+        config,
+        implementation_sha256=metadata["manifest"]["implementation_sha256"],
+    )
+    claim_path = (
+        common
+        / GRASP_LIFT_VALIDATION_AUTHORING_CLAIM_REGISTRY
+        / f"{grasp_lift_validation_cohort_slot_id(config)}.json"
+    )
+    observed = _read_json(claim_path, "validation authoring claim")
+    verify_grasp_lift_pilot_record(observed, "validation authoring claim")
+    if observed != expected:
+        raise ValueError("persisted validation authoring claim changed")
+    return validation_authoring_file_sha256(claim_path)
 
 
 def _strict_member_path(
@@ -885,6 +961,8 @@ def load_grasp_lift_validation_authoring_manifest(
 
 
 __all__ = [
+    "GRASP_LIFT_VALIDATION_AUTHORING_CLAIM_REGISTRY",
+    "GRASP_LIFT_VALIDATION_AUTHORING_CLAIM_SCHEMA_ID",
     "GRASP_LIFT_VALIDATION_AUTHORING_COMMIT_SCHEMA_ID",
     "GRASP_LIFT_VALIDATION_AUTHORING_CONFIG_SCHEMA_ID",
     "GRASP_LIFT_VALIDATION_AUTHORING_MANIFEST_SCHEMA_ID",
@@ -896,6 +974,7 @@ __all__ = [
     "GRASP_LIFT_VALIDATION_SEED_NAMESPACE",
     "GraspLiftValidationAuthoringConfig",
     "derive_grasp_lift_validation_seeds",
+    "grasp_lift_validation_authoring_claim_record",
     "grasp_lift_validation_cohort_slot_id",
     "grasp_lift_validation_cohort_slot_record",
     "grasp_lift_validation_environment_config_record",
@@ -904,4 +983,5 @@ __all__ = [
     "load_grasp_lift_validation_authoring_manifest",
     "load_grasp_lift_validation_authoring_metadata",
     "validation_authoring_file_sha256",
+    "verify_persisted_grasp_lift_validation_authoring_claim",
 ]
