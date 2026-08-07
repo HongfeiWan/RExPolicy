@@ -2,6 +2,11 @@
 
 Status: **engineering loop implemented; scientific manifold gate not yet passed**.
 
+Document authority: this is supporting Phase 2 research evidence and a node1
+execution protocol. The canonical phase order, active learner, and release
+status are governed by [the roadmap](README.md); Stage 0 is not a second
+delivery route.
+
 ## Node1 Grasp-Lift authoring snapshot — 2026-08-06
 
 The reward-free Grasp-Lift authoring gate passed on node1 CUDA0 at Git commit
@@ -54,15 +59,15 @@ or oracle evidence, but a real scene asset is still required before any visual
 rollout can be presented as camera-valid evidence; a synthetic background must
 not be substituted.
 
-## Frozen node1 no-z learning protocol — 2026-08-07
+## Frozen node1 no-z direct-training protocol — 2026-08-07
 
 The learning and selection software is implemented, but this section records a
 runtime protocol, not a completed learning result. The final checkout must be
-clean and remain on one Git HEAD from the evaluator smoke through all three
-training runs and one-time selection. The implementation fingerprint contains
-that HEAD plus the Python, Torch, Warp, Newton, and MuJoCo-Warp versions. A
-pull, commit, runtime change, different world size, or untracked file during
-the cohort invalidates comparability and must fail closed.
+clean and remain on one Git HEAD from the first direct training launch through
+all three training runs and one-time selection. The implementation fingerprint
+contains that HEAD plus the Python, Torch, Warp, Newton, and MuJoCo-Warp
+versions. A pull, commit, runtime change, different world size, or untracked
+file during the cohort invalidates comparability and must fail closed.
 
 Node1 has one visible NVIDIA RTX PRO 5000 72GB GPU. "Use all GPUs" therefore
 means CUDA0 with `world_size=1`; it does not mean launching a fictitious
@@ -80,14 +85,11 @@ train content:  57f5e492dc4365ef71c425231aa1c2ee4ab7ed9261ffc2e4fb08ee799ff22425
 normalization:  aa2a9d9bd37637046df8ffe8a46aabb51a1ac50629705a847396aa52d2993dad
 ```
 
-Before touching validation, activate the existing Newton environment and run
-the evaluator parity smoke against six train resets and four fixed policy-noise
-variants. The output path must be new. This exercises the exact 24-world,
-72-control-step, state-only Newton rollout stack with a fixed random policy;
-success and ordinary task-safety failures are deliberately not gates. The gate
-requires exact budget binding, zero execution-integrity faults (including any
-nonzero reward), zero oracle-input disagreements, and zero collision-buffer
-overflow. It never opens a validation shard or creates a claim.
+The evaluator parity smoke remains available as an optional train-only
+diagnostic, but it is not a prerequisite and is not run by this protocol. The
+first CUDA operation is the real seed-31001 optimizer run. Before launching it,
+activate the existing Newton environment and verify the final source, CPU
+cpuset, GPU ownership, and immutable input paths directly:
 
 ```bash
 cd /home/user/project/RExPolicy-grasp-lift-training
@@ -103,20 +105,9 @@ assert len(available) == 32, available
 print(available)
 PY
 nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv,noheader
-
-CUDA_VISIBLE_DEVICES=0 python -u -m tools.smoke_stage0_grasp_lift_no_z_evaluator \
-  --config /home/user/project/RExPolicy-grasp-lift-training/configs/stage0/grasp_lift_no_z_bc.json \
-  --pilot-directory /home/user/project/RExPolicy-grasp-lift-close7/outputs/stage0/grasp-lift-pilot-close7-20260806-b \
-  --training-artifact /home/user/project/RExPolicy-grasp-lift-training/outputs/stage0/grasp-lift-training-close7-20260806-a \
-  --output /home/user/project/RExPolicy-grasp-lift-training/outputs/stage0/grasp-lift-no-z-evaluator-smoke-20260807-a.json \
-  --device cuda:0
+test -d /home/user/project/RExPolicy-grasp-lift-close7/outputs/stage0/grasp-lift-pilot-close7-20260806-b
+test -d /home/user/project/RExPolicy-grasp-lift-training/outputs/stage0/grasp-lift-training-close7-20260806-a
 ```
-
-Proceed only when the persisted smoke record is self-hash valid, has
-`state="passed"`, reports 24 episodes, and records the same Git HEAD intended
-for training. A failed smoke may be diagnosed and repaired using train data;
-because the repair changes HEAD, it requires a new smoke output path. It still
-must not consume validation.
 
 Formal training uses seeds `31001`, `31002`, and `31003`, global batch 2,048,
 10,000 optimizer steps, a checkpoint at step zero and every 500 steps, and no
