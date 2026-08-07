@@ -8,25 +8,30 @@ CUDA/Newton gate.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any
 
 import torch
 from torch import nn
 
 from rexpolicy.stage0.envs.grasp_lift_action import (
+    DEFAULT_GRASP_LIFT_ACTION_SCHEMA,
     GRASP_LIFT_ACTION_DIM,
     GRASP_LIFT_EFFECTIVE_ACTION_MASK,
     grasp_lift_model_to_physical_action,
 )
 from rexpolicy.stage0.envs.grasp_lift_oracle import (
+    GRASP_LIFT_ORACLE_ID,
     GraspLiftOracleResult,
     GraspLiftSuccessOracle,
     GraspLiftTransientEvents,
     grasp_lift_transient_events_from_info,
 )
 from rexpolicy.stage0.envs.grasp_lift_state_view import (
+    DEFAULT_GRASP_LIFT_STATE_VIEW,
     apply_grasp_lift_state_view,
 )
 from rexpolicy.stage0.envs.state_schema import DEFAULT_STAGE0_STATE_SCHEMA
@@ -44,6 +49,10 @@ GRASP_LIFT_ROLLOUT_RESULT_SCHEMA_ID = (
     "rexpolicy/stage0-grasp-lift-rollout-result/v1"
 )
 GRASP_LIFT_FORMAL_NOISE_VARIANTS = 4
+GRASP_LIFT_FORMAL_FLOW_SAMPLE_STEPS = 16
+GRASP_LIFT_ROLLOUT_PROTOCOL_SCHEMA_ID = (
+    "rexpolicy/stage0-grasp-lift-rollout-protocol/v1"
+)
 
 
 def _positive_int(value: Any, *, name: str) -> int:
@@ -123,6 +132,12 @@ class GraspLiftRolloutBudget:
         expected_variants = set(range(GRASP_LIFT_FORMAL_NOISE_VARIANTS))
         if any(variants != expected_variants for variants in groups.values()):
             raise ValueError("every reset must contain all four noise variants")
+        group_ids = tuple(group_id for group_id, _ in groups)
+        reset_seeds = tuple(reset_seed for _, reset_seed in groups)
+        if len(set(group_ids)) != len(group_ids):
+            raise ValueError("reset group IDs must be unique")
+        if len(set(reset_seeds)) != len(reset_seeds):
+            raise ValueError("reset seeds must be unique")
         expected_order = tuple(
             (group_id, reset_seed, variant)
             for group_id, reset_seed in groups
@@ -204,6 +219,125 @@ class GraspLiftRolloutBudget:
         return canonical_fingerprint(self.to_record())
 
 
+@dataclass(frozen=True)
+class GraspLiftRolloutProtocol:
+    """Every semantic choice that can change one rollout result."""
+
+    action_horizon: int
+    flow_sample_steps: int
+    normalization_sha256: str
+    oracle_thresholds: Mapping[str, Any]
+
+    def __post_init__(self) -> None:
+        _positive_int(self.action_horizon, name="action_horizon")
+        if self.flow_sample_steps != GRASP_LIFT_FORMAL_FLOW_SAMPLE_STEPS:
+            raise ValueError("formal Grasp-Lift flow sample steps changed")
+        if (
+            not isinstance(self.normalization_sha256, str)
+            or len(self.normalization_sha256) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in self.normalization_sha256
+            )
+        ):
+            raise ValueError("normalization_sha256 must be a SHA-256 digest")
+        expected_keys = {
+            "bottle_tilt_limit_rad",
+            "drop_confirm_control_steps",
+            "grasp_confirm_physics_frames",
+            "lateral_displacement_limit_m",
+            "lift_height_m",
+            "oracle_id",
+            "state_schema_sha256",
+            "success_hold_control_steps",
+        }
+        if not isinstance(self.oracle_thresholds, Mapping) or set(
+            self.oracle_thresholds
+        ) != expected_keys:
+            raise ValueError("oracle threshold record changed")
+        record = dict(self.oracle_thresholds)
+        if (
+            record["oracle_id"] != GRASP_LIFT_ORACLE_ID
+            or record["state_schema_sha256"]
+            != DEFAULT_STAGE0_STATE_SCHEMA.sha256
+        ):
+            raise ValueError("oracle identity or state schema changed")
+        for name in (
+            "bottle_tilt_limit_rad",
+            "lateral_displacement_limit_m",
+            "lift_height_m",
+        ):
+            value = record[name]
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                or float(value) <= 0.0
+            ):
+                raise ValueError(f"oracle {name} must be finite and positive")
+        for name in (
+            "drop_confirm_control_steps",
+            "grasp_confirm_physics_frames",
+            "success_hold_control_steps",
+        ):
+            _positive_int(record[name], name=f"oracle {name}")
+        object.__setattr__(self, "oracle_thresholds", MappingProxyType(record))
+
+    def to_record(self) -> dict[str, Any]:
+        return {
+            "action_horizon": self.action_horizon,
+            "action_schema_sha256": DEFAULT_GRASP_LIFT_ACTION_SCHEMA.sha256,
+            "control": "first_action_receding_horizon/v1",
+            "flow_sample_steps": self.flow_sample_steps,
+            "noise_namespace": GRASP_LIFT_POLICY_NOISE_NAMESPACE,
+            "normalization_sha256": self.normalization_sha256,
+            "oracle": dict(self.oracle_thresholds),
+            "policy_conditioning": "success_latent_none/v1",
+            "schema_id": GRASP_LIFT_ROLLOUT_PROTOCOL_SCHEMA_ID,
+            "state_schema_sha256": DEFAULT_STAGE0_STATE_SCHEMA.sha256,
+            "state_view_sha256": DEFAULT_GRASP_LIFT_STATE_VIEW.sha256,
+        }
+
+    @property
+    def sha256(self) -> str:
+        return canonical_fingerprint(self.to_record())
+
+
+def grasp_lift_rollout_protocol(
+    normalization: Stage0Normalization,
+    oracle: GraspLiftSuccessOracle,
+    *,
+    action_horizon: int,
+    flow_sample_steps: int = GRASP_LIFT_FORMAL_FLOW_SAMPLE_STEPS,
+) -> GraspLiftRolloutProtocol:
+    """Bind and verify the exact formal oracle and policy-control semantics."""
+
+    if not isinstance(normalization, Stage0Normalization):
+        raise TypeError("normalization must be Stage0Normalization")
+    if not isinstance(oracle, GraspLiftSuccessOracle):
+        raise TypeError("oracle must be GraspLiftSuccessOracle")
+    thresholds = {
+        "bottle_tilt_limit_rad": oracle.bottle_tilt_limit_rad,
+        "drop_confirm_control_steps": oracle.drop_confirm_control_steps,
+        "grasp_confirm_physics_frames": oracle.grasp_confirm_physics_frames,
+        "lateral_displacement_limit_m": oracle.lateral_displacement_limit_m,
+        "lift_height_m": oracle.lift_height_m,
+        "oracle_id": GRASP_LIFT_ORACLE_ID,
+        "state_schema_sha256": oracle.schema.sha256,
+        "success_hold_control_steps": oracle.success_hold_control_steps,
+    }
+    from rexpolicy.stage0.grasp_lift_pilot import grasp_lift_pilot_oracle_record
+
+    if thresholds != grasp_lift_pilot_oracle_record():
+        raise ValueError("formal Grasp-Lift oracle thresholds changed")
+    return GraspLiftRolloutProtocol(
+        action_horizon=action_horizon,
+        flow_sample_steps=flow_sample_steps,
+        normalization_sha256=normalization.sha256,
+        oracle_thresholds=thresholds,
+    )
+
+
 def _cpu_vector(
     value: torch.Tensor,
     *,
@@ -226,6 +360,7 @@ class GraspLiftRolloutResult:
     """Per-cell oracle outcomes and zero-tolerance safety/integrity witnesses."""
 
     budget: GraspLiftRolloutBudget
+    protocol: GraspLiftRolloutProtocol
     success: torch.Tensor
     failure: torch.Tensor
     timeout: torch.Tensor
@@ -244,6 +379,8 @@ class GraspLiftRolloutResult:
     def __post_init__(self) -> None:
         if not isinstance(self.budget, GraspLiftRolloutBudget):
             raise TypeError("budget must be GraspLiftRolloutBudget")
+        if not isinstance(self.protocol, GraspLiftRolloutProtocol):
+            raise TypeError("protocol must be GraspLiftRolloutProtocol")
         count = self.budget.episode_count
         bool_names = (
             "success",
@@ -304,7 +441,7 @@ class GraspLiftRolloutResult:
         ):
             raise ValueError("completed_steps is outside the rollout budget")
         safety = self.safety_violation
-        if bool((self.success & (safety | self.integrity_violation)).any()):
+        if bool((self.success & (safety | self.any_integrity_fault)).any()):
             raise ValueError("a successful cell cannot carry a safety/integrity fault")
 
     @property
@@ -318,7 +455,7 @@ class GraspLiftRolloutResult:
         )
 
     @property
-    def integrity_violation(self) -> torch.Tensor:
+    def any_integrity_fault(self) -> torch.Tensor:
         return self.oracle_input_disagreement | self.execution_integrity_violation
 
     @property
@@ -388,7 +525,15 @@ class GraspLiftRolloutResult:
             "budget_sha256": self.budget.sha256,
             "cells": cells,
             "executed_world_steps": int(self.completed_steps.sum()),
-            "integrity_violation_count": int(self.integrity_violation.sum()),
+            "any_integrity_fault_count": int(self.any_integrity_fault.sum()),
+            "execution_integrity_violation_count": int(
+                self.execution_integrity_violation.sum()
+            ),
+            "oracle_input_disagreement_count": int(
+                self.oracle_input_disagreement.sum()
+            ),
+            "protocol": self.protocol.to_record(),
+            "protocol_sha256": self.protocol.sha256,
             "safety_violation_count": int(self.safety_violation.sum()),
             "schema_id": GRASP_LIFT_ROLLOUT_RESULT_SCHEMA_ID,
             "success_count": self.success_count,
@@ -567,7 +712,7 @@ def rollout_grasp_lift_no_z_policy(
     budget: GraspLiftRolloutBudget,
     *,
     oracle: GraspLiftSuccessOracle | None = None,
-    flow_sample_steps: int = 16,
+    flow_sample_steps: int = GRASP_LIFT_FORMAL_FLOW_SAMPLE_STEPS,
 ) -> GraspLiftRolloutResult:
     """Run a no-z policy with first-action receding-horizon control.
 
@@ -583,6 +728,8 @@ def rollout_grasp_lift_no_z_policy(
     if not isinstance(budget, GraspLiftRolloutBudget):
         raise TypeError("budget must be GraspLiftRolloutBudget")
     flow_sample_steps = _positive_int(flow_sample_steps, name="flow_sample_steps")
+    if flow_sample_steps != GRASP_LIFT_FORMAL_FLOW_SAMPLE_STEPS:
+        raise ValueError("formal Grasp-Lift flow sample steps changed")
     count = budget.episode_count
     if getattr(env, "num_envs", None) != count:
         raise ValueError("environment world count must equal rollout cell count")
@@ -622,6 +769,12 @@ def rollout_grasp_lift_no_z_policy(
     if not isinstance(oracle, GraspLiftSuccessOracle) or oracle.num_envs != count:
         raise ValueError("oracle must cover every rollout cell")
     oracle.reset(state)
+    protocol = grasp_lift_rollout_protocol(
+        normalization,
+        oracle,
+        action_horizon=action_horizon,
+        flow_sample_steps=flow_sample_steps,
+    )
 
     success = torch.zeros(count, dtype=torch.bool, device=device)
     failure = torch.zeros_like(success)
@@ -632,6 +785,11 @@ def rollout_grasp_lift_no_z_policy(
     terminal_lift = torch.zeros(count, dtype=dtype, device=device)
     terminal_lateral = torch.zeros_like(terminal_lift)
     terminal_tilt = torch.zeros_like(terminal_lift)
+    terminal_forbidden = torch.zeros_like(success)
+    terminal_lateral_violation = torch.zeros_like(success)
+    terminal_tilt_violation = torch.zeros_like(success)
+    terminal_dropped = torch.zeros_like(success)
+    terminal_overflow = torch.zeros_like(success)
     active = torch.ones_like(success)
     latest: GraspLiftOracleResult | None = None
     policy_training = policy.training
@@ -704,6 +862,8 @@ def rollout_grasp_lift_no_z_policy(
                 if not isinstance(info, Mapping):
                     raise TypeError("transition info must be a mapping")
                 reward = getattr(transition, "reward", None)
+                reported_state = getattr(transition, "state", None)
+                reported_action = getattr(transition, "action", None)
                 terminated = getattr(transition, "terminated", None)
                 truncated = getattr(transition, "truncated", None)
                 for name, value in (
@@ -731,6 +891,21 @@ def rollout_grasp_lift_no_z_policy(
                         f"[{count}]"
                     )
                 integrity |= (reward != 0) & active_before
+                for name, reported, expected in (
+                    ("state", reported_state, state),
+                    ("action", reported_action, projected),
+                ):
+                    if (
+                        not isinstance(reported, torch.Tensor)
+                        or reported.shape != expected.shape
+                        or reported.device != device
+                        or reported.dtype != dtype
+                    ):
+                        raise ValueError(
+                            f"transition {name} changed its tensor contract"
+                        )
+                    mismatch = (reported != expected).reshape(count, -1).any(dim=1)
+                    integrity |= mismatch & active_before
                 if bool(terminated.any()):
                     integrity |= terminated & active_before
                 if control_step + 1 < budget.max_steps_per_episode:
@@ -765,6 +940,31 @@ def rollout_grasp_lift_no_z_policy(
                     latest.bottle_tilt,
                     terminal_tilt,
                 )
+                terminal_forbidden = torch.where(
+                    active_before,
+                    latest.forbidden_contact_violation,
+                    terminal_forbidden,
+                )
+                terminal_lateral_violation = torch.where(
+                    active_before,
+                    latest.lateral_displacement_violation,
+                    terminal_lateral_violation,
+                )
+                terminal_tilt_violation = torch.where(
+                    active_before,
+                    latest.bottle_tilt_violation,
+                    terminal_tilt_violation,
+                )
+                terminal_dropped = torch.where(
+                    active_before,
+                    latest.dropped_grasp_violation,
+                    terminal_dropped,
+                )
+                terminal_overflow = torch.where(
+                    active_before,
+                    latest.collision_buffer_overflow_violation,
+                    terminal_overflow,
+                )
                 oracle_disagreement |= (
                     _oracle_input_disagreement(next_state, info) & active_before
                 )
@@ -788,21 +988,18 @@ def rollout_grasp_lift_no_z_policy(
         latest = _last_oracle_result(oracle, state)
     return GraspLiftRolloutResult(
         budget=budget,
+        protocol=protocol,
         success=success.detach().cpu(),
         failure=failure.detach().cpu(),
         timeout=timeout.detach().cpu(),
         completed_steps=completed_steps.detach().cpu(),
-        forbidden_contact_violation=(
-            latest.forbidden_contact_violation.detach().cpu()
-        ),
+        forbidden_contact_violation=terminal_forbidden.detach().cpu(),
         lateral_displacement_violation=(
-            latest.lateral_displacement_violation.detach().cpu()
+            terminal_lateral_violation.detach().cpu()
         ),
-        bottle_tilt_violation=latest.bottle_tilt_violation.detach().cpu(),
-        dropped_grasp_violation=latest.dropped_grasp_violation.detach().cpu(),
-        collision_buffer_overflow_violation=(
-            latest.collision_buffer_overflow_violation.detach().cpu()
-        ),
+        bottle_tilt_violation=terminal_tilt_violation.detach().cpu(),
+        dropped_grasp_violation=terminal_dropped.detach().cpu(),
+        collision_buffer_overflow_violation=terminal_overflow.detach().cpu(),
         oracle_input_disagreement=oracle_disagreement.detach().cpu(),
         execution_integrity_violation=integrity.detach().cpu(),
         final_lift_height_m=terminal_lift.detach().float().cpu(),
@@ -812,11 +1009,15 @@ def rollout_grasp_lift_no_z_policy(
 
 
 __all__ = [
+    "GRASP_LIFT_FORMAL_FLOW_SAMPLE_STEPS",
     "GRASP_LIFT_FORMAL_NOISE_VARIANTS",
     "GRASP_LIFT_POLICY_NOISE_NAMESPACE",
     "GRASP_LIFT_ROLLOUT_BUDGET_SCHEMA_ID",
+    "GRASP_LIFT_ROLLOUT_PROTOCOL_SCHEMA_ID",
     "GRASP_LIFT_ROLLOUT_RESULT_SCHEMA_ID",
     "GraspLiftRolloutBudget",
+    "GraspLiftRolloutProtocol",
     "GraspLiftRolloutResult",
+    "grasp_lift_rollout_protocol",
     "rollout_grasp_lift_no_z_policy",
 ]

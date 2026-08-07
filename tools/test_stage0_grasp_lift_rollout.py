@@ -51,6 +51,7 @@ class _FakeGraspLiftEnv:
         *,
         never_grasp: bool = False,
         forbidden_world: int | None = None,
+        late_forbidden_world: int | None = None,
         disagree_world: int | None = None,
         drift_world: int | None = None,
         nonzero_reward_world: int | None = None,
@@ -59,6 +60,7 @@ class _FakeGraspLiftEnv:
         self.num_envs = count
         self.never_grasp = never_grasp
         self.forbidden_world = forbidden_world
+        self.late_forbidden_world = late_forbidden_world
         self.disagree_world = disagree_world
         self.drift_world = drift_world
         self.nonzero_reward_world = nonzero_reward_world
@@ -135,6 +137,8 @@ class _FakeGraspLiftEnv:
         forbidden = torch.zeros(self.num_envs, dtype=torch.bool)
         if self.forbidden_world is not None and self._step == 0:
             forbidden[self.forbidden_world] = True
+        if self.late_forbidden_world is not None and self._step == 1:
+            forbidden[self.late_forbidden_world] = True
         overflow_count = torch.tensor(
             [int(self.overflow and self._step == 0)], dtype=torch.int64
         )
@@ -256,6 +260,14 @@ class GraspLiftRolloutTest(unittest.TestCase):
             GraspLiftRolloutBudget.from_reset_groups(
                 (("reset-7009", 7009), ("reset-7009", 7009))
             )
+        with self.assertRaisesRegex(ValueError, "group IDs"):
+            GraspLiftRolloutBudget.from_reset_groups(
+                (("same", 7009), ("same", 7014))
+            )
+        with self.assertRaisesRegex(ValueError, "reset seeds"):
+            GraspLiftRolloutBudget.from_reset_groups(
+                (("reset-a", 7009), ("reset-b", 7009))
+            )
 
     def test_receding_horizon_applies_state_view_hybrid_decode_and_projection(
         self,
@@ -268,7 +280,7 @@ class GraspLiftRolloutTest(unittest.TestCase):
             policy,
             _normalization(),
             budget,
-            flow_sample_steps=3,
+            flow_sample_steps=16,
         )
 
         self.assertEqual(
@@ -279,7 +291,7 @@ class GraspLiftRolloutTest(unittest.TestCase):
         self.assertEqual(env.reset_seeds, budget.reset_seeds)
         self.assertEqual(len(env.actions), 3)
         self.assertTrue(policy.training)
-        self.assertEqual(policy.steps, 3)
+        self.assertEqual(policy.steps, 16)
         self.assertTrue(all(latent is None for latent in policy.latents))
         expected_phase = torch.tensor([1.0, 0.0, 0.0, 0.0, 0.0])
         phase_slice = DEFAULT_STAGE0_STATE_SCHEMA.slice("task_phase_one_hot")
@@ -302,6 +314,19 @@ class GraspLiftRolloutTest(unittest.TestCase):
                 atol=1.0e-7,
             )
         self.assertEqual(result.to_record()["safety_violation_count"], 0)
+        self.assertEqual(
+            result.to_record()["protocol_sha256"],
+            result.protocol.sha256,
+        )
+
+        with self.assertRaisesRegex(ValueError, "flow sample steps"):
+            rollout_grasp_lift_no_z_policy(
+                _FakeGraspLiftEnv(budget.episode_count),
+                _FakePolicy(),
+                _normalization(),
+                budget,
+                flow_sample_steps=3,
+            )
 
     def test_noise_is_paired_across_repeated_model_evaluations(self) -> None:
         budget = _budget()
@@ -379,6 +404,24 @@ class GraspLiftRolloutTest(unittest.TestCase):
                 self.assertTrue(getattr(result, field)[1])
                 self.assertTrue(result.success[0])
                 self.assertTrue(bool(result.success[2:].all()))
+
+    def test_external_failure_freezes_oracle_evidence_at_terminal_step(self) -> None:
+        budget = _budget()
+        result = rollout_grasp_lift_no_z_policy(
+            _FakeGraspLiftEnv(
+                budget.episode_count,
+                drift_world=0,
+                late_forbidden_world=0,
+            ),
+            _FakePolicy(),
+            _normalization(),
+            budget,
+        )
+
+        self.assertEqual(result.outcomes[0], Stage0Outcome.FAILURE)
+        self.assertTrue(result.execution_integrity_violation[0])
+        self.assertFalse(result.forbidden_contact_violation[0])
+        self.assertEqual(int(result.completed_steps[0]), 1)
 
 
 if __name__ == "__main__":
