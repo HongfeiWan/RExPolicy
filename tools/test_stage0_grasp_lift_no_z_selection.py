@@ -13,12 +13,14 @@ from typing import Any
 
 from rexpolicy.stage0.grasp_lift_no_z_selection import (
     GRASP_LIFT_NO_Z_POLICY_NOISE_INDICES,
+    GRASP_LIFT_NO_Z_SELECTION_PROTOCOL_SHA256,
     GRASP_LIFT_NO_Z_SELECTION_SCHEMA_ID,
     GRASP_LIFT_NO_Z_VALIDATION_RESET_SEEDS,
     GRASP_LIFT_NO_Z_VALIDATION_STEPS,
     GRASP_LIFT_NO_Z_VALIDATION_TRAINING_SEEDS,
     GraspLiftNoZSeedCheckpointEvidence,
     GraspLiftNoZValidationRollout,
+    grasp_lift_no_z_selection_protocol_record,
     select_grasp_lift_no_z_checkpoint,
     verify_grasp_lift_no_z_selection_record,
 )
@@ -27,6 +29,12 @@ from rexpolicy.stage0.types import canonical_fingerprint
 
 def _model_sha256(step: int, seed: int) -> str:
     return canonical_fingerprint({"checkpoint_step": step, "training_seed": seed})
+
+
+def _reseal(record: dict[str, Any]) -> None:
+    unsealed = dict(record)
+    unsealed.pop("self_sha256")
+    record["self_sha256"] = canonical_fingerprint(unsealed)
 
 
 def _rollouts(
@@ -113,6 +121,22 @@ def _only_steps_eligible(
 
 
 class GraspLiftNoZSelectionTest(unittest.TestCase):
+    def test_public_protocol_record_has_one_stable_fingerprint(self) -> None:
+        first = grasp_lift_no_z_selection_protocol_record()
+        second = grasp_lift_no_z_selection_protocol_record()
+
+        self.assertEqual(first, second)
+        self.assertIsNot(first, second)
+        self.assertEqual(
+            canonical_fingerprint(first),
+            GRASP_LIFT_NO_Z_SELECTION_PROTOCOL_SHA256,
+        )
+        first["training_seeds"].append(-1)
+        self.assertEqual(
+            tuple(second["training_seeds"]),
+            GRASP_LIFT_NO_Z_VALIDATION_TRAINING_SEEDS,
+        )
+
     def test_complete_passing_inventory_selects_one_same_step_seed_family(
         self,
     ) -> None:
@@ -394,6 +418,50 @@ class GraspLiftNoZSelectionTest(unittest.TestCase):
         extended["uncommitted_note"] = "not allowed"
         with self.assertRaisesRegex(ValueError, "fields changed"):
             verify_grasp_lift_no_z_selection_record(extended)
+
+    def test_resealed_nested_tampering_is_rejected_by_reconstruction(self) -> None:
+        record = select_grasp_lift_no_z_checkpoint(_inventory()).to_record()
+
+        changed_evidence = copy.deepcopy(record)
+        changed_evidence["evidence"][0]["rollouts"][0]["success"] = False
+        _reseal(changed_evidence)
+        with self.assertRaisesRegex(ValueError, "evidence-derived selection"):
+            verify_grasp_lift_no_z_selection_record(changed_evidence)
+
+        changed_result = copy.deepcopy(record)
+        changed_result["checkpoint_results"][0]["success_count"] = 71
+        _reseal(changed_result)
+        with self.assertRaisesRegex(ValueError, "evidence-derived selection"):
+            verify_grasp_lift_no_z_selection_record(changed_result)
+
+        changed_ranking = copy.deepcopy(record)
+        changed_ranking["selected_checkpoint_step"] = 5_500
+        _reseal(changed_ranking)
+        with self.assertRaisesRegex(ValueError, "evidence-derived selection"):
+            verify_grasp_lift_no_z_selection_record(changed_ranking)
+
+        changed_diagnostic = copy.deepcopy(record)
+        changed_diagnostic["evidence"][0]["offline_mse_diagnostic"][
+            "normalized"
+        ] = 99.0
+        _reseal(changed_diagnostic)
+        with self.assertRaisesRegex(ValueError, "evidence-derived selection"):
+            verify_grasp_lift_no_z_selection_record(changed_diagnostic)
+
+    def test_resealed_nested_shape_and_schema_tampering_is_rejected(self) -> None:
+        record = select_grasp_lift_no_z_checkpoint(_inventory()).to_record()
+
+        changed_schema = copy.deepcopy(record)
+        changed_schema["evidence"][0]["rollouts"][0]["schema_id"] = "wrong/v1"
+        _reseal(changed_schema)
+        with self.assertRaisesRegex(ValueError, "schema_id changed"):
+            verify_grasp_lift_no_z_selection_record(changed_schema)
+
+        extended_rollout = copy.deepcopy(record)
+        extended_rollout["evidence"][0]["rollouts"][0]["note"] = "injected"
+        _reseal(extended_rollout)
+        with self.assertRaisesRegex(ValueError, "fields changed"):
+            verify_grasp_lift_no_z_selection_record(extended_rollout)
 
     def test_module_has_no_torch_newton_or_data_import(self) -> None:
         source_path = (

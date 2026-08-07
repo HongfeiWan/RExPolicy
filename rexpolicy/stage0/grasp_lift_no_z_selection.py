@@ -127,6 +127,17 @@ def _protocol_record() -> dict[str, Any]:
     }
 
 
+def grasp_lift_no_z_selection_protocol_record() -> dict[str, Any]:
+    """Return a fresh copy of the immutable Grasp-Lift selection protocol."""
+
+    return _protocol_record()
+
+
+GRASP_LIFT_NO_Z_SELECTION_PROTOCOL_SHA256 = canonical_fingerprint(
+    grasp_lift_no_z_selection_protocol_record()
+)
+
+
 def _inventory_record() -> dict[str, Any]:
     return {
         "checkpoint_steps": list(GRASP_LIFT_NO_Z_VALIDATION_STEPS),
@@ -744,7 +755,13 @@ def select_grasp_lift_no_z_checkpoint(
 
 
 def verify_grasp_lift_no_z_selection_record(record: Mapping[str, Any]) -> None:
-    """Verify the top-level contract and self hash of one selection record."""
+    """Verify one sealed record and rebuild every result from raw evidence.
+
+    The self hash detects accidental corruption.  It is not treated as an
+    authenticity boundary: after checking it, this verifier parses the exact
+    fixed evidence inventory, reruns the pure selector, and requires the whole
+    supplied record to equal that canonical reconstruction.
+    """
 
     if not isinstance(record, Mapping):
         raise TypeError("selection record must be a mapping")
@@ -778,9 +795,92 @@ def verify_grasp_lift_no_z_selection_record(record: Mapping[str, Any]) -> None:
     if canonical_fingerprint(unsealed) != expected_sha256:
         raise ValueError("selection record self_sha256 mismatch")
 
+    evidence_records = record["evidence"]
+    if not isinstance(evidence_records, list):
+        raise TypeError("selection record evidence must be a list")
+    expected_evidence_count = (
+        len(GRASP_LIFT_NO_Z_VALIDATION_STEPS)
+        * len(GRASP_LIFT_NO_Z_VALIDATION_TRAINING_SEEDS)
+    )
+    if len(evidence_records) != expected_evidence_count:
+        raise ValueError("selection record evidence inventory size changed")
+
+    evidence: list[GraspLiftNoZSeedCheckpointEvidence] = []
+    evidence_fields = {
+        "checkpoint_step",
+        "model_sha256",
+        "offline_mse_diagnostic",
+        "rollouts",
+        "schema_id",
+        "training_seed",
+    }
+    rollout_fields = {
+        "integrity_violation",
+        "oracle_disagreement",
+        "policy_noise_index",
+        "reset_seed",
+        "safety_violation",
+        "schema_id",
+        "success",
+    }
+    for evidence_index, evidence_record in enumerate(evidence_records):
+        evidence_name = f"selection record evidence[{evidence_index}]"
+        if not isinstance(evidence_record, Mapping):
+            raise TypeError(f"{evidence_name} must be a mapping")
+        if set(evidence_record) != evidence_fields:
+            raise ValueError(f"{evidence_name} fields changed")
+        if evidence_record["schema_id"] != _SEED_EVIDENCE_SCHEMA_ID:
+            raise ValueError(f"{evidence_name} schema_id changed")
+
+        rollout_records = evidence_record["rollouts"]
+        if not isinstance(rollout_records, list):
+            raise TypeError(f"{evidence_name}.rollouts must be a list")
+        if len(rollout_records) != _ROLLOUTS_PER_SEED:
+            raise ValueError(f"{evidence_name}.rollouts inventory size changed")
+        rollouts: list[GraspLiftNoZValidationRollout] = []
+        for rollout_index, rollout_record in enumerate(rollout_records):
+            rollout_name = f"{evidence_name}.rollouts[{rollout_index}]"
+            if not isinstance(rollout_record, Mapping):
+                raise TypeError(f"{rollout_name} must be a mapping")
+            if set(rollout_record) != rollout_fields:
+                raise ValueError(f"{rollout_name} fields changed")
+            if rollout_record["schema_id"] != _ROLLOUT_SCHEMA_ID:
+                raise ValueError(f"{rollout_name} schema_id changed")
+            rollouts.append(
+                GraspLiftNoZValidationRollout(
+                    reset_seed=rollout_record["reset_seed"],
+                    policy_noise_index=rollout_record["policy_noise_index"],
+                    success=rollout_record["success"],
+                    safety_violation=rollout_record["safety_violation"],
+                    integrity_violation=rollout_record["integrity_violation"],
+                    oracle_disagreement=rollout_record["oracle_disagreement"],
+                )
+            )
+        evidence.append(
+            GraspLiftNoZSeedCheckpointEvidence(
+                checkpoint_step=evidence_record["checkpoint_step"],
+                training_seed=evidence_record["training_seed"],
+                model_sha256=evidence_record["model_sha256"],
+                rollouts=tuple(rollouts),
+                offline_mse_diagnostic=evidence_record["offline_mse_diagnostic"],
+            )
+        )
+
+    reconstructed = select_grasp_lift_no_z_checkpoint(tuple(evidence))
+    reconstructed_unsealed = reconstructed._unsealed_record()
+    if (
+        unsealed != reconstructed_unsealed
+        or canonical_fingerprint(unsealed)
+        != canonical_fingerprint(reconstructed_unsealed)
+    ):
+        raise ValueError(
+            "selection record disagrees with evidence-derived selection"
+        )
+
 
 __all__ = [
     "GRASP_LIFT_NO_Z_POLICY_NOISE_INDICES",
+    "GRASP_LIFT_NO_Z_SELECTION_PROTOCOL_SHA256",
     "GRASP_LIFT_NO_Z_SELECTION_SCHEMA_ID",
     "GRASP_LIFT_NO_Z_SELECTION_SCHEMA_VERSION",
     "GRASP_LIFT_NO_Z_VALIDATION_RESET_SEEDS",
@@ -792,6 +892,7 @@ __all__ = [
     "GraspLiftNoZSeedCheckpointResult",
     "GraspLiftNoZSelectedModel",
     "GraspLiftNoZValidationRollout",
+    "grasp_lift_no_z_selection_protocol_record",
     "select_grasp_lift_no_z_checkpoint",
     "verify_grasp_lift_no_z_selection_record",
 ]
