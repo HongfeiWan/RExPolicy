@@ -15,6 +15,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
 from rexpolicy.stage0.data.grasp_lift_evidence import (
+    grasp_lift_composite_corpus_sha256,
     load_grasp_lift_evidence_sidecar,
 )
 from rexpolicy.stage0.data.grasp_lift_training import (
@@ -376,6 +377,7 @@ def load_claimed_grasp_lift_revalidation(
     )
 
     loaded: list[GraspLiftValidationMember] = []
+    authored_corpus: list[tuple[Any, Any]] = []
     for commitment, raw_member in zip(
         metadata.commitments, metadata.manifest["members"], strict=True
     ):
@@ -396,6 +398,7 @@ def load_claimed_grasp_lift_revalidation(
         evidence = load_grasp_lift_evidence_sidecar(
             evidence_path, trajectory=trajectory
         )
+        authored_corpus.append((trajectory, evidence))
         if trajectory.provenance.reset_group_id != member["reset_group_id"]:
             raise ValueError("revalidation reset group changed after claim")
         loaded.append(
@@ -406,6 +409,11 @@ def load_claimed_grasp_lift_revalidation(
                 model_trajectory=materialize_grasp_lift_model_trajectory(trajectory),
             )
         )
+
+    if grasp_lift_composite_corpus_sha256(authored_corpus) != metadata.manifest[
+        "composite_corpus_sha256"
+    ]:
+        raise ValueError("revalidation composite corpus changed after claim")
 
     members = tuple(loaded)
     model_trajectories = tuple(item.model_trajectory for item in members)
