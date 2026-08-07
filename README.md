@@ -22,6 +22,12 @@ real canonical success corpus, a trained checksum-pinned bundle, shadow-mode
 evaluation, and the prescribed GPU acceptance gates. With no Phase 2 flags, the
 Phase 1 path is unchanged.
 
+A separate **SM-R** research candidate is planned, but not implemented. It
+adapts progress-aligned retrieval from successful trajectories and bounded,
+frequency-selective action correction to the existing Success Manifold. SM-R
+is default-off and cannot change the Phase 1 path or the SM-1 through SM-5
+activation gates.
+
 The repository also contains an independent, state-only Stage 0 scientific
 validation harness. It is not the canonical active learner or a substitute for
 the ordered release gates above. Its reward-free Grasp-Lift close-at-step-7
@@ -82,6 +88,16 @@ The runnable Phase 1 path contains:
   descriptors and external replay state, which is not yet wired into the
   trainer checkpoint;
 - Phase 5 authoring, quarantine, audit, and lifecycle control-plane primitives.
+
+### Planned, default-off research
+
+- **SM-R:** a frozen, content-addressed successful-trajectory memory; causal
+  history-to-progress alignment; and a clipped low-frequency residual on
+  motion channels only. The unmodified Flow-DiT proposal remains the explicit
+  abstention path, and Newton projection, safety, and the TaskSpec oracle remain
+  authoritative. Validation, exposed or burned cohorts, and locked tests may
+  never populate the memory or tune its hyperparameters. See the
+  [Phase 2 research contract](roadmap/success_manifold_v2.md).
 
 Only executed effective actions are training targets. Episode JSONL stores
 reset recipes, action prefixes, seeds, provenance, task/reward identifiers, and

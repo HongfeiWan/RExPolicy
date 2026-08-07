@@ -694,6 +694,91 @@ hashes, and per-rank state. Gate on crash recovery, exact staged continuation,
 fixed-budget held-out evaluation, and the runnable Reach demo before enabling
 Push or Pick experiments.
 
+### Post-G research extension — progress-aligned spectral correction
+
+This is a planned, default-off experiment inspired by
+[Retrieve in Time, Correct in Frequency](https://arxiv.org/html/2608.04527v1).
+It is not Phase H, is not implemented, and does not change the accepted Stage 0
+gate. Its frozen baseline is the selected step-3,500 three-seed family recorded
+above.
+
+The completed v2 cohort is both consumed and at a 72/72 ceiling, so it cannot
+measure whether retrieval rescues failures. SM-R therefore requires fresh
+development resets with a pre-registered, bounded progress-stress stratum; the
+existing result is baseline-selection evidence only.
+
+The experiment may build a content-addressed success bank only from train
+trajectories or a separately declared memory-collection split. The independent
+v2 validation cohort is already consumed for model selection and is prohibited
+from bank construction, descriptor fitting, correction tuning, threshold
+selection, or another comparison. Locked-test data remains absent and cannot
+be created until a new independent validation protocol passes.
+
+The state-only analogue uses causal normalized-state history to align against
+progress in complete successful trajectories. It then compares the frozen
+no-z proposal with an aligned successful action chunk in DCT space. For the
+initial `[B, H=8, D=19]` contract, only XYZ channels `0:3` and frequencies
+strictly above DC and below a pre-registered cutoff may receive a clipped,
+scaled residual. Rotation and hand-joint channels `9:19` remain unchanged. A
+missing or low-confidence match executes the bit-identical no-z proposal and
+logs an abstention; artifact or fingerprint mismatch fails closed.
+
+The retrieval descriptor must use an explicit allowlist of causal fields that
+the frozen policy can observe. It may not read reset or trajectory identity,
+reward, outcome, oracle-only fields, future state, authoring metadata, or the
+state schema's hand-authored task-phase one-hot. This preserves the experiment's
+central question: whether history resolves progress without receiving a stage
+label.
+
+Before opening fresh independent validation, freeze and hash the selected
+checkpoint family, bank manifest, state normalization/descriptor policy,
+progress-jump bound and penalty, frequency cutoff, residual scale and clip,
+channel mask, confidence rule, reset groups, and all seeds. Compare equal-budget
+conditions for the frozen no-z baseline, history-free nearest-frame retrieval,
+progress alignment with time-domain/full-band correction, and full progress
+alignment with bounded low-frequency correction. Report per-seed and per-reset
+success, safety, integrity, oracle disagreement, rescues/regressions,
+abstention/coverage, CPU latency, and memory size.
+
+The initial Stage 0.5 execution ladder is a planning target; it becomes
+normative only when one clean implementation fingerprint and write-once claim
+seal every value below:
+
+| Gate | Fixed evidence and budget | Required result |
+| --- | --- | --- |
+| G0 baseline freeze | step 3,500, all three selected seed models, normalization and action schema | all recorded hashes reload; the consumed v2 cohort is never reopened |
+| G1 train-only bank | per model: 16 reset groups × 4 policy-noise seeds in an independent namespace | at least 48 verified successes covering at least 12 reset groups and all noise seeds; zero admitted safety/integrity faults |
+| G2 offline alignment | bank-only causal histories plus pre-registered repeat/hold/speed-warp queries | PMA median endpoint error at least 25% below Frame-NN, no negative path transition, and incremental/reference implementations exactly agree |
+| G3 correction shadow | fresh development seeds; compute but do not execute corrected chunks | masked channels, DC and high frequencies remain bit-identical; all outputs finite and clipped; no extra policy forward; added CPU p95 below 20 ms |
+| G4 matched development | 16 fresh reset groups × 4 noises × 3 models in nominal and progress-stress strata | full method gains at least 5 percentage points on stress, beats both ablations, regresses no more than 2 points on nominal, and has zero safety/integrity/oracle disagreement |
+| G5 one-time locked test | after one configuration is frozen; compare only baseline and full SM-R | reset-group bootstrap 95% lower bound above zero, at least 5-point stress gain, nominal non-inferiority margin of -2 points, and no material single-model regression |
+
+The first development stress recipe should be seed-derived and fixed before
+rollout: expand reset XY jitter from 10 mm to 20 mm, insert one bounded
+control-step action hold, and apply an EEF calibration bias of at most 2 mm,
+while retaining a fully nominal stratum. If baseline development success is
+not between 40% and 85%, redesign the stress recipe using train/development
+evidence only; do not open a locked test at a floor or ceiling.
+
+For the first pre-registration, choose PMA progress parameters using only the
+offline synthetic timing queries. Keep the paper's residual scale
+`lambda_0=0.1`, and let outcome-facing development select only
+`F_c in {2, 3}` and normalized-coefficient
+`delta_max in {0.25, 0.5}`. Freeze one configuration and its hashes before G5;
+locked-test outcomes never choose parameters.
+
+Admission requires pre-registered net improvement and regression limits, zero
+safety/integrity/oracle-disagreement events, and evidence that the full method
+beats both retrieval and correction ablations. Only actually executed,
+post-projection chunks from Newton-verified successes may populate the next
+bank generation. Retrieval never becomes a reward or oracle, and failures stay
+out of the positive bank.
+
+This experiment can test temporal alignment and action-spectrum correction in
+the state-only harness. It cannot validate frozen visual descriptors, camera
+or `scene.glb` grounding, language conditioning, or GR00T behavior; that
+evidence belongs to a later Phase 3 visual protocol.
+
 Every phase is a sequence of small commits. Each commit receives focused unit
 tests on node1 and is pushed to the remote work branch. The remote main branch
 is updated only by a verified fast-forward after the phase gate passes.

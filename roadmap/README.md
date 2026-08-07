@@ -107,6 +107,8 @@ It adds an optional successful-future conditioning path to the Phase 1 learner:
 - **SM-3:** diagnostic-only latent projection;
 - **SM-4:** one-token Flow-DiT conditioning with mixed v1/v2 batch support;
 - **SM-5:** simulator-verified bounded latent-memory expansion.
+- **SM-R (planned, not implemented):** progress-aligned retrieval from frozen
+  successful trajectories and bounded, frequency-selective motion correction.
 
 The active v1 path remains unchanged when the feature flags are absent. Phase 2
 cannot activate until Phase 1 is complete and the following gates pass:
@@ -122,6 +124,14 @@ Diversity/progress reward shaping, successor representation, milestone windows,
 automatic bundle promotion, and corpus-scale acceptance evidence remain
 deferred. The detailed contract is
 [success_manifold_v2.md](success_manifold_v2.md).
+
+SM-R is a research-only extension inspired by
+[Retrieve in Time, Correct in Frequency](https://arxiv.org/html/2608.04527v1).
+It remains default-off, adds no reward or success oracle, and does not change
+the ordered phase sequence or the SM-1 through SM-5 gates. Its memory may use
+only simulator-verified training experience; validation, exposed or burned
+cohorts, and locked tests are prohibited. Activation requires a separately
+pre-registered shadow and non-regression ladder on fresh independent data.
 
 ### State-only Stage 0 research workstream
 
