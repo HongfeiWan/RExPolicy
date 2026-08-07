@@ -1,5 +1,11 @@
 # Minimum Flywheel Specification
 
+Canonical roadmap position: **Phase 1**.
+
+Status: **the learning contract is implemented and active; canonical node3
+runtime acceptance remains open**. Phase order and completion are governed by
+[README.md](README.md); this document does not define a separate route.
+
 ## Hypothesis
 
 Can a frozen GR00T VLM plus its existing Flow-DiT improve on a simple Newton

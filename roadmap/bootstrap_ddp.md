@@ -4,6 +4,15 @@ This is the execution contract for the minimum `reach_green_cap/v1` flywheel.
 It covers local validation, safe deployment to node3, a disposable two-
 generation engineering run, and a staged 10→20 generation soak.
 
+This is the sole Phase 1 hardware acceptance protocol in the canonical
+[roadmap](README.md). Dated capacity reports and noncanonical checkpoints do not
+replace these gates.
+
+Canonical acceptance runs resolve `GROOT_POLICY_CHECKPOINT` to
+`checkpoints/groot/checkpoint-200000/` and `GROOT_VLM_MODEL` to
+`checkpoints/nvidia/Cosmos-Reason2-2B/`. Another base checkpoint must use a
+separate, explicitly experimental run and cannot close Phase 1.
+
 Passing authoring, lifecycle, ledger, QD, or single-GPU unit suites does not
 satisfy this runtime acceptance. The node3 two-GPU smoke, fresh-process resume,
 and staged soak remain independent hardware gates.
@@ -149,8 +158,9 @@ On node3:
    `/home/user/project/deploy/RExPolicy/<commit-sha>`.
 3. Use `/home/user/project/newton/conda_envs/newton`; do not copy `.venv`,
    Conda files, or package caches.
-4. Point `ISAAC_GROOT_ROOT`, `GROOT_POLICY_CHECKPOINT`, and `GROOT_VLM_MODEL`
-   at the existing node3 source and weights.
+4. Point `ISAAC_GROOT_ROOT` at the existing node3 source, and point
+   `GROOT_POLICY_CHECKPOINT` and `GROOT_VLM_MODEL` at node3's immutable copies of
+   the canonical `checkpoint-200000` and `Cosmos-Reason2-2B` artifacts.
 5. Write all run data to `/home/user/runs/rexpolicy/<run-id>`.
 
 The deployed source worktree must remain clean. A run manifest must contain the
@@ -193,7 +203,7 @@ Do not disable shared memory.
 
 ## Disposable two-generation run
 
-The engineering run starts from the original base weights and uses:
+The engineering run starts from the canonical base weights and uses:
 
 - 2 ranks, K=2 per rank, 1 episode per rank and generation;
 - 8 control steps and execution horizon 1;
@@ -232,7 +242,7 @@ CUDA_VISIBLE_DEVICES=0,1 REXPOLICY_NPROC=2 \
   --save \
   --eval-every 0 \
   --no-eval-at-start \
-  --eval-at-end \
+  --no-eval-at-end \
   --eval-reset-recipes 8 \
   --eval-diffusion-seeds 4 \
   --optimizer-state-offload \
@@ -278,7 +288,7 @@ CUDA_VISIBLE_DEVICES=0,1 REXPOLICY_NPROC=2 \
   --save \
   --eval-every 0 \
   --no-eval-at-start \
-  --eval-at-end \
+  --no-eval-at-end \
   --eval-reset-recipes 8 \
   --eval-diffusion-seeds 4 \
   --optimizer-state-offload \

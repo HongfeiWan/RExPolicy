@@ -1,4 +1,10 @@
-# node1 GPU capacity and camera/pipeline roadmap (2026-08-04)
+# node1 GPU capacity and camera/pipeline evidence (2026-08-04)
+
+Document role: **dated Phase 1 capacity evidence, not a release roadmap**.
+
+The canonical phase order, base checkpoint, defaults, and acceptance gates are
+defined in [README.md](README.md). These measurements do not replace the node3
+two-GPU acceptance protocol in [bootstrap_ddp.md](bootstrap_ddp.md).
 
 ## Decision summary
 
@@ -17,16 +23,21 @@ The measured node is one NVIDIA RTX PRO 5000 72GB Blackwell GPU
   H=8**. This setting performs one decision and exercises model load, VLM/DiT,
   camera/physics collection, archive, coverage-driven training, and offload.
   It is **not the default H=2 multi-decision workload**.
-- Use **K=256 as the production target/cap**, after the staged H=2 validation
-  below. Its measured H=8 peak was `42,874 MiB`, leaving materially more
+- Treat **K=256 as the node1 capacity candidate/cap**, after the staged H=2
+  validation below. It is not the repository default. Its measured H=8 peak was
+  `42,874 MiB`, leaving materially more
   operating margin than K=384 (`59,245 MiB`). K=512 was **not run**; a rough
   linear extrapolation from K=128/256/384 is about `76 GiB`, beyond this GPU.
 - After canonical continuation witnesses were introduced, the default
   **K=2, H=2** run completed four decisions without the previous Event Ledger
   root-digest mismatch.
 
-These are capacity measurements, not policy-quality or learning baselines.
-No success was produced by the one-generation capacity runs.
+These are capacity measurements, not policy-quality, learning, or release
+baselines. No success was produced by the one-generation capacity runs. The
+historical flywheel measurements used `checkpoint-400000`; the canonical
+repository base is `checkpoint-200000`. Consequently, the retained results may
+guide capacity planning but cannot close a canonical roadmap gate without a
+rerun on the canonical base artifact.
 
 ## Measurement contract
 
@@ -143,9 +154,9 @@ includes other process allocations. Wall time includes model/runtime startup.
 
 The H=8 results establish a one-decision memory envelope. They do not include
 the default H=2 reset-and-replay cadence, and K=384 has only a one-generation
-completion, not a leak or thermal soak. K=256 is the production target because
-it preserves roughly 30 GiB of externally observed headroom for allocator
-variation, longer runs, evaluation, checkpointing, and monitoring.
+completion, not a leak or thermal soak. K=256 is the node1 scaling candidate
+because it preserves roughly 30 GiB of externally observed headroom for
+allocator variation, longer runs, evaluation, checkpointing, and monitoring.
 
 ## Default H=2 correctness result
 
@@ -166,9 +177,11 @@ Commit `81a6690` removed redundant branch-canonicalization copies, and commit
 `346a69d` added the camera int32 fail-fast. The final combined H=2 run above
 and the full 476-test suite passed after all three changes.
 
-Only H=2 K=2 has completed after the correctness fix. Before calling K=256 a
-validated default production configuration, run H=2 at K=16, 64, 128, and 256,
-then a 10-generation K=256 soak. Stop escalation if any gate below fails.
+Only H=2 K=2 has completed after the correctness fix. Before treating K=256 as
+an eligible node1 scaling configuration, rerun on the canonical base, then run
+H=2 at K=16, 64, 128, and 256 followed by a 10-generation K=256 soak. Stop
+escalation if any gate below fails. Even a passing node1 ladder does not replace
+the canonical node3 Phase 1 acceptance gates.
 
 ## GPU and camera optimization order
 
@@ -185,7 +198,8 @@ then a 10-generation K=256 soak. Stop escalation if any gate below fails.
    `.cpu().tolist()` and full dynamics-tree NumPy conversions with one compact
    GPU digest/metric buffer and a pinned, nonblocking D2H transfer per control
    step. Preserve the existing canonical digest definition.
-4. **A/B offload flags one at a time.** At K=256, optimizer and VLM offload
+4. **A/B offload flags one at a time.** At the K=256 node1 candidate,
+   optimizer and VLM offload
    took about `1.65 s` and `0.80 s`. Test keeping only one component resident;
    do not assume both fit. Promote only if K=256 remains below `60 GiB` peak
    and median generation time improves by at least 5% over three warm runs.
@@ -238,7 +252,8 @@ actions should also be checked for drift before policy-quality promotion.
    stream safety, fuse transforms/unpack and overlap independent camera passes.
 4. **Tile only if workloads truly need more than 6,990 worlds.** Chunked camera
    rendering can avoid the per-array int32 dimension, but it is unnecessary for
-   the K=256 production target and should follow the higher-return work above.
+   the K=256 node1 capacity candidate and should follow the higher-return work
+   above.
 5. **Apply CUDA graphs last.** Capture stable physics or DiT-denoise segments
    only after CPU synchronizations and dynamic host branches are removed.
 
@@ -250,9 +265,11 @@ root images for H=2 K=2 before scaling. Use an Nsight trace to demonstrate
 fewer launches/synchronizations; require at least 15% median H=2 collection
 improvement at K=64 before merging structural camera-stream work.
 
-## Release ladder
+## Node1 scaling evidence ladder
 
-Every optimization should pass this sequence before the next K increase:
+Every optimization should pass this sequence before the next K increase. This
+ladder qualifies node1 scaling evidence only; it does not change repository
+defaults or canonical phase status:
 
 1. Unit/contract tests, including camera bounds, Event Ledger continuation,
    replay handoff, render contract, and deterministic task evaluation.
@@ -299,7 +316,7 @@ python -m tools.run_newton_groot_rl_env \
   --no-capture-graph
 ```
 
-The H=8 flywheel command shape was:
+The historical H=8 flywheel command shape was:
 
 ```bash
 cd /home/user/project/RExPolicy
@@ -333,9 +350,9 @@ CUDA_VISIBLE_DEVICES=0 REXPOLICY_NPROC=1 \
   --substeps-per-frame 16
 ```
 
-For the final default correctness run, set the directory to
+For the final historical K=2, H=2 correctness run, set the directory to
 `k2-h2-camera-fixed`, K to 2, and `--execution-horizon 2`. H=8 measurements
-used RExPolicy commit `2e41e00`;
+used RExPolicy commit `2e41e00` and the noncanonical `checkpoint-400000`;
 the first repaired H=2 result used `5ab2b7b`, and the final combined H=2 run
-used `346a69d`. Re-run the release ladder on the final production commit rather
-than comparing results across unrecorded source changes.
+used `346a69d`. Re-run the node1 evidence ladder on the canonical release commit
+rather than comparing results across unrecorded source changes.

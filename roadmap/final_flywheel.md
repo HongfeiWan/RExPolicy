@@ -5,6 +5,9 @@ derived-view components now exist, but the architecture below remains
 aspirational: active training is still the single-task Reach flywheel with
 historical round-robin replay.
 
+This is the target reached after the ordered phases in the canonical
+[roadmap](README.md); it is not a second implementation or release route.
+
 ## Stable architectural decisions
 
 - Use the pretrained GR00T VLM as the initial visual-language representation and

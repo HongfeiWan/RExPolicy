@@ -1,5 +1,10 @@
 # Deterministic read-only rollout recorder
 
+Document role: **read-only evidence procedure for the canonical
+[roadmap](README.md)**. A base-versus-generation comparison uses
+`checkpoint-200000`; another base checkpoint must be labeled as an experiment
+and cannot serve as canonical release evidence.
+
 `tools.run_rollout_recorder` produces visible policy evidence without entering
 the training data plane. It loads the same Newton Reach environment and
 `GrootFlowDitPolicy` used by the flywheel, but it does not construct DDP, an
@@ -17,10 +22,11 @@ successful close. An existing output directory is never overwritten.
 process. Keep `--device cuda:0`; using `--device cuda:1` with that environment
 would incorrectly request a second visible device.
 
-Record the immutable base policy at `H=2`, `K=1`:
+Record the canonical immutable base policy at `H=2`, `K=1` from the reviewed
+detached deployment worktree:
 
 ```bash
-cd /home/user/project/RExPolicy
+cd /home/user/project/deploy/RExPolicy/<commit-sha>
 
 CUDA_VISIBLE_DEVICES=1 \
 OMP_NUM_THREADS=4 \
@@ -29,8 +35,8 @@ OPENBLAS_NUM_THREADS=4 \
 python -m tools.run_rollout_recorder \
   --device cuda:0 \
   --isaac-groot-root /home/user/project/Isaac-GR00T \
-  --policy-checkpoint /home/user/project/Isaac-GR00T/checkpoints/finetune/checkpoint-400000 \
-  --vlm-model /home/user/project/Isaac-GR00T/checkpoints/nvidia/Cosmos-Reason2-2B \
+  --policy-checkpoint /home/user/project/RExPolicy/checkpoints/groot/checkpoint-200000 \
+  --vlm-model /home/user/project/RExPolicy/checkpoints/nvidia/Cosmos-Reason2-2B \
   --output-dir /home/user/runs/rexpolicy/rollouts/base-r20260722-d20260723-h2 \
   --reset-seed 20260722 \
   --diffusion-seed 20260723 \
@@ -47,7 +53,7 @@ Record a completed training generation with the exact same reset and diffusion
 seeds:
 
 ```bash
-cd /home/user/project/RExPolicy
+cd /home/user/project/deploy/RExPolicy/<commit-sha>
 
 CUDA_VISIBLE_DEVICES=1 \
 OMP_NUM_THREADS=4 \
@@ -56,8 +62,8 @@ OPENBLAS_NUM_THREADS=4 \
 python -m tools.run_rollout_recorder \
   --device cuda:0 \
   --isaac-groot-root /home/user/project/Isaac-GR00T \
-  --policy-checkpoint /home/user/project/Isaac-GR00T/checkpoints/finetune/checkpoint-400000 \
-  --vlm-model /home/user/project/Isaac-GR00T/checkpoints/nvidia/Cosmos-Reason2-2B \
+  --policy-checkpoint /home/user/project/RExPolicy/checkpoints/groot/checkpoint-200000 \
+  --vlm-model /home/user/project/RExPolicy/checkpoints/nvidia/Cosmos-Reason2-2B \
   --dit-overlay /home/user/runs/rexpolicy/node3-train/checkpoints/generation-000100 \
   --output-dir /home/user/runs/rexpolicy/rollouts/generation-000100-r20260722-d20260723-h2 \
   --reset-seed 20260722 \
