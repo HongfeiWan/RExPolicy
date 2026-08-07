@@ -15,7 +15,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -70,6 +70,11 @@ from rexpolicy.stage0.grasp_lift_pilot import (
 from rexpolicy.stage0.normalization import Stage0Normalization
 from rexpolicy.stage0.trainers.batch import Stage0WindowBatch, collate_success_windows
 from rexpolicy.stage0.types import canonical_fingerprint
+
+if TYPE_CHECKING:
+    from rexpolicy.stage0.data.grasp_lift_validation_claim import (
+        GraspLiftValidationClaimReceipt,
+    )
 
 GRASP_LIFT_VALIDATION_PREFLIGHT_SCHEMA_ID = (
     "rexpolicy/stage0-grasp-lift-no-z-validation-preflight/v1"
@@ -1189,16 +1194,37 @@ class GraspLiftClaimedValidationData:
 def load_claimed_grasp_lift_validation(
     pilot_directory: str | Path,
     *,
+    repository_root: str | Path,
     training_artifact: GraspLiftTrainingArtifact,
     preflight: Mapping[str, Any],
     claim: Mapping[str, Any],
+    claim_receipt: GraspLiftValidationClaimReceipt,
 ) -> GraspLiftClaimedValidationData:
-    """Open exactly six validation shards after a verified external claim."""
+    """Open exactly six validation shards after a verified durable claim."""
     artifact = _require_training_artifact(training_artifact)
     verify_grasp_lift_validation_claim_record(
         claim,
         preflight=preflight,
         training_artifact=artifact,
+    )
+    from rexpolicy.stage0.data.grasp_lift_validation_claim import (
+        GraspLiftValidationClaimReceipt,
+        verify_persisted_grasp_lift_validation_claim,
+    )
+
+    if not isinstance(claim_receipt, GraspLiftValidationClaimReceipt):
+        raise TypeError(
+            "claim_receipt must prove one durable Git-common validation claim"
+        )
+    verify_persisted_grasp_lift_validation_claim(
+        repository_root,
+        claim,
+        verifier=lambda value: verify_grasp_lift_validation_claim_record(
+            value,
+            preflight=preflight,
+            training_artifact=artifact,
+        ),
+        receipt=claim_receipt,
     )
     root, manifest = _load_accepted_pilot_registry(pilot_directory)
     if manifest.get("acceptance", {}).get("passed") is not True:

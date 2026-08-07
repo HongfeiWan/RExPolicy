@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from collections.abc import Mapping
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -44,6 +45,10 @@ from rexpolicy.stage0.data.grasp_lift_validation import (
     preflight_grasp_lift_validation_selection,
     verify_grasp_lift_validation_claim_record,
     verify_grasp_lift_validation_preflight_record,
+)
+from rexpolicy.stage0.data.grasp_lift_validation_claim import (
+    GRASP_LIFT_VALIDATION_CLAIM_REGISTRY,
+    GraspLiftValidationClaimReceipt,
 )
 from rexpolicy.stage0.data.trajectory import trajectory_sha256
 from rexpolicy.stage0.envs.grasp_lift_action import (
@@ -472,6 +477,24 @@ class GraspLiftValidationTests(unittest.TestCase):
             evaluator_implementation_sha256="7" * 64,
         )
 
+    def _claim_receipt(
+        self,
+        claim: Mapping[str, Any],
+    ) -> GraspLiftValidationClaimReceipt:
+        common = self.root / "git-common"
+        return GraspLiftValidationClaimReceipt(
+            repository_root=self.root,
+            git_common_directory=common,
+            claim_path=(
+                common
+                / GRASP_LIFT_VALIDATION_CLAIM_REGISTRY
+                / f"{claim['claim_id']}.json"
+            ),
+            claim_id=claim["claim_id"],
+            claim_self_sha256=claim["self_sha256"],
+            claim_file_sha256="9" * 64,
+        )
+
     def test_preflight_is_tensor_free_and_binds_exact_inventory(self) -> None:
         with (
             patch(
@@ -550,6 +573,7 @@ class GraspLiftValidationTests(unittest.TestCase):
     def test_claimed_loader_opens_exactly_six_and_reuses_train_fit(self) -> None:
         preflight = self._preflight()
         claim = self._claim(preflight)
+        receipt = self._claim_receipt(claim)
         pilot = self.root / "pilot"
         shards = pilot / "shards"
         shards.mkdir(parents=True)
@@ -614,14 +638,22 @@ class GraspLiftValidationTests(unittest.TestCase):
                 f"{_MODULE}.load_grasp_lift_evidence_sidecar",
                 side_effect=load_evidence,
             ),
+            patch(
+                "rexpolicy.stage0.data.grasp_lift_validation_claim."
+                "verify_persisted_grasp_lift_validation_claim",
+                return_value=receipt,
+            ) as persisted_verifier,
         ):
             data = load_claimed_grasp_lift_validation(
                 pilot,
+                repository_root=self.root,
                 training_artifact=self.artifact,
                 preflight=preflight,
                 claim=claim,
+                claim_receipt=receipt,
             )
 
+        persisted_verifier.assert_called_once()
         self.assertEqual(len(trajectory_paths), 6)
         self.assertEqual(len(evidence_paths), 6)
         opened = {path.name for path in trajectory_paths + evidence_paths}
@@ -650,18 +682,50 @@ class GraspLiftValidationTests(unittest.TestCase):
     def test_invalid_claim_opens_no_shard(self) -> None:
         preflight = self._preflight()
         claim = self._claim(preflight)
+        receipt = self._claim_receipt(claim)
         claim["preflight_sha256"] = "0" * 64
         with (
             patch(f"{_MODULE}.load_trajectory_shard") as trajectory_loader,
             patch(f"{_MODULE}.load_grasp_lift_evidence_sidecar") as evidence_loader,
+            patch(
+                "rexpolicy.stage0.data.grasp_lift_validation_claim."
+                "verify_persisted_grasp_lift_validation_claim"
+            ) as persisted_verifier,
             self.assertRaisesRegex(ValueError, "self_sha256"),
         ):
             load_claimed_grasp_lift_validation(
                 self.root / "does-not-matter",
+                repository_root=self.root,
                 training_artifact=self.artifact,
                 preflight=preflight,
                 claim=claim,
+                claim_receipt=receipt,
             )
+        persisted_verifier.assert_not_called()
+        trajectory_loader.assert_not_called()
+        evidence_loader.assert_not_called()
+
+    def test_memory_claim_without_durable_receipt_opens_no_shard(self) -> None:
+        preflight = self._preflight()
+        claim = self._claim(preflight)
+        with (
+            patch(f"{_MODULE}.load_trajectory_shard") as trajectory_loader,
+            patch(f"{_MODULE}.load_grasp_lift_evidence_sidecar") as evidence_loader,
+            patch(
+                "rexpolicy.stage0.data.grasp_lift_validation_claim."
+                "verify_persisted_grasp_lift_validation_claim"
+            ) as persisted_verifier,
+            self.assertRaisesRegex(TypeError, "claim_receipt"),
+        ):
+            load_claimed_grasp_lift_validation(
+                self.root / "does-not-matter",
+                repository_root=self.root,
+                training_artifact=self.artifact,
+                preflight=preflight,
+                claim=claim,
+                claim_receipt=None,  # type: ignore[arg-type]
+            )
+        persisted_verifier.assert_not_called()
         trajectory_loader.assert_not_called()
         evidence_loader.assert_not_called()
 
