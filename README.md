@@ -30,6 +30,17 @@ and reload all components. The first 20-step smoke passed the engineering
 checks but not the non-collapse research gate (effective latent rank 1.09), so
 it is not yet evidence of convergence or multimodal success.
 
+The active Stage 0 task is now reward-free Grasp-Lift. Its close-at-step-7
+authoring corpus and train-only artifact are accepted; the fixed no-z learner,
+checkpoint/resume path, tensor-free three-run preflight, one-time validation
+claim, exact Newton rollout evaluator, and pure checkpoint selector are
+implemented. The remaining runtime order is strict: pass the 24-world
+train-reset CUDA smoke on one clean commit, complete all three 10,000-step
+training seeds on that same commit, then consume the six-member validation
+cohort exactly once. No locked test exists, and validation has not established
+convergence or generalization. The exact node1 run protocol is recorded in
+[Stage 0 Success Manifold Validation](roadmap/stage0_success_manifold_validation.md#frozen-node1-no-z-learning-protocol--2026-08-07).
+
 The repository also contains a fail-closed TaskSpec v2 control plane: sealed
 task and process contracts, reward-free Event Ledgers and rebuildable views,
 sandboxed provider-attested automatic authoring to static quarantine, signed

@@ -54,6 +54,172 @@ or oracle evidence, but a real scene asset is still required before any visual
 rollout can be presented as camera-valid evidence; a synthetic background must
 not be substituted.
 
+## Frozen node1 no-z learning protocol — 2026-08-07
+
+The learning and selection software is implemented, but this section records a
+runtime protocol, not a completed learning result. The final checkout must be
+clean and remain on one Git HEAD from the evaluator smoke through all three
+training runs and one-time selection. The implementation fingerprint contains
+that HEAD plus the Python, Torch, Warp, Newton, and MuJoCo-Warp versions. A
+pull, commit, runtime change, different world size, or untracked file during
+the cohort invalidates comparability and must fail closed.
+
+Node1 has one visible NVIDIA RTX PRO 5000 72GB GPU. "Use all GPUs" therefore
+means CUDA0 with `world_size=1`; it does not mean launching a fictitious
+multi-rank job. Each process is pinned to the same first 16 available CPUs.
+When the node exposes the measured 32-CPU cpuset, the union remains one half of
+the CPUs even after all three seed processes start.
+
+The immutable inputs are:
+
+```text
+pilot manifest: 7afd7bc74dc223b6101d3add4b4aac1b47959b547b6a983c906cebe09b136cf3
+pilot corpus:   16d438d79e2fb37505e2f2b070842095d025b4ce338c1f472765d10872701620
+train artifact: a0b2618e800b9b5a2534d979dff387025a09a910a30be21d0e1791dcb67a715e
+train content:  57f5e492dc4365ef71c425231aa1c2ee4ab7ed9261ffc2e4fb08ee799ff22425
+normalization:  aa2a9d9bd37637046df8ffe8a46aabb51a1ac50629705a847396aa52d2993dad
+```
+
+Before touching validation, activate the existing Newton environment and run
+the evaluator parity smoke against six train resets and four fixed policy-noise
+variants. The output path must be new. This exercises the exact 24-world,
+72-control-step, state-only Newton rollout stack with a fixed random policy;
+success and ordinary task-safety failures are deliberately not gates. The gate
+requires exact budget binding, zero execution-integrity faults (including any
+nonzero reward), zero oracle-input disagreements, and zero collision-buffer
+overflow. It never opens a validation shard or creates a claim.
+
+```bash
+cd /home/user/project/RExPolicy-grasp-lift-training
+test -z "$(git status --porcelain --untracked-files=all)" || {
+  echo "refuse dirty scientific worktree" >&2
+  exit 1
+}
+git rev-parse HEAD
+python - <<'PY'
+import os
+available = sorted(os.sched_getaffinity(0))
+assert len(available) == 32, available
+print(available)
+PY
+nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv,noheader
+
+CUDA_VISIBLE_DEVICES=0 python -u -m tools.smoke_stage0_grasp_lift_no_z_evaluator \
+  --config /home/user/project/RExPolicy-grasp-lift-training/configs/stage0/grasp_lift_no_z_bc.json \
+  --pilot-directory /home/user/project/RExPolicy-grasp-lift-close7/outputs/stage0/grasp-lift-pilot-close7-20260806-b \
+  --training-artifact /home/user/project/RExPolicy-grasp-lift-training/outputs/stage0/grasp-lift-training-close7-20260806-a \
+  --output /home/user/project/RExPolicy-grasp-lift-training/outputs/stage0/grasp-lift-no-z-evaluator-smoke-20260807-a.json \
+  --device cuda:0
+```
+
+Proceed only when the persisted smoke record is self-hash valid, has
+`state="passed"`, reports 24 episodes, and records the same Git HEAD intended
+for training. A failed smoke may be diagnosed and repaired using train data;
+because the repair changes HEAD, it requires a new smoke output path. It still
+must not consume validation.
+
+Formal training uses seeds `31001`, `31002`, and `31003`, global batch 2,048,
+10,000 optimizer steps, a checkpoint at step zero and every 500 steps, and no
+validation feedback. Console logs and PID files live outside each run root so
+the runner can create that root exclusively. Start seed 31001 first. After its
+step-50 heartbeat proves the memory/runtime contract, start 31002 and 31003 as
+independent processes on the same 72GB GPU to improve utilization without
+changing the registered `world_size=1` semantics.
+
+```bash
+cd /home/user/project/RExPolicy-grasp-lift-training
+PYTHON="$(command -v python)"
+PILOT=/home/user/project/RExPolicy-grasp-lift-close7/outputs/stage0/grasp-lift-pilot-close7-20260806-b
+ARTIFACT=/home/user/project/RExPolicy-grasp-lift-training/outputs/stage0/grasp-lift-training-close7-20260806-a
+RUNROOT=/home/user/project/RExPolicy-grasp-lift-training/outputs/stage0
+LOGROOT="$RUNROOT/grasp-lift-no-z-launch-logs-20260807-a"
+mkdir -p "$LOGROOT"
+
+launch_seed() {
+  seed="$1"
+  out="$RUNROOT/grasp-lift-no-z-seed-${seed}-20260807-a"
+  test ! -e "$out" && test ! -L "$out" || {
+    echo "refuse existing output: $out" >&2
+    return 1
+  }
+  nohup env CUDA_VISIBLE_DEVICES=0 PYTHONUNBUFFERED=1 \
+    "$PYTHON" -u -m tools.run_stage0_grasp_lift_no_z \
+    --config configs/stage0/grasp_lift_no_z_bc.json \
+    --pilot-directory "$PILOT" \
+    --training-artifact "$ARTIFACT" \
+    --output-directory "$out" \
+    --training-seed "$seed" \
+    >"$LOGROOT/seed-${seed}.console.log" 2>&1 &
+  printf '%s\n' "$!" >"$LOGROOT/seed-${seed}.pid"
+}
+
+launch_seed 31001
+```
+
+Inspect seed 31001's `status.json`, `heartbeat.jsonl`, console, GPU
+memory/utilization, and `checkpoint-000000000000`. Only after a valid step-50
+heartbeat, deliberately run the second launch block in the same shell:
+
+```bash
+launch_seed 31002
+launch_seed 31003
+```
+
+If measured concurrent memory plus operating margin approaches 60 GiB, or a
+run exits, do not delete or recreate its directory. Preserve the error record
+and use `--resume` on that exact seed/output only; the manager resumes from the
+latest complete 500-step checkpoint (step zero is also complete). Changing
+HEAD, Python/runtime versions, CUDA visibility, world size, CPU affinity,
+config, pilot, or artifact makes resume illegal.
+
+Only after every run has exactly the 21 expected checkpoints and a complete
+status may the tensor-free preflight run. The selection runner then persists a
+global exclusive claim before opening the six validation shards and evaluates
+the fixed 60-model by 24-rollout grid once. That claim is irreversible:
+
+```bash
+cd /home/user/project/RExPolicy-grasp-lift-training
+PYTHON="$(command -v python)"
+RUNROOT=/home/user/project/RExPolicy-grasp-lift-training/outputs/stage0
+PILOT=/home/user/project/RExPolicy-grasp-lift-close7/outputs/stage0/grasp-lift-pilot-close7-20260806-b
+ARTIFACT="$RUNROOT/grasp-lift-training-close7-20260806-a"
+LOGROOT="$RUNROOT/grasp-lift-no-z-launch-logs-20260807-a"
+SELECTOUT="$RUNROOT/grasp-lift-no-z-selection-20260807-a"
+test ! -e "$SELECTOUT" && test ! -L "$SELECTOUT" || {
+  echo "refuse existing selection output: $SELECTOUT" >&2
+  exit 1
+}
+
+nohup env CUDA_VISIBLE_DEVICES=0 PYTHONUNBUFFERED=1 \
+  "$PYTHON" -u -m tools.run_stage0_grasp_lift_no_z_selection \
+  --config configs/stage0/grasp_lift_no_z_bc.json \
+  --pilot-directory "$PILOT" \
+  --training-artifact "$ARTIFACT" \
+  --seed-31001-run "$RUNROOT/grasp-lift-no-z-seed-31001-20260807-a" \
+  --seed-31002-run "$RUNROOT/grasp-lift-no-z-seed-31002-20260807-a" \
+  --seed-31003-run "$RUNROOT/grasp-lift-no-z-seed-31003-20260807-a" \
+  --output-directory "$SELECTOUT" \
+  --device cuda:0 \
+  >"$LOGROOT/selection.console.log" 2>&1 &
+printf '%s\n' "$!" >"$LOGROOT/selection.pid"
+```
+
+The selection output is intentionally non-resumable. After the claim receipt
+has been persisted, any interruption burns this model-selection attempt and
+must not be bypassed by deleting the output or claim registry.
+
+- if selection passes, it is a development/model-selection result only. A new
+  locked-test cohort and its own pre-registered one-time protocol are still
+  required before a generalization claim;
+- if selection fails, do not create a locked test. The next authoring proposal
+  may use train evidence and the now-consumed validation audit, but the locked
+  test must remain absent and cannot be used for tuning.
+
+During the formal training and selection cohort the repository is
+fingerprint-bound and may not be edited. The remote main branch is eligible for
+a fast-forward only after the runtime gate and retained artifacts have been
+verified.
+
 ## Node1 validation snapshot — 2026-08-05
 
 The first independent Reach loop is now implemented under `rexpolicy/stage0/`
