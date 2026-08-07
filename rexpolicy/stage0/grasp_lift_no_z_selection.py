@@ -16,19 +16,26 @@ from typing import Any
 
 from rexpolicy.stage0.types import canonical_fingerprint
 
-GRASP_LIFT_NO_Z_SELECTION_SCHEMA_ID = "rexpolicy/stage0-grasp-lift-no-z-selection/v1"
-GRASP_LIFT_NO_Z_SELECTION_SCHEMA_VERSION = 1
+GRASP_LIFT_NO_Z_SELECTION_SCHEMA_ID = "rexpolicy/stage0-grasp-lift-no-z-selection/v2"
+GRASP_LIFT_NO_Z_SELECTION_SCHEMA_VERSION = 2
 GRASP_LIFT_NO_Z_VALIDATION_STEPS = tuple(range(500, 10_001, 500))
 GRASP_LIFT_NO_Z_VALIDATION_TRAINING_SEEDS = (31_001, 31_002, 31_003)
-GRASP_LIFT_NO_Z_VALIDATION_RESET_SEEDS = (7009, 7014, 7019, 7025, 7026, 7031)
+GRASP_LIFT_NO_Z_VALIDATION_RESET_SEEDS = (
+    374_383_479,
+    630_355_668,
+    1_195_800_966,
+    1_354_723_473,
+    1_579_845_348,
+    2_014_581_365,
+)
 GRASP_LIFT_NO_Z_POLICY_NOISE_INDICES = (0, 1, 2, 3)
 
-_ROLLOUT_SCHEMA_ID = "rexpolicy/stage0-grasp-lift-no-z-validation-rollout/v1"
+_ROLLOUT_SCHEMA_ID = "rexpolicy/stage0-grasp-lift-no-z-validation-rollout/v2"
 _SEED_EVIDENCE_SCHEMA_ID = (
-    "rexpolicy/stage0-grasp-lift-no-z-seed-checkpoint-evidence/v1"
+    "rexpolicy/stage0-grasp-lift-no-z-seed-checkpoint-evidence/v2"
 )
-_CHECKPOINT_RESULT_SCHEMA_ID = "rexpolicy/stage0-grasp-lift-no-z-checkpoint-result/v1"
-_SELECTED_MODEL_SCHEMA_ID = "rexpolicy/stage0-grasp-lift-no-z-selected-model/v1"
+_CHECKPOINT_RESULT_SCHEMA_ID = "rexpolicy/stage0-grasp-lift-no-z-checkpoint-result/v2"
+_SELECTED_MODEL_SCHEMA_ID = "rexpolicy/stage0-grasp-lift-no-z-selected-model/v2"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 _ROLLOUTS_PER_RESET = len(GRASP_LIFT_NO_Z_POLICY_NOISE_INDICES)
@@ -121,7 +128,7 @@ def _protocol_record() -> dict[str, Any]:
             "then_lower_median_step/v1"
         ),
         "minimum_contiguous_eligible_checkpoints": _MINIMUM_STABLE_CHECKPOINTS,
-        "schema_id": "rexpolicy/stage0-grasp-lift-no-z-selection-protocol/v1",
+        "schema_id": "rexpolicy/stage0-grasp-lift-no-z-selection-protocol/v2",
         "training_seeds": list(GRASP_LIFT_NO_Z_VALIDATION_TRAINING_SEEDS),
         "validation_reset_seeds": list(GRASP_LIFT_NO_Z_VALIDATION_RESET_SEEDS),
     }
@@ -319,7 +326,7 @@ class GraspLiftNoZSeedCheckpointResult:
             "offline_mse_diagnostic": _thaw_diagnostic_value(
                 self.offline_mse_diagnostic
             ),
-            "schema_id": ("rexpolicy/stage0-grasp-lift-no-z-seed-checkpoint-result/v1"),
+            "schema_id": ("rexpolicy/stage0-grasp-lift-no-z-seed-checkpoint-result/v2"),
             "success_count": self.success_count,
             "success_gate_passed": self.success_gate_passed,
             "successes_by_reset": {

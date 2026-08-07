@@ -18,6 +18,7 @@ from tools.run_stage0_grasp_lift_no_z_selection import (
     _CANDIDATE_STEPS,
     _CHECKPOINT_STEPS,
     _TRAINING_SEEDS,
+    _VALIDATION_RESET_SEEDS,
     _accepted_simulator_snapshot,
     _accepted_pilot_simulator_contract,
     _canonical_fingerprint,
@@ -126,9 +127,7 @@ class _Backend:
             normalized_batch=object(),
             record=_sealed({"schema_id": "test/validation/v1"}),
         )
-        reset_seeds = tuple(
-            seed for seed in (7009, 7014, 7019, 7025, 7026, 7031) for _ in range(4)
-        )
+        reset_seeds = tuple(seed for seed in _VALIDATION_RESET_SEEDS for _ in range(4))
         self.budget = SimpleNamespace(
             episode_count=24,
             reset_count=6,

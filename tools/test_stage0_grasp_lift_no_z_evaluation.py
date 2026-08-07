@@ -207,7 +207,10 @@ class GraspLiftNoZEvaluationTest(unittest.TestCase):
         )
 
         self.assertEqual(len(evidence.rollouts), 24)
-        self.assertEqual(evidence.rollouts[0].inventory_key, (7009, 0))
+        self.assertEqual(
+            evidence.rollouts[0].inventory_key,
+            (GRASP_LIFT_NO_Z_VALIDATION_RESET_SEEDS[0], 0),
+        )
         self.assertTrue(evidence.rollouts[1].safety_violation)
         self.assertTrue(evidence.rollouts[2].oracle_disagreement)
         self.assertFalse(evidence.rollouts[2].integrity_violation)
