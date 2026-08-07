@@ -24,6 +24,7 @@ from rexpolicy.stage0.data.grasp_lift_validation_cohort import (
     load_grasp_lift_validation_authoring_config,
     load_grasp_lift_validation_authoring_manifest,
     load_grasp_lift_validation_authoring_metadata,
+    persist_grasp_lift_validation_authoring_claim,
     validation_authoring_file_sha256,
     verify_persisted_grasp_lift_validation_authoring_claim,
 )
@@ -274,21 +275,29 @@ class GraspLiftValidationAuthoringMetadataTests(unittest.TestCase):
             cohort = repository / "cohort"
             cohort.mkdir()
             manifest = self._write_metadata_only_artifact(cohort)
-            config = load_grasp_lift_validation_authoring_config(
-                cohort / "config.json"
-            )
+            config = load_grasp_lift_validation_authoring_config(cohort / "config.json")
             claim = grasp_lift_validation_authoring_claim_record(
                 config,
                 implementation_sha256=manifest["implementation_sha256"],
             )
-            registry = (
-                repository
-                / ".git"
-                / GRASP_LIFT_VALIDATION_AUTHORING_CLAIM_REGISTRY
+            persisted = persist_grasp_lift_validation_authoring_claim(
+                repository,
+                config,
+                implementation_sha256=manifest["implementation_sha256"],
             )
-            registry.mkdir()
-            claim_path = registry / f"{grasp_lift_validation_cohort_slot_id(config)}.json"
-            _write_json(claim_path, claim)
+            self.assertEqual(persisted, claim)
+            registry = (
+                repository / ".git" / GRASP_LIFT_VALIDATION_AUTHORING_CLAIM_REGISTRY
+            )
+            claim_path = (
+                registry / f"{grasp_lift_validation_cohort_slot_id(config)}.json"
+            )
+            with self.assertRaisesRegex(RuntimeError, "already authored"):
+                persist_grasp_lift_validation_authoring_claim(
+                    repository,
+                    config,
+                    implementation_sha256=manifest["implementation_sha256"],
+                )
 
             observed_sha256 = verify_persisted_grasp_lift_validation_authoring_claim(
                 repository,
@@ -301,7 +310,45 @@ class GraspLiftValidationAuthoringMetadataTests(unittest.TestCase):
 
             claim["implementation_sha256"] = "0" * 64
             _write_json(claim_path, claim)
-            with self.assertRaisesRegex(ValueError, "self_sha256"):
+            with self.assertRaisesRegex(ValueError, "non-canonical or changed"):
+                verify_persisted_grasp_lift_validation_authoring_claim(
+                    repository,
+                    cohort,
+                )
+
+    def test_authoring_claim_registry_symlink_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repository = root / "repository"
+            repository.mkdir()
+            subprocess.run(["git", "init", "--quiet"], cwd=repository, check=True)
+            cohort = repository / "cohort"
+            cohort.mkdir()
+            manifest = self._write_metadata_only_artifact(cohort)
+            config = load_grasp_lift_validation_authoring_config(cohort / "config.json")
+            external = root / "redirected-registry"
+            external.mkdir()
+            registry = (
+                repository / ".git" / GRASP_LIFT_VALIDATION_AUTHORING_CLAIM_REGISTRY
+            )
+            registry.symlink_to(external, target_is_directory=True)
+
+            with self.assertRaisesRegex(RuntimeError, "missing or unsafe"):
+                persist_grasp_lift_validation_authoring_claim(
+                    repository,
+                    config,
+                    implementation_sha256=manifest["implementation_sha256"],
+                )
+
+            claim = grasp_lift_validation_authoring_claim_record(
+                config,
+                implementation_sha256=manifest["implementation_sha256"],
+            )
+            claim_path = external / (
+                f"{grasp_lift_validation_cohort_slot_id(config)}.json"
+            )
+            _write_json(claim_path, claim)
+            with self.assertRaisesRegex(RuntimeError, "missing or unsafe"):
                 verify_persisted_grasp_lift_validation_authoring_claim(
                     repository,
                     cohort,

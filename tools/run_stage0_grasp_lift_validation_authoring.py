@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import subprocess
 import time
 import uuid
 from dataclasses import asdict
@@ -13,18 +12,17 @@ from pathlib import Path
 from typing import Any
 
 from rexpolicy.stage0.data.grasp_lift_validation_cohort import (
-    GRASP_LIFT_VALIDATION_AUTHORING_CLAIM_REGISTRY,
     GRASP_LIFT_VALIDATION_AUTHORING_COMMIT_SCHEMA_ID,
     GRASP_LIFT_VALIDATION_AUTHORING_MANIFEST_SCHEMA_ID,
     GRASP_LIFT_VALIDATION_AUTHORING_STATUS_SCHEMA_ID,
     GRASP_LIFT_VALIDATION_LOCKED_TEST,
     GraspLiftValidationAuthoringConfig,
-    grasp_lift_validation_authoring_claim_record,
     grasp_lift_validation_cohort_slot_id,
     grasp_lift_validation_environment_config_record,
     grasp_lift_validation_preregistration_record,
     load_grasp_lift_validation_authoring_config,
     load_grasp_lift_validation_authoring_manifest,
+    persist_grasp_lift_validation_authoring_claim,
     validation_authoring_file_sha256,
 )
 from rexpolicy.stage0.grasp_lift_pilot import (
@@ -62,36 +60,11 @@ def _persist_authoring_claim_once(
     implementation_sha256: str,
 ) -> dict[str, Any]:
     """Burn this exact seed slot before Torch or Newton can observe it."""
-    common = subprocess.run(
-        ["git", "rev-parse", "--git-common-dir"],
-        cwd=repository_root,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    common_dir = Path(common)
-    if not common_dir.is_absolute():
-        common_dir = (repository_root / common_dir).resolve()
-    claim = grasp_lift_validation_authoring_claim_record(
+    return persist_grasp_lift_validation_authoring_claim(
+        repository_root,
         config,
         implementation_sha256=implementation_sha256,
     )
-    cohort_slot_id = grasp_lift_validation_cohort_slot_id(config)
-    registry = common_dir / GRASP_LIFT_VALIDATION_AUTHORING_CLAIM_REGISTRY
-    existed = registry.exists()
-    registry.mkdir(parents=True, exist_ok=True)
-    if registry.is_symlink() or not registry.is_dir():
-        raise RuntimeError("validation authoring claim registry is not a directory")
-    if not existed:
-        _fsync_directory(common_dir)
-    try:
-        _write_json(registry / f"{cohort_slot_id}.json", claim)
-    except FileExistsError as error:
-        raise RuntimeError(
-            "this validation cohort seed slot was already authored or attempted"
-        ) from error
-    _fsync_directory(registry)
-    return claim
 
 
 def main() -> None:

@@ -9,6 +9,8 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
+import stat
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,6 +21,7 @@ from rexpolicy.stage0.grasp_lift_pilot import (
     grasp_lift_pilot_environment_config_record,
     grasp_lift_pilot_oracle_record,
     grasp_lift_pilot_task_metadata_record,
+    seal_grasp_lift_pilot_record,
     verify_grasp_lift_pilot_record,
 )
 from rexpolicy.stage0.types import canonical_fingerprint
@@ -39,9 +42,7 @@ GRASP_LIFT_VALIDATION_AUTHORING_COMMIT_SCHEMA_ID = (
 GRASP_LIFT_VALIDATION_AUTHORING_CLAIM_SCHEMA_ID = (
     "rexpolicy/stage0-grasp-lift-validation-authoring-claim/v1"
 )
-GRASP_LIFT_VALIDATION_AUTHORING_CLAIM_REGISTRY = (
-    "rexpolicy-validation-authoring-claims"
-)
+GRASP_LIFT_VALIDATION_AUTHORING_CLAIM_REGISTRY = "rexpolicy-validation-authoring-claims"
 GRASP_LIFT_VALIDATION_AUTHORING_PREREGISTRATION_SCHEMA_ID = (
     "rexpolicy/stage0-grasp-lift-validation-authoring-preregistration/v1"
 )
@@ -70,6 +71,7 @@ GRASP_LIFT_VALIDATION_LOCKED_TEST = {
     "consumed": False,
     "policy": "not_created",
 }
+_MAX_AUTHORING_CLAIM_BYTES = 64 * 1024
 
 _CONFIG_KEYS = {"acceptance", "cohort", "runtime", "schema_version"}
 _COHORT_KEYS = {"purpose", "seed_derivation", "seed_namespace", "seeds"}
@@ -226,6 +228,156 @@ def validation_authoring_file_sha256(path: str | Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _canonical_authoring_claim_payload(record: Mapping[str, Any]) -> bytes:
+    try:
+        payload = (
+            json.dumps(
+                dict(record),
+                allow_nan=False,
+                ensure_ascii=True,
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n"
+        ).encode("ascii")
+    except (TypeError, ValueError, UnicodeError) as error:
+        raise ValueError("validation authoring claim is not strict JSON") from error
+    if len(payload) > _MAX_AUTHORING_CLAIM_BYTES:
+        raise ValueError("validation authoring claim exceeds the size limit")
+    return payload
+
+
+def _one_validation_authoring_git_path(
+    repository_root: Path,
+    arguments: list[str],
+    *,
+    context: str,
+) -> Path:
+    try:
+        completed = subprocess.run(
+            ["git", "rev-parse", "--path-format=absolute", *arguments],
+            cwd=repository_root,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise RuntimeError(
+            f"cannot resolve validation authoring Git {context}"
+        ) from error
+    lines = completed.stdout.splitlines()
+    if len(lines) != 1 or not lines[0]:
+        raise RuntimeError(f"Git returned an invalid validation authoring {context}")
+    path = Path(lines[0])
+    if not path.is_absolute() or path.is_symlink():
+        raise RuntimeError(f"validation authoring Git {context} is not a real path")
+    try:
+        return path.resolve(strict=True)
+    except OSError as error:
+        raise RuntimeError(
+            f"validation authoring Git {context} does not exist"
+        ) from error
+
+
+def _validation_authoring_git_scope(
+    repository_root: str | Path,
+) -> tuple[Path, Path]:
+    requested = Path(repository_root).expanduser()
+    if requested.is_symlink() or not requested.is_dir():
+        raise ValueError("repository_root must be a real directory")
+    root = requested.resolve()
+    top_level = _one_validation_authoring_git_path(
+        root,
+        ["--show-toplevel"],
+        context="top level",
+    )
+    if top_level != root:
+        raise ValueError("repository_root must be the Git worktree root")
+    common = _one_validation_authoring_git_path(
+        root,
+        ["--git-common-dir"],
+        context="common directory",
+    )
+    if common.is_symlink() or not common.is_dir():
+        raise RuntimeError("validation authoring Git common directory changed")
+    return root, common
+
+
+def _authoring_directory_flags() -> int:
+    return (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+
+
+def _open_validation_authoring_registry(
+    common: Path,
+    *,
+    create: bool,
+) -> tuple[int, int]:
+    common_descriptor = os.open(common, _authoring_directory_flags())
+    try:
+        if create:
+            try:
+                os.mkdir(
+                    GRASP_LIFT_VALIDATION_AUTHORING_CLAIM_REGISTRY,
+                    mode=0o700,
+                    dir_fd=common_descriptor,
+                )
+            except FileExistsError:
+                pass
+            else:
+                os.fsync(common_descriptor)
+        registry_descriptor = os.open(
+            GRASP_LIFT_VALIDATION_AUTHORING_CLAIM_REGISTRY,
+            _authoring_directory_flags(),
+            dir_fd=common_descriptor,
+        )
+    except BaseException as error:
+        os.close(common_descriptor)
+        raise RuntimeError(
+            "validation authoring claim registry is missing or unsafe"
+        ) from error
+    return common_descriptor, registry_descriptor
+
+
+def _close_validation_authoring_registry(
+    common_descriptor: int,
+    registry_descriptor: int,
+) -> None:
+    try:
+        os.close(registry_descriptor)
+    finally:
+        os.close(common_descriptor)
+
+
+def _write_all(descriptor: int, payload: bytes) -> None:
+    view = memoryview(payload)
+    while view:
+        written = os.write(descriptor, view)
+        if written <= 0:
+            raise OSError("short validation authoring claim write")
+        view = view[written:]
+
+
+def _read_authoring_claim(descriptor: int) -> bytes:
+    chunks: list[bytes] = []
+    size = 0
+    while True:
+        chunk = os.read(
+            descriptor,
+            min(8192, _MAX_AUTHORING_CLAIM_BYTES + 1 - size),
+        )
+        if not chunk:
+            return b"".join(chunks)
+        chunks.append(chunk)
+        size += len(chunk)
+        if size > _MAX_AUTHORING_CLAIM_BYTES:
+            raise ValueError("persisted validation authoring claim is too large")
 
 
 def derive_grasp_lift_validation_seeds(
@@ -466,51 +618,113 @@ def grasp_lift_validation_authoring_claim_record(
     )
 
 
+def persist_grasp_lift_validation_authoring_claim(
+    repository_root: str | Path,
+    config: GraspLiftValidationAuthoringConfig,
+    *,
+    implementation_sha256: str,
+) -> dict[str, Any]:
+    """Durably burn one authoring seed slot through a no-follow Git claim."""
+    claim = grasp_lift_validation_authoring_claim_record(
+        config,
+        implementation_sha256=implementation_sha256,
+    )
+    verify_grasp_lift_pilot_record(claim, "validation authoring claim")
+    payload = _canonical_authoring_claim_payload(claim)
+    _, common = _validation_authoring_git_scope(repository_root)
+    filename = f"{grasp_lift_validation_cohort_slot_id(config)}.json"
+    common_descriptor, registry_descriptor = _open_validation_authoring_registry(
+        common,
+        create=True,
+    )
+    try:
+        flags = (
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        try:
+            descriptor = os.open(
+                filename,
+                flags,
+                0o600,
+                dir_fd=registry_descriptor,
+            )
+        except FileExistsError as error:
+            raise RuntimeError(
+                "this validation cohort seed slot was already authored or attempted"
+            ) from error
+        try:
+            try:
+                _write_all(descriptor, payload)
+                os.fsync(descriptor)
+            except BaseException:
+                # A partial file remains a permanent fail-closed burn sentinel.
+                try:
+                    os.fsync(descriptor)
+                except OSError:
+                    pass
+                try:
+                    os.fsync(registry_descriptor)
+                except OSError:
+                    pass
+                raise
+        finally:
+            os.close(descriptor)
+        os.fsync(registry_descriptor)
+    finally:
+        _close_validation_authoring_registry(
+            common_descriptor,
+            registry_descriptor,
+        )
+    return claim
+
+
 def verify_persisted_grasp_lift_validation_authoring_claim(
     repository_root: str | Path,
     cohort_directory: str | Path,
 ) -> str:
     """Verify the pre-CUDA claim in this repository's Git common directory."""
-    requested = Path(repository_root).expanduser()
-    if requested.is_symlink() or not requested.is_dir():
-        raise ValueError("repository_root must be a real directory")
-    root = requested.resolve()
-    completed = subprocess.run(
-        [
-            "git",
-            "rev-parse",
-            "--path-format=absolute",
-            "--show-toplevel",
-            "--git-common-dir",
-        ],
-        cwd=root,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    lines = completed.stdout.splitlines()
-    if len(lines) != 2 or Path(lines[0]).resolve() != root:
-        raise RuntimeError("cannot resolve the validation authoring Git scope")
-    common = Path(lines[1])
-    if not common.is_absolute() or common.is_symlink() or not common.is_dir():
-        raise RuntimeError("validation authoring Git common directory changed")
-
+    _, common = _validation_authoring_git_scope(repository_root)
     metadata = load_grasp_lift_validation_authoring_metadata(cohort_directory)
     config = GraspLiftValidationAuthoringConfig.from_mapping(metadata["config"])
     expected = grasp_lift_validation_authoring_claim_record(
         config,
         implementation_sha256=metadata["manifest"]["implementation_sha256"],
     )
-    claim_path = (
-        common
-        / GRASP_LIFT_VALIDATION_AUTHORING_CLAIM_REGISTRY
-        / f"{grasp_lift_validation_cohort_slot_id(config)}.json"
+    verify_grasp_lift_pilot_record(expected, "validation authoring claim")
+    payload = _canonical_authoring_claim_payload(expected)
+    filename = f"{grasp_lift_validation_cohort_slot_id(config)}.json"
+    common_descriptor, registry_descriptor = _open_validation_authoring_registry(
+        common,
+        create=False,
     )
-    observed = _read_json(claim_path, "validation authoring claim")
-    verify_grasp_lift_pilot_record(observed, "validation authoring claim")
-    if observed != expected:
-        raise ValueError("persisted validation authoring claim changed")
-    return validation_authoring_file_sha256(claim_path)
+    try:
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(filename, flags, dir_fd=registry_descriptor)
+        try:
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode):
+                raise ValueError(
+                    "persisted validation authoring claim is not a regular file"
+                )
+            observed = _read_authoring_claim(descriptor)
+            if observed != payload:
+                raise ValueError(
+                    "persisted validation authoring claim is non-canonical or changed"
+                )
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        os.fsync(registry_descriptor)
+    finally:
+        _close_validation_authoring_registry(
+            common_descriptor,
+            registry_descriptor,
+        )
+    return hashlib.sha256(payload).hexdigest()
 
 
 def _strict_member_path(
@@ -982,6 +1196,7 @@ __all__ = [
     "load_grasp_lift_validation_authoring_config",
     "load_grasp_lift_validation_authoring_manifest",
     "load_grasp_lift_validation_authoring_metadata",
+    "persist_grasp_lift_validation_authoring_claim",
     "validation_authoring_file_sha256",
     "verify_persisted_grasp_lift_validation_authoring_claim",
 ]
