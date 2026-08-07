@@ -380,6 +380,13 @@ class PreparedSelection:
     accepted_simulator_sha256: str
 
 
+def _accepted_simulator_snapshot(prepared: PreparedSelection) -> dict[str, Any]:
+    accepted = dict(prepared.accepted_simulator_record)
+    if _canonical_fingerprint(accepted) != prepared.accepted_simulator_sha256:
+        raise RuntimeError("accepted pilot simulator record changed in memory")
+    return accepted
+
+
 @dataclass(frozen=True)
 class EnvironmentHandle:
     raw_environment: Any
@@ -914,12 +921,9 @@ class DefaultSelectionBackend:
         expected_environment = dict(prepared.environment_config_record)
         expected_task = dict(prepared.task_metadata_record)
         oracle_record = dict(prepared.oracle_record)
-        if _canonical_fingerprint(prepared.accepted_simulator_record) != (
-            prepared.accepted_simulator_sha256
-        ):
-            raise RuntimeError("accepted pilot simulator record changed in memory")
+        accepted_simulator = _accepted_simulator_snapshot(prepared)
         _verify_simulator_semantics(
-            prepared.accepted_simulator_record,
+            accepted_simulator,
             evaluation_environment=expected_environment,
             evaluation_task_metadata=expected_task,
             evaluation_oracle=oracle_record,

@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from dataclasses import dataclass
 from pathlib import Path
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 from typing import Any, Mapping
 
 from tools.run_stage0_grasp_lift_no_z_selection import (
@@ -18,6 +18,7 @@ from tools.run_stage0_grasp_lift_no_z_selection import (
     _CANDIDATE_STEPS,
     _CHECKPOINT_STEPS,
     _TRAINING_SEEDS,
+    _accepted_simulator_snapshot,
     _accepted_pilot_simulator_contract,
     _canonical_fingerprint,
     _candidate_commitments,
@@ -238,6 +239,25 @@ class GraspLiftSelectionRunnerTests(unittest.TestCase):
             _canonical_fingerprint({"effective_action_mask": (True, False)}),
             _canonical_fingerprint({"effective_action_mask": [True, False]}),
         )
+
+    def test_read_only_simulator_record_has_a_canonical_json_snapshot(self) -> None:
+        simulator = MappingProxyType(
+            {
+                "environment_config": {"device": "cuda:0", "num_envs": 24},
+                "schema_id": "rexpolicy/stage0-grasp-lift-newton-runtime/v1",
+            }
+        )
+        prepared = SimpleNamespace(
+            accepted_simulator_record=simulator,
+            accepted_simulator_sha256=_canonical_fingerprint(dict(simulator)),
+        )
+        snapshot = _accepted_simulator_snapshot(prepared)
+        self.assertEqual(snapshot, simulator)
+        self.assertIsInstance(snapshot, dict)
+
+        prepared.accepted_simulator_sha256 = "0" * 64
+        with self.assertRaisesRegex(RuntimeError, "changed in memory"):
+            _accepted_simulator_snapshot(prepared)
 
     def test_evaluator_is_bound_to_accepted_pilot_simulator_mechanics(self) -> None:
         accepted_environment = {
