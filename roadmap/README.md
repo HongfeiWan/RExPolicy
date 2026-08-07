@@ -132,10 +132,14 @@ to test success-oracle data generation and lightweight conditional-policy
 hypotheses.
 
 Its reward-free Grasp-Lift authoring corpus and train-only artifact are
-accepted. The three-seed no-z learner, checkpoint/resume contract, one-time
-validation claim, exact Newton evaluator, and pure selector are implemented,
-but long training and selection remain runtime work. Its results are supporting
-research evidence only and cannot close or activate Phase 2. See
+accepted. Three 10,000-step no-z training seeds completed, and an independent
+write-once validation cohort produced a formal model-selection pass across the
+fixed 60-model inventory. The registered rule selected the three-seed step-3,500
+family after a seven-checkpoint eligible run from step 2,000 through 5,000;
+the selected family achieved 72/72 rollout successes with zero safety,
+integrity, or oracle-disagreement events. This remains supporting state-only
+research evidence: it cannot close or activate Phase 2, prove visual grounding,
+or substitute for a new locked-test protocol. See
 [stage0_success_manifold_validation.md](stage0_success_manifold_validation.md).
 
 ## Phase 3 - visual-language grounding

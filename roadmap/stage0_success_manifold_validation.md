@@ -1,6 +1,7 @@
 # RExPolicy Stage 0 — State-only Success Manifold Validation
 
-Status: **train-only CUDA runs complete; scientific manifold gate not yet passed**.
+Status: **independent Grasp-Lift validation gate passed; locked test remains
+uncreated and no visual/generalization claim is established**.
 
 Document authority: this is supporting Phase 2 research evidence and a node1
 execution protocol. The canonical phase order, active learner, and release
@@ -94,6 +95,58 @@ zero nonzero rewards. That direct test opened no validation data. Formal model
 selection now requires an independently authored and pre-registered validation
 cohort with a new global claim identity; the burned cohort cannot be replaced
 by changing only an output path.
+
+## Node1 independent v2 validation result — 2026-08-07
+
+The replacement cohort and the direct CUDA selector completed on the same clean
+Git implementation `72503adef016a986a1a52e57f85a6f775d98e467`, without an
+evaluator smoke, seed preview, or checkpoint preview:
+
+- pre-CUDA authoring claim
+  `ddac4877cbf33f2f07e94c088e73d9fb1b609218fea64ab7a1d4cbdafd21442b`
+  bound the six new seeds before Newton construction;
+- cohort authoring produced 6/6 oracle successes in 258 world-steps, with zero
+  failure, timeout, safety, reward, or collision-overflow events; its manifest
+  SHA-256 is
+  `d363665406b29f54c82e62649791289b0ac083ba3adc769ba0dc30e9101f9d72`
+  and composite corpus SHA-256 is
+  `8d9c54fc06c2e4b83beb21fbb9c4395781f737304a7429903b705cf3cd143913`;
+- the selection claim ID is
+  `e8e2518d6447474b46e68f0e5601b7f8fb4e43cb3f4f904ddf1c0ebc43b26abe`,
+  with receipt SHA-256
+  `78859604f9299587be25cc3a76c0e92cccc3c043ab59811161d406a8ed4a0834`;
+- all 60 registered models completed the fixed six-reset by four-noise rollout
+  budget. Steps 2,000--5,000 form the earliest longest eligible run, while
+  steps 8,000 and 10,000 are isolated eligible points;
+- the registered lower-median rule selected step 3,500 and retained all three
+  training seeds. Each seed achieved 24/24 success, every reset achieved 12/12
+  across the family, and safety/integrity/oracle-disagreement counts were all
+  zero;
+- the selection SHA-256 is
+  `815befdd361665ede51c1f5ffc1b2773a8603d6e803435bbe1cb7e726304223d`
+  and audit SHA-256 is
+  `3155197b4ddb928c897e7c7626364611572258674c75b0b2d061c11654bbb1f6`.
+
+The validation curve is not monotonic: success improved from 47/72 at step 500
+to 66/72 at step 1,500, reached a stable 71--72/72 interval at steps
+2,000--5,000, and then showed safety regressions at several later checkpoints.
+This is why the fixed selector chose step 3,500 rather than the final step.
+Offline action MSE and physical RMSE remain descriptive only and did not enter
+admission or ranking.
+
+The retained artifacts are:
+
+```text
+cohort:   /home/user/project/RExPolicy-grasp-lift-training/outputs/stage0/grasp-lift-validation-cohort-v2-20260807-a
+selection:/home/user/project/RExPolicy-grasp-lift-training/outputs/stage0/grasp-lift-no-z-selection-v2-20260807-a
+```
+
+Fresh verification passed the dedicated selection verifier, file-byte hashes,
+audit self-hash, authoring claim, selection claim receipt, candidate inventory,
+and held-out read scope. The locked test remains absent. The result supports
+feasibility only for this state-only task and independent six-reset validation
+cohort; it is not evidence for images, `scene.glb`, language grounding, broad
+task generalization, or a production VLA.
 
 ## Frozen node1 no-z direct-training protocol — 2026-08-07
 
