@@ -1,56 +1,56 @@
 # RExPolicy Roadmap
 
-The roadmap separates the runnable minimum flywheel from the intended
-multi-task, multi-reward system. The repository now contains the Phase 1 Reach
-flywheel plus fail-closed control and data planes for TaskSpec v2, reward-free
-ledgers and rebuildable views, sandboxed provider-attested automatic authoring,
-signed lifecycle transitions, and offline quality-diversity replay planning.
-The active learner remains the fixed Reach path: authored candidates do not
-enter the registry or training until independent runtime and sealed-audit
-evidence, signed activation at a generation boundary, and runtime integration
-gates pass.
+This file is the single source of truth for delivery order, activation status,
+and release gates. Documents elsewhere in `roadmap/` provide contracts,
+operations, historical evidence, or the intended end state; they do not define
+independent product routes.
 
-An additional, default-off v2 track now implements the first Success Manifold
-MVP: successful-future graph construction, representation learning, a
-state-conditioned mode selector, diagnostic latent projection, Flow-DiT token
-conditioning, and bounded online latent-memory expansion. It is intentionally
-isolated from the v1 learner until a trained bundle is checksum-pinned at
-launch. See [success_manifold_v2.md](success_manifold_v2.md).
+## Canonical status vocabulary
 
-## Current research sequence
+- **Implemented** means the repository contains the code and focused contract
+  tests.
+- **Runtime-validated** means the phase-specific GPU, resume, determinism, and
+  held-out gates have passed with archived evidence on the canonical artifacts.
+- **Active** means the capability is enabled in the training path at a clean
+  generation boundary.
+- **Complete** means all exit gates for that phase have passed. Code being
+  implemented ahead of its phase does not make that phase active or complete.
 
-The scientific validation sequence is now explicitly separated from the
-production flywheel phases below:
+Phases activate in the order below. Later-phase code may be developed and
+tested in isolation, but it must remain default-off and cannot change the active
+learner until all preceding activation gates pass.
 
-1. **Stage 0 — State-only Success Manifold Validation (current priority).**
-   Use Newton state, a simulator oracle, future-trajectory latents, a
-   state-conditioned selector, and a lightweight conditional Flow-DiT. Do not
-   load images, language, GR00T, Transformers, or the frozen VLM. First close
-   Reach end to end; Push and Pick require their own verified oracles and reset
-   diversity before they are acceptance tasks.
-2. **Stage 1 — GR00T visual embedding.** Replace the Stage 0 state condition
-   adapter with frozen visual embeddings while keeping the validated manifold,
-   data, evaluation, and conditional-policy contracts.
-3. **Stage 2 — Full GR00T VLA + Success Manifold Guided Flow-DiT.** Add visual
-   and language grounding only after Stage 0 and Stage 1 pass held-out gates.
-4. **Stage 3 — Successor Representation + Active Exploration.** Activate
-   successor calibration, latent occupancy, active sampling, and curriculum
-   only after the base representation is shown to be non-collapsed and useful.
+```text
+Phase 0 baseline
+    -> Phase 1 minimum Reach flywheel
+    -> Phase 2 Success Manifold conditioning
+    -> Phase 3 visual-language grounding
+    -> Phase 4 task, reward, and replay expansion
+    -> Phase 5 autonomous task authoring
+    -> final multi-task system
+```
 
-The recently added successor, occupancy, temperature, shadow-scoring, and
-active-sampling components remain strict default-off Stage 3 candidates. They
-are not evidence that the Stage 0 hypothesis has been validated. See
-[stage0_success_manifold_validation.md](stage0_success_manifold_validation.md)
-for the implementation order and acceptance gates.
+## Canonical baseline and operating configuration
 
-Stage 0's Reach engineering path is now implemented and has completed a
-64-world node1 CUDA smoke, success-only window construction, three component
-training phases, and exact checkpoint recovery. Its first short-run latent
-effective rank was 1.09, so the representation-quality gate remains open; the
-next work is same-reset multi-mode data and fixed-budget conditional rollouts,
-not Stage 1 activation.
+- Base policy: `checkpoints/groot/checkpoint-200000/`.
+- Frozen VLM: `checkpoints/nvidia/Cosmos-Reason2-2B/`.
+- Active task: `reach_green_cap/v1`.
+- Current learner: the unconditioned v1 Flow-DiT flywheel.
+- Default local/single-rank functional configuration: `K=2`, `H=2`.
+- Phase 1 hardware acceptance: the node3 two-rank `K=2`, `H=1` smoke,
+  fresh-process resume, and staged `K=4`, `H=2`, 10→20 generation soak defined in
+  [bootstrap_ddp.md](bootstrap_ddp.md).
 
-## Phase 0 — migrated baseline
+Any run that uses another base checkpoint is an explicitly named experiment. It
+cannot provide canonical release or before/after evidence without being rerun
+against `checkpoint-200000`.
+
+The node1 `K=256` measurements are capacity evidence for a 72 GB single-GPU
+configuration. `K=256` is not the repository default, does not replace node3
+acceptance, and cannot become active until its own H=2 release ladder passes.
+See [node1_gpu_capacity_20260804.md](node1_gpu_capacity_20260804.md).
+
+## Phase 0 - migrated baseline
 
 Status: **complete**.
 
@@ -60,17 +60,16 @@ Status: **complete**.
 - Validated 19D EEF + Linker L10 action representation.
 - Required compact assets and focused runtime tests.
 
-## Phase 1 — minimum Reach flywheel
+Migration history is recorded in
+[migration_inventory.md](migration_inventory.md).
 
-Status: **implemented; node3 two-GPU and soak acceptance remain runtime gates**.
+## Phase 1 - minimum Reach flywheel
 
-The fixed `reach_green_cap/v1` task establishes whether the existing Flow-DiT
-can improve using its own Newton-scored chunks. Its instruction asks the open
-right hand to approach a safe pre-grasp point beside the green bottle cap
-without touching or moving the bottle. Only EEF XYZ is effective; orientation,
-hand, and arm targets remain fixed.
+Status: **implemented and active, but not complete; node3 two-GPU,
+fresh-process resume, and staged soak acceptance remain open**.
 
-The implementation provides:
+The fixed `reach_green_cap/v1` task tests whether the existing Flow-DiT can
+improve using its own Newton-scored chunks. The implementation provides:
 
 - same-state K-way action sampling, within-state advantages, and success-first
   continuation;
@@ -84,108 +83,158 @@ The implementation provides:
   stop-at-generation-boundary control;
 - sealed K=1 held-out evaluation and non-regression gating.
 
-No PPO, GAE, critic, full-action teacher, compact replacement policy, or human
-pretraining dataset is required. See [minimum_flywheel.md](minimum_flywheel.md)
-for the learning contract and [bootstrap_ddp.md](bootstrap_ddp.md) for the
-node3 validation protocol. Deterministic base-versus-generation MP4 evidence
-can be produced without touching the training archive by following
-[rollout_recorder.md](rollout_recorder.md).
+No PPO, GAE, critic, full-action teacher, compact replacement policy, or new
+human pretraining dataset is required. The normative learning contract is
+[minimum_flywheel.md](minimum_flywheel.md); the only Phase 1 acceptance protocol
+is [bootstrap_ddp.md](bootstrap_ddp.md). Read-only base-versus-generation video
+evidence follows [rollout_recorder.md](rollout_recorder.md).
 
-## Phase 2 — visual-language grounding
+Phase 1 exits only after the canonical node3 smoke, resume check, and staged
+soak pass with `checkpoint-200000` and archived manifests. A successful node1
+capacity probe or unit-test run does not close this gate.
 
-Status: **not implemented; multi-target frozen-VLM grounding remains a
-prerequisite gate**.
+## Phase 2 - Success Manifold conditioning
+
+Status: **SM-1 through SM-5 code is implemented and default-off; the phase is
+not runtime-validated or active**.
+
+`RExPolicy v2` is the architecture name for this phase, not a second roadmap.
+It adds an optional successful-future conditioning path to the Phase 1 learner:
+
+- **SM-1:** metadata-only `SuccessExperienceGraph` construction and fixed-offset
+  future-window materialization;
+- **SM-2:** future encoder and state-to-success-mode selector training code;
+- **SM-3:** diagnostic-only latent projection;
+- **SM-4:** one-token Flow-DiT conditioning with mixed v1/v2 batch support;
+- **SM-5:** simulator-verified bounded latent-memory expansion.
+
+The active v1 path remains unchanged when the feature flags are absent. Phase 2
+cannot activate until Phase 1 is complete and the following gates pass:
+
+1. build and audit a real successful-window corpus from canonical Phase 1 data;
+2. train and evaluate the encoder and selector on held-out real data;
+3. export and checksum-pin a deployment bundle;
+4. pass conditioning shadow mode, single-GPU smoke, resume equivalence, node3
+   two-GPU smoke, and the staged non-regression soak;
+5. enable bounded latent memory only after selector-only metrics are stable.
+
+Diversity/progress reward shaping, successor representation, milestone windows,
+automatic bundle promotion, and corpus-scale acceptance evidence remain
+deferred. The detailed contract is
+[success_manifold_v2.md](success_manifold_v2.md).
+
+### State-only Stage 0 research workstream
+
+The repository also retains a state-only Newton validation harness as isolated
+Phase 2 pre-activation research. It does not alter the active learner or the
+ordered phase sequence. It removes images, language, GR00T, and the frozen VLM
+to test success-oracle data generation and lightweight conditional-policy
+hypotheses.
+
+Its reward-free Grasp-Lift authoring corpus and train-only artifact are
+accepted. The three-seed no-z learner, checkpoint/resume contract, one-time
+validation claim, exact Newton evaluator, and pure selector are implemented,
+but long training and selection remain runtime work. Its results are supporting
+research evidence only and cannot close or activate Phase 2. See
+[stage0_success_manifold_validation.md](stage0_success_manifold_validation.md).
+
+## Phase 3 - visual-language grounding
+
+Status: **not implemented**.
 
 - Add two visually distinguishable targets in the same scene.
-- Make the instruction, not simulator metadata exposed to the policy, select
-  the target.
+- Make the instruction, rather than simulator metadata exposed to the policy,
+  select the target.
 - Add equivalent paraphrases and counterfactual target instructions.
 - Test whether the frozen VLM preserves identity and pose before introducing an
   adapter or limited unfreezing.
 
-## Phase 3 — task and behavior expansion
+Phase 3 exits only after multi-target K=1 held-out grounding passes without
+regressing the completed Phase 1 and Phase 2 gates.
 
-Status: **partial; ledger and offline replay-control infrastructure are
-implemented, but active multi-task training remains pending**.
+## Phase 4 - task, reward, and replay expansion
 
-- Extend the curriculum from Reach to pre-grasp, grasp, lift, transport, and
-  place.
-- Add a deliberately diverse set of reward profiles for the same canonical
-  success predicate.
-- Implemented: compile reward-free Event Ledgers into exact success behavior
-  descriptors, persist immutable quality-diversity indexes, explicitly rebase
-  their cursors, and plan deterministic Success Archive replay by behavior
-  cell, reward profile, and initial-state group without making valid successes
-  ineligible.
-- Pending: persist that quality-balanced state in trainer checkpoints and make
-  the online trainer consume it. The active Phase 1 path remains round-robin.
-- Add physics, camera, object, and scene randomization only after fixed-task
+Status: **supporting ledger and offline replay-control code is implemented;
+active multi-task training is not implemented**.
+
+Implemented ahead of activation:
+
+- reward-free Event Ledgers and rebuildable reward/process views;
+- exact success behavior descriptors and immutable quality-diversity indexes;
+- deterministic Success Archive planning by behavior cell, reward profile, and
+  initial-state group.
+
+Still required:
+
+- extend the curriculum from Reach to pre-grasp, grasp, lift, transport, and
+  place;
+- add deliberately diverse reward profiles for the same canonical success
+  predicate;
+- persist quality-balanced replay state in trainer checkpoints and make the
+  online trainer consume it;
+- add physics, camera, object, and scene randomization only after fixed-task
   replay remains deterministic.
 
-## Phase 4 — autonomous task authoring
+Until Phase 4 activates, Phase 1 historical replay remains round-robin and no
+offline QD plan may silently affect training.
 
-Status: **partial; production-safe authoring to static quarantine and signed
-lifecycle primitives are implemented, but no authored candidate is active or
-consumed by training**.
+## Phase 5 - autonomous task authoring
 
-Implemented:
+Status: **authoring-to-quarantine and lifecycle primitives are implemented;
+provider-authored tasks are not active or consumed by training**.
 
-- bind a public brief, curriculum snapshot, pre-authoring audit plan, allowed
-  capabilities/processes, parent contracts, provider/model policy, and all
-  compiler policies before a proposal is requested;
-- execute a pinned proposer in Bubblewrap, require an Ed25519 provider receipt,
-  persist one resumable job chain, and compile/repair only strict canonical
-  responses into `quarantined_static` candidates;
-- keep collection/training, promotion, and sealed-audit instruction
-  commitments separate;
-- persist signed admission and activation lifecycle events with CAS heads and
-  an independently located monotonic anchor;
-- rebuild reward, process-label, and quality-diversity views from immutable raw
-  ledger facts without deleting the Success Archive.
+Implemented ahead of activation:
 
-Pending operational gates:
+- pinned, sandboxed, provider-attested proposal execution;
+- strict compilation and repair into `quarantined_static` candidates;
+- separate collection, promotion, and sealed-audit instruction commitments;
+- signed admission and generation-boundary activation events with CAS heads and
+  an independently located monotonic anchor.
 
-- run and archive a real approved provider job rather than the local signed
-  integration fixture;
-- generate independent dynamic-runtime, capability-claim, episode-result, and
-  sealed-audit certifications for a candidate;
+Still required:
+
+- archive a real approved provider job rather than a local fixture;
+- produce independent dynamic-runtime, capability, episode-result, and sealed
+  audit certifications;
 - deploy independently administered lifecycle and generation-boundary signing
-  authorities, then exercise a real `ADMITTED_DORMANT` to `ACTIVE` transition;
-- integrate the active registry, authored task runtime, reward populations,
-  quality-balanced checkpoint state, and online reward-gap discovery with the
-  trainer.
+  authorities;
+- integrate the active task registry and authored runtime with the Phase 4
+  multi-task trainer;
+- exercise a real `ADMITTED_DORMANT` to `ACTIVE` transition at a clean
+  generation boundary.
 
-See [automatic_task_authoring.md](automatic_task_authoring.md) for the exact
-safety boundary and execution contract.
+The exact trust boundary is in
+[automatic_task_authoring.md](automatic_task_authoring.md).
 
-## RExPolicy v2 — Success Manifold Guided Flow-DiT
+`TaskSpec v2` is a task-contract schema version. It does not name another
+RExPolicy delivery route.
 
-Status: **MVP phases 1–5 implemented behind strict opt-in flags; corpus-scale
-training and node3 acceptance remain runtime gates**.
-
-- compile multiple verified terminal paths into metadata-only
-  SuccessExperience graphs and fixed-offset future windows;
-- train a Transformer future encoder with masked reconstruction,
-  multi-positive InfoNCE, variance, and covariance objectives;
-- train a Gaussian state-to-success-mode selector and export a checksum-pinned
-  frozen runtime bundle;
-- inspect the learned geometry with deterministic PCA or optional UMAP/t-SNE,
-  explicitly marked diagnostic-only;
-- append one projected success token to Flow-DiT context and preserve mixed
-  historical v1 samples;
-- sample selector and bounded-memory modes online, admit only simulator-verified
-  successful modes, and checkpoint per-rank memory state.
-
-Diversity/progress reward shaping and successor representation are deferred
-until the representation and selector pass held-out real-corpus gates. This is
-an explicit staging boundary, not an implicit activation of new rewards.
-
-The v2/full implementation is preserved while Stage 0 becomes the active
-validation path. No Stage 0 module may silently import or mutate the v2/full
-runtime, replay graph, or checkpoint state.
+The v2/full implementation remains governed by the canonical phases above.
+No isolated Stage 0 module may silently import or mutate the active runtime,
+replay graph, or checkpoint state.
 
 ## Final system
 
-The stable end-state decisions—unified success semantics, intentionally
-non-uniform rewards, replay instead of stored video, and held-out model
-promotion—are preserved in [final_flywheel.md](final_flywheel.md).
+The intended end state combines the completed phases above: unified success and
+safety semantics, intentionally non-uniform rewards, metadata-only replay,
+quality-balanced sampling, and held-out model promotion. It remains a target,
+not an independently executable roadmap. See
+[final_flywheel.md](final_flywheel.md).
+
+## Document authority
+
+| Document | Role |
+| --- | --- |
+| `README.md` | Short repository overview; must mirror this roadmap's active status. |
+| `minimum_flywheel.md` | Normative Phase 1 learning contract. |
+| `bootstrap_ddp.md` | Normative Phase 1 hardware acceptance protocol. |
+| `success_manifold_v2.md` | Normative Phase 2 design and activation gates. |
+| `stage0_success_manifold_validation.md` | Supporting Phase 2 research evidence and node1 execution protocol. |
+| `automatic_task_authoring.md` | Normative Phase 5 trust boundary. |
+| `node1_gpu_capacity_20260804.md` | Dated capacity evidence; not a release route or default configuration. |
+| `rollout_recorder.md` | Read-only evidence procedure. |
+| `migration_inventory.md` | Historical migration record. |
+| `final_flywheel.md` | Aspirational end-state design. |
+
+When a phase, default, or release gate changes, update this file first and then
+update the affected supporting document and top-level README in the same change.

@@ -1,63 +1,49 @@
 # RExPolicy
 
-RExPolicy is a Newton + GR00T rollout-experience policy project. Its minimum
-data flywheel keeps the pretrained GR00T visual-language backbone frozen,
-samples action chunks from the existing Flow-DiT, compares those chunks from
-the same simulator state, and updates Flow-DiT from simulator-selected
-experience. It does not require PPO, GAE, a critic, a state-policy teacher, or
-new human demonstrations.
+RExPolicy is a Newton + GR00T rollout-experience policy project. It follows one
+ordered delivery route defined in [the canonical roadmap](roadmap/README.md).
+The only current learner is the Phase 1 `reach_green_cap/v1` flywheel: it keeps
+the pretrained GR00T visual-language backbone frozen, samples action chunks
+from the existing Flow-DiT, compares those chunks from the same simulator
+state, and updates Flow-DiT from simulator-selected experience. It does not
+require PPO, GAE, a critic, a state-policy teacher, or new human demonstrations.
 
-RExPolicy v2 adds an opt-in Success Manifold path to that flywheel. It derives
-future windows from simulator-verified successes, learns a compact family of
-successful futures, samples a reachable success mode from the current state,
-and conditions the existing Flow-DiT with one success token. The v1 path is
-unchanged when the feature flags are absent.
+Phase 1 code is implemented, but the phase is not complete until the canonical
+node3 two-GPU smoke, fresh-process resume, and staged 10→20 generation soak
+pass. The canonical base policy is
+`checkpoints/groot/checkpoint-200000/`; runs using another base checkpoint are
+experiments rather than release evidence.
 
-The current research priority is **RExPolicy Stage 0**, an independent,
-state-only Success Manifold validation path. Stage 0 keeps Newton and the
-automatic success/failure oracle, but deliberately removes images, language,
-the GR00T processor, and the frozen VLM. Its purpose is to test whether
-parallel self-interaction can discover multiple successful trajectory modes
-and condition a lightweight Flow-DiT before adding VLA complexity. The
-existing v1/v2/full path remains available and unchanged; successor,
-occupancy, and active-exploration work stays default-off until the Stage 0
-scientific gates pass.
+`RExPolicy v2` names Phase 2 of the same roadmap, not a parallel route. Its
+Success Manifold graph, encoder, selector, diagnostic projection, Flow-DiT token
+conditioning, and bounded latent-memory code are implemented behind default-off
+contracts. Phase 2 is neither runtime-validated nor active: it still requires a
+real canonical success corpus, a trained checksum-pinned bundle, shadow-mode
+evaluation, and the prescribed GPU acceptance gates. With no Phase 2 flags, the
+Phase 1 path is unchanged.
 
-The Stage 0 Reach engineering loop is runnable on node1: 64 camera-free
-Newton worlds collect materialized trajectories, train the independent future
-encoder, selector, and state/latent-conditioned Flow-DiT, then atomically save
-and reload all components. The first 20-step smoke passed the engineering
-checks but not the non-collapse research gate (effective latent rank 1.09), so
-it is not yet evidence of convergence or multimodal success.
-
-The active Stage 0 task is now reward-free Grasp-Lift. Its close-at-step-7
-authoring corpus and train-only artifact are accepted; the fixed no-z learner,
+The repository also contains an independent, state-only Stage 0 scientific
+validation harness. It is not the canonical active learner or a substitute for
+the ordered release gates above. Its reward-free Grasp-Lift close-at-step-7
+corpus and train-only artifact are accepted, and its fixed no-z learner,
 checkpoint/resume path, tensor-free three-run preflight, one-time validation
-claim, exact Newton rollout evaluator, and pure checkpoint selector are
-implemented. The remaining runtime order is strict: pass the 24-world
-train-reset CUDA smoke on one clean commit, complete all three 10,000-step
-training seeds on that same commit, then consume the six-member validation
-cohort exactly once. No locked test exists, and validation has not established
-convergence or generalization. The exact node1 run protocol is recorded in
-[Stage 0 Success Manifold Validation](roadmap/stage0_success_manifold_validation.md#frozen-node1-no-z-learning-protocol--2026-08-07).
+claim, exact Newton evaluator, and checkpoint selector are implemented. The
+three 10,000-step training seeds and one-time validation selection remain
+runtime work; no locked test exists and no convergence or generalization claim
+has been established.
 
-The repository also contains a fail-closed TaskSpec v2 control plane: sealed
-task and process contracts, reward-free Event Ledgers and rebuildable views,
-sandboxed provider-attested automatic authoring to static quarantine, signed
-lifecycle persistence, and immutable quality-diversity indexes. These
-components do not silently change the active learner. A candidate needs
-independent runtime and sealed-audit evidence plus signed generation-boundary
-activation before training may consume it.
+The repository also contains later-phase infrastructure developed ahead of
+activation: reward-free Event Ledgers, rebuildable quality-diversity views, a
+fail-closed TaskSpec control plane, provider-attested authoring to static
+quarantine, and signed lifecycle persistence. None of it may alter training
+until the preceding roadmap phases and its own activation gates pass.
 
-## Current system
+## Current status
 
-The repository contains:
+### Active Phase 1 implementation
 
-- a strict 79D right-base-frame Stage 0 state schema and a no-image Newton
-  adapter whose independent Reach oracle is checked against simulator flags;
-- immutable Stage 0 success/failure/timeout trajectory shards, grouped future
-  windows, independent PyTorch models/trainers, latent diagnostics, and
-  multi-component atomic checkpoints;
+The runnable Phase 1 path contains:
+
 - the batched Newton Nero + Linker L10 environment and the validated 19D action
   representation;
 - the versioned `reach_green_cap/v1` task, whose instruction, reward, success,
@@ -71,18 +57,22 @@ The repository contains:
   unequal rank-local sample counts and 100% current-generation sample coverage;
 - an append-only, metadata-only Success Archive with deterministic
   cross-generation round-robin replay;
-- metadata-only SuccessExperience graphs whose future windows are rebuilt from
-  fingerprint-bound Event Ledgers instead of storing observations or actions;
-- an optional Success Manifold encoder, state-conditioned mode selector,
-  bounded successful-latent memory, and checksum-pinned deployment bundle;
-- optional Flow-DiT success-token conditioning with mixed v1/v2 batch support;
-- an explicit quality-balanced archive planning path, bound to immutable
-  behavior descriptors and external replay state, which is not yet wired into
-  the Phase 1 trainer checkpoint;
 - atomic full-state checkpoints, strict resume validation, per-rank logs,
   heartbeat/status files, and periodic GPU monitoring;
 - a fixed K=1 held-out non-regression gate that evaluates the raw policy without
   same-state branch search.
+
+### Implemented but inactive
+
+- the independent Stage 0 state-only Newton adapter, immutable trajectory
+  corpus, no-z Grasp-Lift learner, and one-time selection path;
+- Phase 2 metadata-only SuccessExperience graphs, future encoder, selector,
+  diagnostic projection, optional success-token conditioning, and bounded
+  successful-latent memory;
+- Phase 4 quality-balanced archive planning bound to immutable behavior
+  descriptors and external replay state, which is not yet wired into the
+  trainer checkpoint;
+- Phase 5 authoring, quarantine, audit, and lifecycle control-plane primitives.
 
 Only executed effective actions are training targets. Episode JSONL stores
 reset recipes, action prefixes, seeds, provenance, task/reward identifiers, and
@@ -92,16 +82,15 @@ trajectories, or unexecuted action tails. Replaying a recipe in Newton
 reconstructs the state and renders observations when historical experience is
 used again.
 
-See [the roadmap](roadmap/README.md), the [minimum flywheel
-contract](roadmap/minimum_flywheel.md), the [DDP operations
-guide](roadmap/bootstrap_ddp.md), and the preserved [final flywheel
-design](roadmap/final_flywheel.md). The production-safe authoring boundary and
-remaining activation gates are documented in [automatic task
-authoring](roadmap/automatic_task_authoring.md). The v2 architecture, rollout
-flags, staged training contract, and deliberately deferred work are documented
-in [Success Manifold v2](roadmap/success_manifold_v2.md).
-The state-only validation architecture and phased implementation gates are in
-[Stage 0 Success Manifold Validation](roadmap/stage0_success_manifold_validation.md).
+The [canonical roadmap](roadmap/README.md) is authoritative for phase order,
+status, defaults, and release gates. Supporting details live in the [minimum
+flywheel contract](roadmap/minimum_flywheel.md), [DDP operations
+guide](roadmap/bootstrap_ddp.md), [Success Manifold Phase 2
+contract](roadmap/success_manifold_v2.md), [automatic task authoring trust
+boundary](roadmap/automatic_task_authoring.md), and preserved [final flywheel
+design](roadmap/final_flywheel.md). The isolated state-only research harness is
+documented in [Stage 0 Success Manifold
+Validation](roadmap/stage0_success_manifold_validation.md).
 
 ## Environment
 
@@ -170,6 +159,10 @@ generation soak are specified in
 engineering closure, not policy improvement; K=1 held-out metrics determine
 whether a candidate is retained as `last-good`.
 
+The dated [node1 capacity report](roadmap/node1_gpu_capacity_20260804.md) is
+scaling evidence only. Its K=256 candidate and historical noncanonical
+checkpoint do not replace the Phase 1 defaults or node3 acceptance gates.
+
 Record a deterministic, inference-only base or DiT-generation rollout without
 creating an optimizer or writing the training archive:
 
@@ -204,7 +197,7 @@ tools/                  Runtime entry points and unittest suites
 debug/                  Migrated scene construction runtime
 assets/                 Robot, hand, camera, and bottle assets
 configs/                Scene physics configuration
-roadmap/                Runnable protocol and long-term design
+roadmap/                Canonical release sequence, contracts, and evidence
 ```
 
 The migration history and boundaries are recorded in

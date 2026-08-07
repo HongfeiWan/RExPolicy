@@ -2,7 +2,7 @@
 
 ## Immutable base weights
 
-The initial GR00T policy and Cosmos VLM are stored locally under:
+The canonical roadmap base policy and Cosmos VLM are stored locally under:
 
 ```text
 checkpoints/groot/checkpoint-200000/
@@ -13,6 +13,11 @@ They are ignored by Git and must be copied or downloaded separately on a new
 machine. The runtime also accepts `GROOT_POLICY_CHECKPOINT` and
 `GROOT_VLM_MODEL`. A flywheel run references these immutable artifacts by
 resolved path and hash; it never duplicates the frozen Cosmos VLM.
+
+`checkpoint-200000` is the only canonical release baseline. A different policy
+checkpoint is permitted for an explicitly named experiment, but its results do
+not close roadmap gates and must not be compared to canonical generations as if
+they shared the same base.
 
 ## Resumable flywheel checkpoints
 

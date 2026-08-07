@@ -1,24 +1,41 @@
 # RExPolicy v2: Success Manifold Guided Flow-DiT
 
-The v2/full path documented here is preserved. The current scientific priority
-is the independent, state-only [Stage 0 validation
-path](stage0_success_manifold_validation.md). Successor, occupancy, and active
-exploration remain default-off Stage 3 candidates until Stage 0 establishes
-that the representation is non-collapsed and useful.
+Canonical roadmap position: **Phase 2**.
 
-Status: **MVP phases 1–5 implemented behind default-off contracts**.
+The independent, state-only [Stage 0 validation
+harness](stage0_success_manifold_validation.md) is preserved as isolated
+research infrastructure. Its results do not activate Phase 2 or replace the
+canonical phase gates.
 
-RExPolicy v2 replaces a single hand-designed reward direction with an explicit
-distribution over simulator-verified successful futures. The learned latent is
-not itself a success oracle. Newton and the sealed task contract still decide
-whether an executed trajectory succeeds; the latent only tells Flow-DiT which
-reachable kind of successful continuation to attempt.
+Status: **implementation components SM-1 through SM-5 are present behind
+default-off contracts; Phase 2 is not runtime-validated or active**.
+
+The phase order and activation status are governed by
+[README.md](README.md). `RExPolicy v2` is the architecture name for this phase,
+not a parallel delivery route.
+
+When Phase 2 is enabled after acceptance, RExPolicy v2 adds an explicit
+distribution over simulator-verified successful futures to the Phase 1 learner.
+It does not replace the canonical success predicate or create another reward
+oracle. Newton and the sealed task contract still decide whether an executed
+trajectory succeeds; the latent only tells Flow-DiT which reachable kind of
+successful continuation to attempt.
 
 The v1 path remains the compatibility baseline. No v2 component runs unless a
 caller either enables graph publication or supplies a checksum-pinned Success
 Manifold deployment bundle.
 
-## Data and trust boundary
+The implementation labels used below are:
+
+- **SM-1:** successful-future graph and window materialization;
+- **SM-2:** future encoder and state-to-mode selector training;
+- **SM-3:** diagnostic latent projection;
+- **SM-4:** Flow-DiT success-token conditioning;
+- **SM-5:** simulator-verified bounded online latent memory.
+
+These are Phase 2 component labels, not global roadmap phases.
+
+## SM-1 - data and trust boundary
 
 The immutable Episode Archive, Event Ledger, and committed SuccessReferences
 remain the source of truth. `SuccessExperienceGraph` is a derived,
@@ -41,7 +58,7 @@ offsets are used in this MVP because the current ledger does not yet contain a
 sealed gripper/EEF-velocity milestone schema. A heuristic milestone fallback
 would make the representation contract ambiguous and is therefore rejected.
 
-## Learned representation
+## SM-2 - learned representation
 
 `FutureTrajectoryEncoder` is a Transformer encoder over current state,
 executed action, future state, and optional visual features. It emits one
@@ -74,7 +91,7 @@ Optimizer state, global steps, and stage counters are resumable. Export writes
 only the encoder and selector inference weights plus their complete config to
 an atomic deployment bundle and returns its SHA-256.
 
-## Diagnostic projection
+## SM-3 - diagnostic projection
 
 `tools/project_success_manifold.py` validates a content-addressed latent
 dataset and produces a two-dimensional projection plus SVG. PCA is
@@ -83,7 +100,7 @@ records are marked `diagnostic_only` and bind both dataset and projection
 policy fingerprints. They cannot be consumed as training labels, rewards, or
 activation evidence.
 
-## Flow-DiT conditioning
+## SM-4 - Flow-DiT conditioning
 
 When enabled, the frozen encoder condition head projects one success latent to
 the GR00T backbone width, and `GrootFlowDitPolicy` appends that token after
@@ -96,7 +113,7 @@ Historical v1 samples may omit the token. The collator accepts mixed v1/v2
 batches and applies success conditioning only where present. With conditioning
 disabled, providing a token is a contract error rather than a silent no-op.
 
-## Online expansion
+## SM-5 - online expansion
 
 At each same-state branch point, the frozen selector samples one mode per
 candidate world. An optional bounded number of worlds may instead reuse modes
@@ -124,7 +141,7 @@ same-state candidates. Graph horizons and stride must be positive, and the
 action horizon cannot exceed the future horizon. Omitting all v2 flags gives
 the original v1 manifest, metrics, checkpoint, sampling, and training path.
 
-## Staged rollout order
+## Phase 2 activation order
 
 The safe activation order is:
 
@@ -144,10 +161,10 @@ archive drift, or fingerprint drift fails closed. No automatic fallback to an
 unconditioned or differently conditioned policy is allowed inside an enabled
 run.
 
-## Deliberately deferred phases
+## Deferred Phase 2 work
 
-The following are not part of the first MVP and must not be inferred from the
-presence of the modules above:
+The following are not part of the implemented SM-1 through SM-5 code boundary
+and must not be inferred from the presence of the modules above:
 
 - diversity/progress reward shaping derived from latent occupancy;
 - a successor-representation or successor-feature prediction head;

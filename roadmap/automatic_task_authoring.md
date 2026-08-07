@@ -1,5 +1,11 @@
 # Automatic Task Authoring
 
+Canonical roadmap position: **Phase 5**.
+
+Status: **authoring-to-quarantine and lifecycle primitives are implemented;
+provider-authored tasks are not active or consumed by training**. Phase order
+and activation status are governed by [README.md](README.md).
+
 This document defines the implemented production boundary for automatic
 TaskSpec authoring. The boundary ends at a statically validated,
 `quarantined_static` candidate. Authoring never grants admission, activation,
