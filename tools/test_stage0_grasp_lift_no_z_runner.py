@@ -11,6 +11,7 @@ from typing import Any
 
 from rexpolicy.stage0.long_run import atomic_write_json
 from tools.run_stage0_grasp_lift_no_z import (
+    _begin_heartbeat_attempt,
     _checkpoint_extra,
     _distributed_require_identical_contract,
     _distributed_setup_directory,
@@ -86,6 +87,48 @@ def _contract() -> dict[str, Any]:
 
 
 class GraspLiftNoZRunnerTest(unittest.TestCase):
+    def test_heartbeat_resume_is_an_explicit_new_attempt(self) -> None:
+        from rexpolicy.stage0.long_run import AtomicJsonlLog
+
+        with tempfile.TemporaryDirectory() as temporary:
+            log = AtomicJsonlLog(Path(temporary) / "heartbeat.jsonl")
+            self.assertEqual(
+                _begin_heartbeat_attempt(
+                    log,
+                    resume=False,
+                    global_step=0,
+                    training_seed=31001,
+                    world_size=1,
+                ),
+                0,
+            )
+            log.append(
+                {
+                    "attempt_index": 0,
+                    "event": "training",
+                    "global_step": 700,
+                    "schema_id": (
+                        "rexpolicy/stage0-grasp-lift-no-z-heartbeat/v2"
+                    ),
+                }
+            )
+            self.assertEqual(
+                _begin_heartbeat_attempt(
+                    log,
+                    resume=True,
+                    global_step=500,
+                    training_seed=31001,
+                    world_size=1,
+                ),
+                1,
+            )
+            records = log.records()
+            self.assertEqual(records[-1]["event"], "resume")
+            self.assertEqual(records[-1]["attempt_index"], 1)
+            self.assertEqual(records[-1]["global_step"], 500)
+            self.assertEqual(records[-1]["prior_observed_global_step"], 700)
+            self.assertEqual(records[-1]["resume_from_committed_step"], 500)
+
     def test_distributed_contract_requires_exact_consensus(self) -> None:
         contract = _contract()
         accepted = _Context(

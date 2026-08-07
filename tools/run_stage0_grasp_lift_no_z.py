@@ -224,6 +224,51 @@ def _distributed_metric_means(
     return float(values[0].item()), float(values[1].item())
 
 
+def _begin_heartbeat_attempt(
+    log: Any,
+    *,
+    resume: bool,
+    global_step: int,
+    training_seed: int,
+    world_size: int,
+) -> int:
+    records = log.records()
+    if not resume and records:
+        raise RuntimeError("fresh no-z run already has heartbeat records")
+    attempt_indices: list[int] = []
+    observed_steps: list[int] = []
+    for record in records:
+        if record.get("schema_id") != "rexpolicy/stage0-grasp-lift-no-z-heartbeat/v2":
+            raise RuntimeError("existing no-z heartbeat schema changed")
+        attempt_index = record.get("attempt_index")
+        observed_step = record.get("global_step")
+        if (
+            type(attempt_index) is not int
+            or attempt_index < 0
+            or type(observed_step) is not int
+            or observed_step < 0
+        ):
+            raise RuntimeError("existing no-z heartbeat cursor is invalid")
+        attempt_indices.append(attempt_index)
+        observed_steps.append(observed_step)
+    attempt_index = (max(attempt_indices) + 1) if resume and records else int(resume)
+    log.append(
+        {
+            "attempt_index": attempt_index,
+            "event": "resume" if resume else "start",
+            "global_step": global_step,
+            "prior_observed_global_step": (
+                max(observed_steps) if observed_steps else None
+            ),
+            "resume_from_committed_step": global_step if resume else None,
+            "schema_id": "rexpolicy/stage0-grasp-lift-no-z-heartbeat/v2",
+            "training_seed": training_seed,
+            "world_size": world_size,
+        }
+    )
+    return attempt_index
+
+
 def main() -> None:
     args = _parse_args()
     affinity = _restrict_cpu_threads()
@@ -482,6 +527,13 @@ def main() -> None:
             committed_step = 0
 
         log = AtomicJsonlLog(output / "heartbeat.jsonl")
+        attempt_index = _begin_heartbeat_attempt(
+            log,
+            resume=args.resume,
+            global_step=step,
+            training_seed=args.training_seed,
+            world_size=context.world_size,
+        )
         started = time.perf_counter()
         last_log_time = started
         last_log_step = step
@@ -538,7 +590,9 @@ def main() -> None:
                     )
                     phase_counts[phase] = phase_counts.get(phase, 0) + 1
                 record = {
-                    "elapsed_seconds": now - started,
+                    "attempt_elapsed_seconds": now - started,
+                    "attempt_index": attempt_index,
+                    "event": "training",
                     "global_step": step,
                     "gradient_norm": mean_gradient_norm,
                     "loss": mean_loss,
@@ -546,7 +600,7 @@ def main() -> None:
                     "phase_counts_rank": dict(sorted(phase_counts.items())),
                     "rank": context.rank,
                     "samples_per_second_global_nominal": rate,
-                    "schema_id": "rexpolicy/stage0-grasp-lift-no-z-heartbeat/v1",
+                    "schema_id": "rexpolicy/stage0-grasp-lift-no-z-heartbeat/v2",
                     "training_seed": args.training_seed,
                     "world_size": context.world_size,
                 }
@@ -556,6 +610,7 @@ def main() -> None:
                         output / "status.json",
                         {
                             "complete": False,
+                            "attempt_index": attempt_index,
                             "global_step": step,
                             "last_loss": mean_loss,
                             "schema_id": ("rexpolicy/stage0-grasp-lift-no-z-status/v1"),
@@ -587,6 +642,7 @@ def main() -> None:
         if context.is_main:
             final = {
                 "artifact_sha256": artifact.artifact_sha256,
+                "attempt_index": attempt_index,
                 "complete": True,
                 "final_checkpoint": manager.checkpoint_name(step),
                 "global_step": step,
